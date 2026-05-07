@@ -46,7 +46,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 
 **Responsabilités**
 - Auth.
-- Generate / stream.
+- Generate synchrone minimal d’abord, puis stream si besoin réel.
 - Erreurs provider.
 - Remontée d’usage : tokens, limites, métriques si disponibles.
 
@@ -253,6 +253,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 
 **Standalone si**
 - Un canal peut être ajouté ou retiré sans casser le kernel.
+- Le host web peut rester léger, sans imposer FastAPI tant que les besoins produit n’en dépendent pas.
 
 ---
 

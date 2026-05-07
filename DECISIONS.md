@@ -100,6 +100,12 @@ Règle de base : une session est un point de vue, une branche est un point de vu
    - Favoriser des abstractions simples et composables.
    - Ne pas déplacer dans le code ce qui peut vivre dans un document.
 
+9. **Le host web doit rester mince.**
+   - Le runtime agent reste le centre du système.
+   - Le host web/API est une surface d’accès, pas le cœur produit.
+   - Aucune dépendance à FastAPI n’est requise tant que les besoins restent couverts par un host plus léger.
+   - Le choix d’un framework web doit être justifié par un besoin produit réel, pas par réflexe technique.
+
 ## Règles de design
 
 - Le core définit les contrats.
@@ -131,3 +137,33 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
 ## Mise à jour de ce document
 - Toute décision d’architecture durable doit être ajoutée ici.
 - Si une règle devient fausse, on la corrige explicitement plutôt que de la laisser dériver.
+
+## 2026-05-07 — Session runtime minimal côté kernel
+- Décision : la continuité conversationnelle courte du kernel est portée par une structure de session orientée `turns`, avec rattachement des `ToolResult`, artefacts et résumés dérivés de compaction.
+- Alternatives : stocker directement une simple liste plate de messages, ou déléguer entièrement cet état au host/UI.
+- Pourquoi : le kernel a besoin d’un état de travail court et réutilisable sans connaître les canaux, mais ne doit pas prendre en charge l’historique visible produit.
+- Impact :
+  - le kernel peut préparer un contexte provider cohérent sans dépendre de Telegram/web/CLI ;
+  - les résumés de compaction restent internes au kernel ;
+  - l’historique visible utilisateur doit rester dans `storage/ui_history_store` ou équivalent, hors de cette brique.
+
+## 2026-05-07 — Seuils initiaux de compaction
+- Décision : conserver les seuils initiaux hérités du cadrage précédent tant qu’aucune télémétrie Marius ne justifie mieux.
+- Valeurs :
+  - `trim_threshold = 0.60`
+  - `summarize_threshold = 0.75`
+  - `reset_threshold = 0.90`
+  - `context_window_tokens = 250_000` par défaut
+- Pourquoi : ces seuils sont déjà cohérents avec les attentes de compaction progressive sans suppression de l’historique visible.
+- Impact : le kernel peut signaler `trim`, `summarize` ou `reset` avec une base explicite et testable ; si un provider expose une fenêtre différente, la fenêtre runtime doit primer sur le défaut statique.
+
+## 2026-05-07 — Répartition des fichiers Markdown de contexte
+- Décision : séparer explicitement l’identité de l’agent, le contexte humain durable et le contexte projet.
+- Répartition :
+  - `SOUL.md` = identité, ton, posture de l’agent ;
+  - `USER.md` = contexte humain durable ;
+  - `AGENTS.md` = conventions de travail par projet ;
+  - `DECISIONS.md` = choix durables ;
+  - `ROADMAP.md` = checklist vivante.
+- Pourquoi : éviter que `AGENTS.md` devienne un fourre-tout et garder un assemblage de contexte lisible par nature.
+- Impact : le futur `context_builder` devra assembler ces couches comme des sources distinctes ; les branches ciblées réutilisent ces conventions sans créer un nouveau type de fichier tant que ce n’est pas nécessaire.

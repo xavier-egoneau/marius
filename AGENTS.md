@@ -21,6 +21,9 @@ Marius doit rester un système agentique modulaire, lisible et réutilisable.
 - Les fichiers Markdown portent les intentions et les règles.
 - Le code porte l’exécution.
 - Les outils ne doivent pas produire des réponses de remplacement si le LLM doit reformuler.
+- Les tests kernel se lancent avec `pytest tests/ -q` depuis la racine du repo.
+- `SOUL.md` porte l’identité de l’agent ; `USER.md` le contexte humain durable ; `AGENTS.md` les conventions du projet.
+- Le host web doit rester une surface mince au-dessus du runtime, pas une source de vérité concurrente.
 
 ## Objectif de qualité
 Le système doit être :

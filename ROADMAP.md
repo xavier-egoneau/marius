@@ -38,6 +38,7 @@ Créer une base agentique modulaire, réutilisable et simple à faire évoluer, 
 - Définir les fichiers `.md` source de vérité.
 - Formaliser le projet actif avec une stratégie explicite.
 - Séparer intention, mémoire et décisions.
+- Définir explicitement la place de `SOUL.md`, `USER.md`, `AGENTS.md`, `DECISIONS.md` et `ROADMAP.md`.
 - Garantir un rendu Markdown cohérent entre CLI, web et Telegram.
 - Préserver l’historique visible de l’utilisateur même quand le contexte interne est compacté.
 - Rendre les diffs de développement lisibles et réutilisables dans les surfaces de discussion.
@@ -52,6 +53,7 @@ Créer une base agentique modulaire, réutilisable et simple à faire évoluer, 
 - Définir les règles de notifications entre surfaces.
 - Définir comment une même conversation reste lisible d’un canal à l’autre, sans casser le format Markdown.
 - Définir comment les artefacts de type diff et les notices de compaction se propagent entre surfaces.
+- Garder le host web/API suffisamment mince pour ne pas faire dériver le cœur du produit vers une architecture web-first.
 
 ### 8. Tests et stabilité
 - Tester chaque brique isolément.
@@ -70,3 +72,13 @@ Avant d’implémenter une nouvelle fonctionnalité, vérifier :
 - Le socle doit aussi préserver l’historique utilisateur, même si le contexte interne est compacté ou réécrit.
 - Les flux dev/self-update doivent exposer les diffs proprement dans l’UI et dans les messages.
 - Liste détaillée des briques à définir ensuite.
+
+## Slices d’implémentation en cours
+- [x] Cadrer la répartition des fichiers Markdown de contexte (`SOUL.md`, `USER.md`, `AGENTS.md`, `DECISIONS.md`, `ROADMAP.md`) [serial] [high]
+- [x] Poser les frontières `kernel` / `host` / `render` / `storage` dans la doc [serial] [high]
+- [x] Créer le squelette Python minimal des couches principales [serial] [high]
+- [x] Ajouter une première brique `session_runtime` orientée tours et indépendante des canaux [serial] [high]
+- [x] Ajouter des tests kernel pour compaction, session runtime et orchestrateur minimal [serial] [high]
+- [ ] Brancher un `provider_adapter` minimal sur le `runtime_orchestrator` [serial] [high]
+- [x] Introduire un `ui_history_store` concret distinct du contexte interne [serial] [high]
+- [ ] Poser un `render_adapter` Markdown cross-canaux pour messages, notices et diffs [serial] [high]
