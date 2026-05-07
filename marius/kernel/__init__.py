@@ -10,4 +10,5 @@ __all__ = [
     "session",
     "provider",
     "context_builder",
+    "project_context",
 ]

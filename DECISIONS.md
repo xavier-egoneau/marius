@@ -203,3 +203,16 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
   - le host ou une future brique `project_context` choisira les chemins ;
   - le runtime peut continuer à injecter le résultat via `TurnInput.system_prompt` sans changer son contrat ;
   - une source requise absente casse le build explicitement, une source optionnelle absente reste traçable.
+
+## 2026-05-07 — Project context minimal
+- Décision : introduire un `project_context` kernel qui résout explicitement le projet actif, les projets cités et le scope de session (`canonical`, `project`, `branch`) avant l’assemblage Markdown.
+- Contrat minimal :
+  - `ProjectContextInput` porte `mode`, `session_scope`, `active_project`, `cited_projects` et éventuellement une `branch` ;
+  - `ResolvedProjectContext` renvoie un `preamble`, un `ContextBuildInput` et des métadonnées stables ;
+  - un `ProjectCatalog` abstrait fournit uniquement les chemins documentaires du projet actif.
+- Pourquoi : matérialiser la règle du projet actif sans l’enterrer dans le host et sans faire dériver `context_builder` vers une logique de sélection projet.
+- Impact :
+  - en mode `local`, un projet actif est requis ;
+  - une branche ciblée exige un projet actif explicite et un identifiant de branche ;
+  - en mode `global`, l’absence de projet actif reste autorisée tant qu’aucun projet n’est fixé ;
+  - seuls les documents du projet actif alimentent le `context_builder`, les projets cités restant des références visibles dans le préambule.

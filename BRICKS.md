@@ -125,6 +125,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - Distinguer projet actif et projets cités.
 - Porter les règles local/global.
 - Décrire le contexte d’une branche ciblée.
+- Produire un préambule et des `ContextSource` pour le `context_builder` sans assembler lui-même le Markdown.
 
 **Dépendances autorisées**
 - Métadonnées projet.
@@ -134,9 +135,11 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - UI de sélection.
 - Provider.
 - Rendu.
+- Lecture directe du contenu Markdown.
 
 **Standalone si**
 - La même convention peut être reprise par un autre système multi-projets.
+- La résolution reste déterministe et testable avec un simple catalogue de chemins projet.
 
 ---
 
