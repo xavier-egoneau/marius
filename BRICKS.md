@@ -95,21 +95,24 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - Assembler le contexte logique à envoyer au LLM.
 
 **Responsabilités**
-- Lire les Markdown pertinents.
-- Prioriser mémoire, décisions, repères projet.
+- Lire les Markdown pertinents explicitement fournis.
+- Préserver l’ordre déclaré des couches.
 - Produire un contexte compact et déclaratif.
+- Signaler les sources requises manquantes.
 
 **Dépendances autorisées**
-- Lecture de fichiers `.md`.
-- Métadonnées de session et de projet.
+- Lecture abstraite de sources `.md`.
+- Métadonnées de session et de projet injectées explicitement.
 
 **Dépendances interdites**
 - Appel provider.
 - UI.
 - Heuristique agressive de navigation projet.
+- Découverte automatique du projet actif.
 
 **Standalone si**
 - On peut l’employer dans un autre assistant piloté par des documents Markdown.
+- Un autre host peut lui fournir ses propres sources sans changer sa logique d’assemblage.
 
 ---
 

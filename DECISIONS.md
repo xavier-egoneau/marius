@@ -191,3 +191,15 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
   - le host peut rester mince en consommant un texte déjà rendu ;
   - les surfaces `portable`, `cli`, `telegram` et `web` partagent la même sortie tant qu’un besoin produit n’impose pas de divergence ;
   - les artefacts `diff` reçoivent un rendu détaillé, les autres artefacts un fallback portable visible.
+
+## 2026-05-07 — Context builder minimal
+- Décision : introduire un `context_builder` kernel qui assemble des sources Markdown explicites en un `system_prompt` déterministe, sans découverte automatique de projet.
+- Contrat minimal :
+  - `ContextSource` décrit une source (`key`, `title`, `path`, `required`) ;
+  - `ContextBuildInput` porte un `preamble` et une liste ordonnée de sources ;
+  - `ContextBundle` renvoie le Markdown assemblé, les sources chargées et les sources optionnelles manquantes.
+- Pourquoi : matérialiser l’assemblage du contexte sans glisser trop tôt vers `project_context`, le host ou une heuristique de navigation repo.
+- Impact :
+  - le host ou une future brique `project_context` choisira les chemins ;
+  - le runtime peut continuer à injecter le résultat via `TurnInput.system_prompt` sans changer son contrat ;
+  - une source requise absente casse le build explicitement, une source optionnelle absente reste traçable.

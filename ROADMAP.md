@@ -82,3 +82,4 @@ Avant d’implémenter une nouvelle fonctionnalité, vérifier :
 - [x] Brancher un `provider_adapter` minimal sur le `runtime_orchestrator` [serial] [high]
 - [x] Introduire un `ui_history_store` concret distinct du contexte interne [serial] [high]
 - [x] Poser un `render_adapter` Markdown cross-canaux pour messages, notices et diffs [serial] [high]
+- [x] Ajouter un `context_builder` minimal pour assembler explicitement les sources Markdown de contexte [serial] [high]

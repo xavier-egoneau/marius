@@ -27,6 +27,7 @@ Marius doit rester un système agentique modulaire, lisible et réutilisable.
 - Le `provider_adapter` se développe en mode minimal d’abord : génération synchrone + usage + erreur normalisée avant le streaming.
 - Le `render_adapter` retourne d’abord du Markdown portable (`str`) à partir des contrats kernel avant toute divergence spécifique par canal.
 - Les artefacts `diff` ont un rendu détaillé ; les autres artefacts gardent au moins un fallback visible portable.
+- Le `context_builder` assemble des sources Markdown explicites dans un ordre déclaré ; il ne découvre pas seul le projet actif.
 
 ## Objectif de qualité
 Le système doit être :
