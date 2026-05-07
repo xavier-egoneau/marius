@@ -167,3 +167,15 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
   - `ROADMAP.md` = checklist vivante.
 - Pourquoi : éviter que `AGENTS.md` devienne un fourre-tout et garder un assemblage de contexte lisible par nature.
 - Impact : le futur `context_builder` devra assembler ces couches comme des sources distinctes ; les branches ciblées réutilisent ces conventions sans créer un nouveau type de fichier tant que ce n’est pas nécessaire.
+
+## 2026-05-07 — Provider adapter minimal
+- Décision : introduire d’abord un contrat provider synchrone minimal, injectable dans le runtime, avant tout streaming ou toute logique de retry avancée.
+- Contrat minimal :
+  - `ProviderRequest` reçoit des `Message` structurés ;
+  - `ProviderResponse` renvoie un `Message` assistant structuré et une `ContextUsage` ;
+  - `ProviderError` normalise au moins `provider_name` et `retryable`.
+- Pourquoi : valider vite l’interface entre runtime et providers sans figer trop tôt une API plus complexe.
+- Impact :
+  - `runtime_orchestrator` peut fonctionner soit en préparation de contexte seule, soit avec un provider injecté ;
+  - le streaming, les retries et l’appel réseau réel restent des slices ultérieurs ;
+  - la brique reste testable avec un double en mémoire.

@@ -15,6 +15,7 @@ def test_session_runtime_groups_messages_and_tool_results_per_turn() -> None:
     )
 
     turn = runtime.start_turn(user_message=user_message, metadata={"source": "host"})
+    assert turn.metadata["status"] == "started"
     runtime.attach_tool_result(
         turn.id,
         ToolResult(
@@ -34,6 +35,7 @@ def test_session_runtime_groups_messages_and_tool_results_per_turn() -> None:
 
     assert completed.input_messages == [user_message]
     assert completed.assistant_message == assistant_message
+    assert completed.metadata["status"] == "completed"
     assert [result.summary for result in completed.tool_results] == ["pytest: 12 passed"]
     assert completed.artifacts[0].type is ArtifactType.REPORT
     assert runtime.state.turns == [completed]

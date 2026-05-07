@@ -16,6 +16,7 @@ from .compaction import (
     resolve_token_count,
 )
 from .contracts import CompactionNotice, ContextUsage, Message, Role, ToolResult
+from .provider import ProviderAdapter, ProviderError, ProviderRequest
 from .session import SessionRuntime
 
 
@@ -41,8 +42,14 @@ class TurnOutput:
 class RuntimeOrchestrator:
     """Assemblage minimal des briques kernel autour d'une session logique."""
 
-    def __init__(self, *, compaction_config: CompactionConfig | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        compaction_config: CompactionConfig | None = None,
+        provider: ProviderAdapter | None = None,
+    ) -> None:
         self.compaction_config = compaction_config or CompactionConfig()
+        self.provider = provider
 
     def run_turn(self, turn_input: TurnInput) -> TurnOutput:
         turn = turn_input.session.start_turn(
@@ -81,7 +88,7 @@ class RuntimeOrchestrator:
                 },
             )
 
-        return TurnOutput(
+        output = TurnOutput(
             context_messages=context_messages,
             usage=usage,
             compaction_notice=compaction_notice,
@@ -94,6 +101,42 @@ class RuntimeOrchestrator:
                 "system_prompt": turn_input.system_prompt,
             },
         )
+
+        if self.provider is None:
+            return output
+
+        try:
+            provider_response = self.provider.generate(
+                ProviderRequest(
+                    messages=context_messages,
+                    metadata={
+                        **turn_input.metadata,
+                        "session_id": turn_input.session.session_id,
+                        "turn_id": turn.id,
+                    },
+                )
+            )
+        except ProviderError as error:
+            turn.metadata.update(
+                {
+                    "status": "provider_error",
+                    "provider_name": error.provider_name,
+                    "retryable": error.retryable,
+                    "error": str(error),
+                }
+            )
+            raise
+        turn_input.session.finish_turn(turn.id, assistant_message=provider_response.message)
+        output.assistant_message = provider_response.message
+        output.usage = self._merge_usage(output.usage, provider_response.usage)
+        output.metadata.update(
+            {
+                "status": "completed",
+                "provider_name": provider_response.provider_name,
+                "model": provider_response.model,
+            }
+        )
+        return output
 
     def _build_usage(
         self,
@@ -118,4 +161,15 @@ class RuntimeOrchestrator:
             summarize_threshold=self.compaction_config.summarize_threshold,
             reset_threshold=self.compaction_config.reset_threshold,
             keep_recent_turns=self.compaction_config.keep_recent_turns,
+        )
+
+    def _merge_usage(self, base: ContextUsage, override: ContextUsage) -> ContextUsage:
+        return ContextUsage(
+            estimated_input_tokens=override.estimated_input_tokens or base.estimated_input_tokens,
+            provider_input_tokens=(
+                override.provider_input_tokens
+                if override.provider_input_tokens is not None
+                else base.provider_input_tokens
+            ),
+            max_context_tokens=override.max_context_tokens or base.max_context_tokens,
         )

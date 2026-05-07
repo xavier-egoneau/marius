@@ -79,6 +79,6 @@ Avant d’implémenter une nouvelle fonctionnalité, vérifier :
 - [x] Créer le squelette Python minimal des couches principales [serial] [high]
 - [x] Ajouter une première brique `session_runtime` orientée tours et indépendante des canaux [serial] [high]
 - [x] Ajouter des tests kernel pour compaction, session runtime et orchestrateur minimal [serial] [high]
-- [ ] Brancher un `provider_adapter` minimal sur le `runtime_orchestrator` [serial] [high]
+- [x] Brancher un `provider_adapter` minimal sur le `runtime_orchestrator` [serial] [high]
 - [x] Introduire un `ui_history_store` concret distinct du contexte interne [serial] [high]
 - [ ] Poser un `render_adapter` Markdown cross-canaux pour messages, notices et diffs [serial] [high]

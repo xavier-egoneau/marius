@@ -61,6 +61,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 
 **Standalone si**
 - On peut le brancher à un autre runtime agentique sans connaître Marius.
+- Un double en mémoire suffit pour le tester sans réseau.
 
 ---
 

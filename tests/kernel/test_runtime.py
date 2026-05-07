@@ -4,6 +4,11 @@ from datetime import datetime
 
 from marius.kernel.compaction import CompactionConfig, CompactionLevel
 from marius.kernel.contracts import ContextUsage, Message, Role, ToolResult
+from marius.kernel.provider import (
+    InMemoryProviderAdapter,
+    ProviderConfig,
+    ProviderError,
+)
 from marius.kernel.runtime import RuntimeOrchestrator, TurnInput
 from marius.kernel.session import SessionRuntime
 
@@ -103,3 +108,87 @@ def test_runtime_orchestrator_reinjects_previous_tool_results_into_context() -> 
     )
 
     assert "pytest: 15 passed" in [message.content for message in output.context_messages]
+
+
+def test_runtime_orchestrator_calls_provider_and_finishes_turn() -> None:
+    session = SessionRuntime(session_id="canon")
+    provider = InMemoryProviderAdapter(
+        config=ProviderConfig(provider_name="test", model="stub-model"),
+        completion_text="Réponse finale",
+        usage=ContextUsage(provider_input_tokens=33, max_context_tokens=1000),
+    )
+    orchestrator = RuntimeOrchestrator(provider=provider)
+
+    output = orchestrator.run_turn(
+        TurnInput(
+            session=session,
+            user_message=Message(
+                role=Role.USER,
+                content="Donne-moi la synthèse",
+                created_at=datetime(2026, 5, 7, 15, 31, 0),
+            ),
+            system_prompt="Tu es Marius.",
+        )
+    )
+
+    assert output.assistant_message is not None
+    assert output.assistant_message.content == "Réponse finale"
+    assert output.usage.provider_input_tokens == 33
+    assert session.state.turns[-1].assistant_message == output.assistant_message
+    assert session.state.turns[-1].metadata["status"] == "completed"
+    assert output.metadata["status"] == "completed"
+    assert output.metadata["provider_name"] == "test"
+
+
+def test_runtime_orchestrator_marks_turn_when_provider_fails() -> None:
+    session = SessionRuntime(session_id="canon")
+    provider = InMemoryProviderAdapter(
+        config=ProviderConfig(provider_name="test", model="stub-model"),
+        error=ProviderError("provider down", provider_name="test", retryable=True),
+    )
+    orchestrator = RuntimeOrchestrator(provider=provider)
+
+    try:
+        orchestrator.run_turn(
+            TurnInput(
+                session=session,
+                user_message=Message(
+                    role=Role.USER,
+                    content="Essaie quand même",
+                    created_at=datetime(2026, 5, 7, 15, 35, 0),
+                ),
+            )
+        )
+        raise AssertionError("ProviderError should have been raised")
+    except ProviderError as error:
+        assert str(error) == "provider down"
+
+    turn = session.state.turns[-1]
+    assert turn.metadata["status"] == "provider_error"
+    assert turn.metadata["provider_name"] == "test"
+    assert turn.metadata["retryable"] is True
+    assert turn.assistant_message is None
+
+
+def test_runtime_orchestrator_preserves_existing_provider_usage_when_provider_returns_none() -> None:
+    session = SessionRuntime(session_id="canon")
+    provider = InMemoryProviderAdapter(
+        config=ProviderConfig(provider_name="test", model="stub-model"),
+        completion_text="Réponse finale",
+        usage=ContextUsage(max_context_tokens=1000),
+    )
+    orchestrator = RuntimeOrchestrator(provider=provider)
+
+    output = orchestrator.run_turn(
+        TurnInput(
+            session=session,
+            user_message=Message(
+                role=Role.USER,
+                content="Donne-moi la synthèse",
+                created_at=datetime(2026, 5, 7, 15, 36, 0),
+            ),
+            usage=ContextUsage(provider_input_tokens=21, max_context_tokens=1000),
+        )
+    )
+
+    assert output.usage.provider_input_tokens == 21

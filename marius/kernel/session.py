@@ -53,11 +53,12 @@ class SessionRuntime:
     ) -> TurnRecord:
         if user_message.role is not Role.USER:
             raise ValueError("start_turn expects a message with role Role.USER")
+        turn_metadata = {"status": "started", **dict(metadata or {})}
         turn = TurnRecord(
             id=self._next_turn_id(),
             input_messages=[user_message],
             started_at=user_message.created_at,
-            metadata=dict(metadata or {}),
+            metadata=turn_metadata,
         )
         self.state.turns.append(turn)
         return turn
@@ -84,6 +85,7 @@ class SessionRuntime:
             turn.assistant_message = assistant_message
         if artifacts is not None:
             turn.extra_artifacts = list(artifacts)
+        turn.metadata["status"] = "completed"
         self._sync_turn_artifacts(turn)
         return turn
 
