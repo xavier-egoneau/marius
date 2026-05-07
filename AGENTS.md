@@ -29,6 +29,7 @@ Marius doit rester un système agentique modulaire, lisible et réutilisable.
 - Les artefacts `diff` ont un rendu détaillé ; les autres artefacts gardent au moins un fallback visible portable.
 - Le `context_builder` assemble des sources Markdown explicites dans un ordre déclaré ; il ne découvre pas seul le projet actif.
 - Le `project_context` résout explicitement le projet actif, les projets cités et le scope canonique/projet/branche avant d’alimenter le `context_builder`.
+- Les modes `safe` / `limited` / `power` relèvent du `project_context` et de la sécurité ; le workspace est une zone allow de base, pas forcément une prison.
 
 ## Objectif de qualité
 Le système doit être :

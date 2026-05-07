@@ -216,3 +216,19 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
   - une branche ciblée exige un projet actif explicite et un identifiant de branche ;
   - en mode `global`, l’absence de projet actif reste autorisée tant qu’aucun projet n’est fixé ;
   - seuls les documents du projet actif alimentent le `context_builder`, les projets cités restant des références visibles dans le préambule.
+
+## 2026-05-07 — Project context permission-aware
+- Décision : étendre `project_context` avec une séparation explicite entre projet actif et zone allow, pilotée par les modes `safe`, `limited` et `power`.
+- Contrat minimal :
+  - `ProjectContextInput` porte aussi `permission_mode`, `workspace_root`, `allowed_roots` et un signal `activate_requested_project` ;
+  - `ResolvedProjectContext` renvoie les roots allowées effectives et signale si le projet actif a été promu dans la zone allow ;
+  - `ProjectCatalog` reste limité aux chemins documentaires, sans logique de permissions.
+- Pourquoi : le workspace global est une zone allow de base, mais il ne doit pas être confondu avec le projet actif ni devenir une prison unique dans tous les modes.
+- Impact :
+  - `safe` impose que le projet actif reste dans la zone allow actuelle ;
+  - `limited` autorise la promotion explicite d’un projet hors workspace et l’ajoute aux roots allowées ;
+  - `power` accepte un projet actif hors workspace sans promotion préalable ;
+  - un scope `project` exige un projet actif ;
+  - un objet `branch` n’est valide qu’avec le scope `branch` ;
+  - les chemins documentaires renvoyés pour le projet actif doivent rester sous sa root ;
+  - les projets cités restent des références de contexte, pas des extensions implicites de permissions.

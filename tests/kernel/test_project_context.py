@@ -7,6 +7,7 @@ import pytest
 from marius.kernel.context_builder import ContextBuildInput
 from marius.kernel.project_context import (
     BranchRef,
+    PermissionMode,
     ProjectContextInput,
     ProjectContextResolver,
     ProjectDocumentPaths,
@@ -35,7 +36,13 @@ MAURICE = ProjectRef(
     display_name="Maurice",
     root_path=Path("/home/egza/Documents/projets/Maurice"),
 )
+OUTSIDE = ProjectRef(
+    project_id="outside",
+    display_name="Outside",
+    root_path=Path("/opt/outside-project"),
+)
 
+WORKSPACE_ROOT = Path("/home/egza/Documents/projets")
 
 CATALOG = FakeCatalog(
     {
@@ -48,6 +55,11 @@ CATALOG = FakeCatalog(
             agents_path=Path("/home/egza/Documents/projets/Maurice/AGENTS.md"),
             decisions_path=Path("/home/egza/Documents/projets/Maurice/DECISIONS.md"),
             roadmap_path=Path("/home/egza/Documents/projets/Maurice/ROADMAP.md"),
+        ),
+        "outside": ProjectDocumentPaths(
+            agents_path=Path("/opt/outside-project/AGENTS.md"),
+            decisions_path=Path("/opt/outside-project/DECISIONS.md"),
+            roadmap_path=Path("/opt/outside-project/ROADMAP.md"),
         ),
     }
 )
@@ -63,6 +75,106 @@ def test_project_context_requires_active_project_in_local_mode() -> None:
                 session_scope=SessionScope.PROJECT,
             )
         )
+
+
+def test_project_context_requires_active_project_for_project_scope() -> None:
+    resolver = ProjectContextResolver(catalog=CATALOG)
+
+    with pytest.raises(ProjectResolutionError):
+        resolver.resolve(
+            ProjectContextInput(
+                mode=RuntimeMode.GLOBAL,
+                session_scope=SessionScope.PROJECT,
+            )
+        )
+
+
+def test_project_context_safe_mode_rejects_project_outside_workspace() -> None:
+    resolver = ProjectContextResolver(catalog=CATALOG)
+
+    with pytest.raises(ProjectResolutionError):
+        resolver.resolve(
+            ProjectContextInput(
+                mode=RuntimeMode.GLOBAL,
+                session_scope=SessionScope.PROJECT,
+                permission_mode=PermissionMode.SAFE,
+                workspace_root=WORKSPACE_ROOT,
+                active_project=OUTSIDE,
+            )
+        )
+
+
+def test_project_context_limited_mode_accepts_already_allowed_project() -> None:
+    resolver = ProjectContextResolver(catalog=CATALOG)
+
+    resolved = resolver.resolve(
+        ProjectContextInput(
+            mode=RuntimeMode.GLOBAL,
+            session_scope=SessionScope.PROJECT,
+            permission_mode=PermissionMode.LIMITED,
+            workspace_root=WORKSPACE_ROOT,
+            active_project=OUTSIDE,
+            allowed_roots=[OUTSIDE.root_path],
+        )
+    )
+
+    assert resolved.active_project == OUTSIDE
+    assert OUTSIDE.root_path in resolved.allowed_roots
+    assert resolved.metadata["active_project_promoted"] is False
+
+
+def test_project_context_limited_mode_rejects_outside_project_without_explicit_request() -> None:
+    resolver = ProjectContextResolver(catalog=CATALOG)
+
+    with pytest.raises(ProjectResolutionError):
+        resolver.resolve(
+            ProjectContextInput(
+                mode=RuntimeMode.GLOBAL,
+                session_scope=SessionScope.PROJECT,
+                permission_mode=PermissionMode.LIMITED,
+                workspace_root=WORKSPACE_ROOT,
+                active_project=OUTSIDE,
+            )
+        )
+
+
+def test_project_context_limited_mode_promotes_explicit_outside_project() -> None:
+    resolver = ProjectContextResolver(catalog=CATALOG)
+
+    resolved = resolver.resolve(
+        ProjectContextInput(
+            mode=RuntimeMode.GLOBAL,
+            session_scope=SessionScope.PROJECT,
+            permission_mode=PermissionMode.LIMITED,
+            workspace_root=WORKSPACE_ROOT,
+            active_project=OUTSIDE,
+            activate_requested_project=True,
+        )
+    )
+
+    assert resolved.active_project == OUTSIDE
+    assert WORKSPACE_ROOT in resolved.allowed_roots
+    assert OUTSIDE.root_path in resolved.allowed_roots
+    assert resolved.metadata["active_project_promoted"] is True
+    assert "ajouté à la zone allow" in resolved.preamble
+
+
+def test_project_context_power_mode_accepts_outside_project_without_promotion() -> None:
+    resolver = ProjectContextResolver(catalog=CATALOG)
+
+    resolved = resolver.resolve(
+        ProjectContextInput(
+            mode=RuntimeMode.GLOBAL,
+            session_scope=SessionScope.PROJECT,
+            permission_mode=PermissionMode.POWER,
+            workspace_root=WORKSPACE_ROOT,
+            active_project=OUTSIDE,
+        )
+    )
+
+    assert resolved.active_project == OUTSIDE
+    assert resolved.metadata["active_project_promoted"] is False
+    assert resolved.metadata["permission_mode"] == PermissionMode.POWER.value
 
 
 def test_project_context_requires_active_project_for_branch_scope() -> None:
@@ -87,6 +199,20 @@ def test_project_context_requires_branch_details_for_branch_scope() -> None:
                 mode=RuntimeMode.GLOBAL,
                 session_scope=SessionScope.BRANCH,
                 active_project=MARIUS,
+            )
+        )
+
+
+def test_project_context_rejects_branch_details_outside_branch_scope() -> None:
+    resolver = ProjectContextResolver(catalog=CATALOG)
+
+    with pytest.raises(ProjectResolutionError):
+        resolver.resolve(
+            ProjectContextInput(
+                mode=RuntimeMode.GLOBAL,
+                session_scope=SessionScope.PROJECT,
+                active_project=MARIUS,
+                branch=BranchRef(branch_id="branch-1", label="Fix auth"),
             )
         )
 
@@ -154,6 +280,28 @@ def test_project_context_builds_context_input_for_active_project_only() -> None:
     assert resolved.metadata["cited_project_ids"] == ["maurice"]
 
 
+def test_project_context_rejects_catalog_documents_outside_active_project_root() -> None:
+    catalog = FakeCatalog(
+        {
+            "marius": ProjectDocumentPaths(
+                agents_path=Path("/tmp/elsewhere/AGENTS.md"),
+                decisions_path=Path("/home/egza/Documents/projets/marius/DECISIONS.md"),
+                roadmap_path=Path("/home/egza/Documents/projets/marius/ROADMAP.md"),
+            )
+        }
+    )
+    resolver = ProjectContextResolver(catalog=catalog)
+
+    with pytest.raises(ProjectResolutionError):
+        resolver.resolve(
+            ProjectContextInput(
+                mode=RuntimeMode.GLOBAL,
+                session_scope=SessionScope.PROJECT,
+                active_project=MARIUS,
+            )
+        )
+
+
 def test_project_context_preamble_mentions_mode_active_project_and_cited_projects() -> None:
     resolver = ProjectContextResolver(catalog=CATALOG)
 
@@ -161,15 +309,19 @@ def test_project_context_preamble_mentions_mode_active_project_and_cited_project
         ProjectContextInput(
             mode=RuntimeMode.GLOBAL,
             session_scope=SessionScope.CANONICAL,
+            permission_mode=PermissionMode.LIMITED,
+            workspace_root=WORKSPACE_ROOT,
             active_project=MARIUS,
             cited_projects=[MAURICE],
         )
     )
 
     assert "Mode global." in resolved.preamble
+    assert "Mode permission : limited." in resolved.preamble
+    assert "Workspace allow de base : /home/egza/Documents/projets." in resolved.preamble
     assert "Projet actif : Marius" in resolved.preamble
     assert "Projet cité : Maurice" in resolved.preamble
-    assert "basculement explicite" in resolved.preamble
+    assert "Le projet actif a été ajouté à la zone allow" not in resolved.preamble
 
 
 def test_project_context_preamble_mentions_branch_context_when_present() -> None:

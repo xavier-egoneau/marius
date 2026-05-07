@@ -126,10 +126,13 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - Porter les règles local/global.
 - Décrire le contexte d’une branche ciblée.
 - Produire un préambule et des `ContextSource` pour le `context_builder` sans assembler lui-même le Markdown.
+- Résoudre la zone allow effective à partir du workspace, des roots déjà allowées et du mode `safe` / `limited` / `power`.
+- Promouvoir explicitement un projet hors workspace en mode `limited` quand la demande le justifie.
 
 **Dépendances autorisées**
 - Métadonnées projet.
 - Documents projet.
+- Métadonnées de permissions et roots allowées injectées par le host.
 
 **Dépendances interdites**
 - UI de sélection.
@@ -140,6 +143,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 **Standalone si**
 - La même convention peut être reprise par un autre système multi-projets.
 - La résolution reste déterministe et testable avec un simple catalogue de chemins projet.
+- Les chemins documentaires du projet actif restent validables indépendamment du host et des permissions concrètes.
 
 ---
 

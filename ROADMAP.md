@@ -84,3 +84,4 @@ Avant d’implémenter une nouvelle fonctionnalité, vérifier :
 - [x] Poser un `render_adapter` Markdown cross-canaux pour messages, notices et diffs [serial] [high]
 - [x] Ajouter un `context_builder` minimal pour assembler explicitement les sources Markdown de contexte [serial] [high]
 - [x] Ajouter un `project_context` minimal pour résoudre le projet actif et préparer les sources du `context_builder` [serial] [high]
+- [x] Étendre `project_context` avec les modes `safe` / `limited` / `power` et une zone allow explicite [serial] [high]

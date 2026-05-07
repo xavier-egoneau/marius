@@ -21,6 +21,12 @@ class SessionScope(str, Enum):
     BRANCH = "branch"
 
 
+class PermissionMode(str, Enum):
+    SAFE = "safe"
+    LIMITED = "limited"
+    POWER = "power"
+
+
 @dataclass(slots=True, frozen=True)
 class ProjectRef:
     project_id: str
@@ -48,6 +54,10 @@ class ProjectContextInput:
     active_project: ProjectRef | None = None
     cited_projects: list[ProjectRef] = field(default_factory=list)
     branch: BranchRef | None = None
+    permission_mode: PermissionMode = PermissionMode.LIMITED
+    workspace_root: Path | None = None
+    allowed_roots: list[Path] = field(default_factory=list)
+    activate_requested_project: bool = False
 
 
 @dataclass(slots=True)
@@ -56,6 +66,9 @@ class ResolvedProjectContext:
     cited_projects: list[ProjectRef]
     preamble: str
     context_input: ContextBuildInput
+    permission_mode: PermissionMode
+    workspace_root: Path | None = None
+    allowed_roots: list[Path] = field(default_factory=list)
     metadata: dict[str, object] = field(default_factory=dict)
 
     def to_context_build_input(self) -> ContextBuildInput:
@@ -82,11 +95,28 @@ class ProjectContextResolver:
         self._validate(context_input)
 
         active_project = context_input.active_project
-        preamble = self._build_preamble(context_input)
+        allowed_roots = self._normalize_roots(
+            context_input.allowed_roots,
+            workspace_root=context_input.workspace_root,
+        )
+        active_project_promoted = False
+
+        if active_project is not None:
+            allowed_roots, active_project_promoted = self._resolve_allowed_roots(
+                context_input,
+                allowed_roots=allowed_roots,
+            )
+
+        preamble = self._build_preamble(
+            context_input,
+            allowed_roots=allowed_roots,
+            active_project_promoted=active_project_promoted,
+        )
         sources: list[ContextSource] = []
 
         if active_project is not None:
             documents = self.catalog.describe(active_project)
+            self._validate_documents_for_project(active_project, documents)
             sources = self._build_sources(documents)
 
         return ResolvedProjectContext(
@@ -94,12 +124,21 @@ class ProjectContextResolver:
             cited_projects=list(context_input.cited_projects),
             preamble=preamble,
             context_input=ContextBuildInput(sources=sources),
+            permission_mode=context_input.permission_mode,
+            workspace_root=context_input.workspace_root,
+            allowed_roots=allowed_roots,
             metadata={
                 "mode": context_input.mode.value,
                 "session_scope": context_input.session_scope.value,
+                "permission_mode": context_input.permission_mode.value,
+                "workspace_root": str(context_input.workspace_root)
+                if context_input.workspace_root is not None
+                else None,
+                "allowed_roots": [str(root) for root in allowed_roots],
                 "active_project_id": active_project.project_id if active_project else None,
                 "cited_project_ids": [project.project_id for project in context_input.cited_projects],
                 "branch_id": context_input.branch.branch_id if context_input.branch else None,
+                "active_project_promoted": active_project_promoted,
             },
         )
 
@@ -107,11 +146,17 @@ class ProjectContextResolver:
         if context_input.mode is RuntimeMode.LOCAL and context_input.active_project is None:
             raise ProjectResolutionError("Local mode requires an active project")
 
+        if context_input.session_scope is SessionScope.PROJECT and context_input.active_project is None:
+            raise ProjectResolutionError("Project scope requires an active project")
+
         if context_input.session_scope is SessionScope.BRANCH and context_input.active_project is None:
             raise ProjectResolutionError("Branch scope requires an active project")
 
         if context_input.session_scope is SessionScope.BRANCH and context_input.branch is None:
             raise ProjectResolutionError("Branch scope requires branch details")
+
+        if context_input.session_scope is not SessionScope.BRANCH and context_input.branch is not None:
+            raise ProjectResolutionError("Branch details require branch scope")
 
         if context_input.branch is not None and context_input.active_project is None:
             raise ProjectResolutionError("A branch cannot exist without an active project")
@@ -123,6 +168,36 @@ class ProjectContextResolver:
                 raise ProjectResolutionError(
                     "The active project cannot also be listed as a cited project"
                 )
+
+    def _resolve_allowed_roots(
+        self,
+        context_input: ProjectContextInput,
+        *,
+        allowed_roots: list[Path],
+    ) -> tuple[list[Path], bool]:
+        active_root = context_input.active_project.root_path
+        permission_mode = context_input.permission_mode
+
+        if permission_mode is PermissionMode.POWER:
+            return allowed_roots, False
+
+        if not allowed_roots:
+            return allowed_roots, False
+
+        if self._is_allowed(active_root, allowed_roots):
+            return allowed_roots, False
+
+        if permission_mode is PermissionMode.SAFE:
+            raise ProjectResolutionError(
+                "Safe mode requires the active project to stay inside the allow zone"
+            )
+
+        if context_input.activate_requested_project:
+            return self._append_unique(allowed_roots, active_root), True
+
+        raise ProjectResolutionError(
+            "Limited mode requires an explicit request before allowing an active project outside the current allow zone"
+        )
 
     def _build_sources(self, documents: ProjectDocumentPaths) -> list[ContextSource]:
         ordered_documents = [
@@ -138,8 +213,34 @@ class ProjectContextResolver:
             sources.append(ContextSource(key=key, title=title, path=path))
         return sources
 
-    def _build_preamble(self, context_input: ProjectContextInput) -> str:
+    def _validate_documents_for_project(
+        self,
+        project: ProjectRef,
+        documents: ProjectDocumentPaths,
+    ) -> None:
+        project_root = self._normalize_path(project.root_path)
+        for path in [documents.agents_path, documents.decisions_path, documents.roadmap_path]:
+            if path is None:
+                continue
+            normalized_path = self._normalize_path(path)
+            if normalized_path != project_root and project_root not in normalized_path.parents:
+                raise ProjectResolutionError(
+                    "Project documents must stay inside the active project's root"
+                )
+
+    def _build_preamble(
+        self,
+        context_input: ProjectContextInput,
+        *,
+        allowed_roots: list[Path],
+        active_project_promoted: bool,
+    ) -> str:
         lines = [f"Mode {context_input.mode.value}."]
+        lines.append(f"Mode permission : {context_input.permission_mode.value}.")
+
+        if context_input.workspace_root is not None:
+            lines.append(f"Workspace allow de base : {context_input.workspace_root}.")
+
         active_project = context_input.active_project
 
         if active_project is None:
@@ -157,6 +258,15 @@ class ProjectContextResolver:
                 "Les projets cités restent des références tant qu'un basculement explicite n'a pas eu lieu."
             )
 
+        if active_project_promoted:
+            lines.append(
+                "Le projet actif a été ajouté à la zone allow suite à une demande explicite."
+            )
+
+        if allowed_roots:
+            formatted_roots = ", ".join(str(root) for root in allowed_roots)
+            lines.append(f"Roots allowées effectives : {formatted_roots}.")
+
         if context_input.branch is not None:
             lines.append(f"Contexte de branche ciblée : {context_input.branch.label}.")
             lines.append(
@@ -164,3 +274,27 @@ class ProjectContextResolver:
             )
 
         return "\n".join(lines)
+
+    def _normalize_roots(self, roots: list[Path], *, workspace_root: Path | None) -> list[Path]:
+        normalized_roots: list[Path] = []
+        if workspace_root is not None:
+            normalized_roots.append(self._normalize_path(workspace_root))
+
+        for root in roots:
+            normalized_roots = self._append_unique(normalized_roots, self._normalize_path(root))
+        return normalized_roots
+
+    def _append_unique(self, roots: list[Path], root: Path) -> list[Path]:
+        if root in roots:
+            return list(roots)
+        return [*roots, root]
+
+    def _is_allowed(self, candidate: Path, allowed_roots: list[Path]) -> bool:
+        candidate = self._normalize_path(candidate)
+        for root in allowed_roots:
+            if candidate == root or root in candidate.parents:
+                return True
+        return False
+
+    def _normalize_path(self, path: Path) -> Path:
+        return path.expanduser().resolve(strict=False)
