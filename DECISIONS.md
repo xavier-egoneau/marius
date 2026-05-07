@@ -179,3 +179,15 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
   - `runtime_orchestrator` peut fonctionner soit en préparation de contexte seule, soit avec un provider injecté ;
   - le streaming, les retries et l’appel réseau réel restent des slices ultérieurs ;
   - la brique reste testable avec un double en mémoire.
+
+## 2026-05-07 — Render adapter minimal
+- Décision : introduire d’abord un `render_adapter` qui retourne un Markdown portable (`str`) à partir des contrats kernel, avant tout rendu structuré spécifique au web ou à Telegram.
+- Portée minimale :
+  - `render_message(...)` pour le contenu principal ;
+  - `render_compaction_notice(...)` pour les notices utiles ;
+  - `render_artifact(...)` pour les artefacts `diff`.
+- Pourquoi : matérialiser vite la frontière `render` sans choisir trop tôt une UI riche ni un framework web.
+- Impact :
+  - le host peut rester mince en consommant un texte déjà rendu ;
+  - les surfaces `portable`, `cli`, `telegram` et `web` partagent la même sortie tant qu’un besoin produit n’impose pas de divergence ;
+  - les artefacts `diff` reçoivent un rendu détaillé, les autres artefacts un fallback portable visible.

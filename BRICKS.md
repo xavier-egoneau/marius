@@ -287,11 +287,12 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - Adapter le contenu logique aux surfaces visibles.
 
 **Responsabilités**
-- Markdown portable.
-- Échappement.
-- Rendu des `diff`.
+- Markdown portable d’abord.
+- Échappement / variantes futures par surface.
+- Rendu détaillé des `diff`.
+- Fallback visible pour les autres artefacts.
 - Rendu des notices de compaction.
-- Variantes CLI/web/Telegram.
+- Variantes CLI/web/Telegram quand un besoin produit explicite l’exige.
 
 **Dépendances autorisées**
 - Contrats de sortie.
@@ -303,6 +304,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 
 **Standalone si**
 - Il peut rendre les mêmes objets pour plusieurs surfaces.
+- Sa sortie minimale reste un `str` portable réutilisable hors host web spécifique.
 
 ---
 

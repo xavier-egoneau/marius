@@ -81,4 +81,4 @@ Avant d’implémenter une nouvelle fonctionnalité, vérifier :
 - [x] Ajouter des tests kernel pour compaction, session runtime et orchestrateur minimal [serial] [high]
 - [x] Brancher un `provider_adapter` minimal sur le `runtime_orchestrator` [serial] [high]
 - [x] Introduire un `ui_history_store` concret distinct du contexte interne [serial] [high]
-- [ ] Poser un `render_adapter` Markdown cross-canaux pour messages, notices et diffs [serial] [high]
+- [x] Poser un `render_adapter` Markdown cross-canaux pour messages, notices et diffs [serial] [high]

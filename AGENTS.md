@@ -25,6 +25,8 @@ Marius doit rester un système agentique modulaire, lisible et réutilisable.
 - `SOUL.md` porte l’identité de l’agent ; `USER.md` le contexte humain durable ; `AGENTS.md` les conventions du projet.
 - Le host web doit rester une surface mince au-dessus du runtime, pas une source de vérité concurrente.
 - Le `provider_adapter` se développe en mode minimal d’abord : génération synchrone + usage + erreur normalisée avant le streaming.
+- Le `render_adapter` retourne d’abord du Markdown portable (`str`) à partir des contrats kernel avant toute divergence spécifique par canal.
+- Les artefacts `diff` ont un rendu détaillé ; les autres artefacts gardent au moins un fallback visible portable.
 
 ## Objectif de qualité
 Le système doit être :
