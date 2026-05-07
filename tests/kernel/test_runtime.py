@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+from datetime import datetime
+
+from marius.kernel.compaction import CompactionConfig, CompactionLevel
+from marius.kernel.contracts import ContextUsage, Message, Role, ToolResult
+from marius.kernel.runtime import RuntimeOrchestrator, TurnInput
+from marius.kernel.session import SessionRuntime
+
+
+def test_runtime_orchestrator_registers_turn_and_prepares_provider_context() -> None:
+    session = SessionRuntime(session_id="canon")
+    orchestrator = RuntimeOrchestrator()
+    user_message = Message(
+        role=Role.USER,
+        content="Fais le point sur la roadmap",
+        created_at=datetime(2026, 5, 7, 15, 0, 0),
+    )
+
+    output = orchestrator.run_turn(
+        TurnInput(
+            session=session,
+            user_message=user_message,
+            system_prompt="Tu es Marius.",
+        )
+    )
+
+    assert session.state.turns[0].input_messages == [user_message]
+    assert [message.content for message in output.context_messages] == [
+        "Tu es Marius.",
+        "Fais le point sur la roadmap",
+    ]
+    assert output.context_messages[0].role is Role.SYSTEM
+    assert output.metadata["status"] == "ready_for_provider"
+    assert output.metadata["session_id"] == "canon"
+    assert output.metadata["turn_id"] == "turn-1"
+    assert output.metadata["compaction_level"] == CompactionLevel.NONE.value
+    assert output.usage.estimated_input_tokens > 0
+
+
+def test_runtime_orchestrator_uses_provider_usage_for_compaction_notice() -> None:
+    session = SessionRuntime(session_id="canon")
+    orchestrator = RuntimeOrchestrator(
+        compaction_config=CompactionConfig(context_window_tokens=250000)
+    )
+    user_message = Message(
+        role=Role.USER,
+        content="x" * 20,
+        created_at=datetime(2026, 5, 7, 15, 1, 0),
+    )
+
+    output = orchestrator.run_turn(
+        TurnInput(
+            session=session,
+            user_message=user_message,
+            usage=ContextUsage(
+                estimated_input_tokens=5,
+                provider_input_tokens=90,
+                max_context_tokens=100,
+            ),
+        )
+    )
+
+    assert output.compaction_notice is not None
+    assert output.compaction_notice.level == CompactionLevel.RESET.value
+    assert output.compaction_notice.metadata["visible_history_untouched"] is True
+    assert output.metadata["compaction_level"] == CompactionLevel.RESET.value
+    assert output.usage.provider_input_tokens == 90
+
+
+def test_runtime_orchestrator_reinjects_previous_tool_results_into_context() -> None:
+    session = SessionRuntime(session_id="canon")
+    previous_turn = session.start_turn(
+        user_message=Message(
+            role=Role.USER,
+            content="Lance pytest",
+            created_at=datetime(2026, 5, 7, 15, 2, 0),
+        )
+    )
+    session.attach_tool_result(
+        previous_turn.id,
+        ToolResult(tool_call_id="tool-1", ok=True, summary="pytest: 15 passed"),
+    )
+    session.finish_turn(
+        previous_turn.id,
+        assistant_message=Message(
+            role=Role.ASSISTANT,
+            content="Les tests sont passés.",
+            created_at=datetime(2026, 5, 7, 15, 2, 1),
+        ),
+    )
+
+    orchestrator = RuntimeOrchestrator()
+    output = orchestrator.run_turn(
+        TurnInput(
+            session=session,
+            user_message=Message(
+                role=Role.USER,
+                content="Fais le résumé",
+                created_at=datetime(2026, 5, 7, 15, 3, 0),
+            ),
+        )
+    )
+
+    assert "pytest: 15 passed" in [message.content for message in output.context_messages]
