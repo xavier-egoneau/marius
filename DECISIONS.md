@@ -138,6 +138,46 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
 - Toute décision d’architecture durable doit être ajoutée ici.
 - Si une règle devient fausse, on la corrige explicitement plutôt que de la laisser dériver.
 
+## 2026-05-08 — Suppression du mode local/global — capacités progressives
+- Décision : pas de distinction local/global. Marius a un seul mode ; les fonctionnalités avancées s'activent via des skills.
+- Règle : `marius` se lance toujours dans le répertoire courant. La mémoire (project_store + memory.db) est active dans tous les cas.
+- Ce qui appartient au skill `assistant` (et non à la config de base) : workspace, USER.md, agents nommés multiples, gateway constant, dreaming planifié, daily planifié.
+- Pourquoi : workspace + gateway + dreaming + daily sont interdépendants — ils forment un bloc cohérent qui n'a de sens que si l'agent tourne en permanence. Les packager comme skill est plus propre que de les cacher derrière un mode.
+- Impact : `MariusConfig` n'a plus de champ `mode` ni `workspace`. Le wizard `marius setup` ne pose plus la question local/global. USER.md n'est pas créé à l'install de base.
+
+## 2026-05-08 — Architecture mémoire : store illimité + injection sélective
+- Décision : le store SQLite est illimité en pratique ; l’injection dans le contexte actif est bornée et sélective.
+- Principe : `contexte_actif = global + project[cwd]` — snapshot gelé à l’ouverture de session.
+- Deux scopes : `global` (profil user, faits cross-projets) et `project` (contexte d’un projet précis, injecté seulement quand ce projet est actif).
+- Pourquoi : un projet dormant doit conserver sa mémoire sans polluer les autres sessions ; la sélectivité se fait à l’injection, pas au stockage.
+- Impact : `memory_store` reçoit les champs `scope` et `project_path` ; une méthode `get_active_context(cwd)` remplace l’injection par recherche FTS5 par tour.
+
+## 2026-05-08 — Dreaming et daily comme outils agent
+- Décision : dreaming et daily sont des `ToolEntry` dans le toolset de l’agent, pas des scripts externes.
+- Trois points d’entrée identiques : appel par l’agent, commande slash utilisateur (`/dream`, `/daily`), cron qui démarre une session isolée et déclenche le tool.
+- Pourquoi : interface unifiée, testable, sans logique dupliquée entre CLI et scheduler.
+- Impact : le cron ne fait pas de magie — il envoie un message à l’agent qui utilise son tool normalement.
+
+## 2026-05-08 — Dreaming avec LLM obligatoire
+- Décision : le dreaming utilise systématiquement un appel LLM pour la consolidation.
+- Pourquoi : un dreaming sans LLM consoliderait par fréquence de rappel, ce qui éjecterait les projets dormants mais stratégiques. Seule une couche d’inférence distingue "important mais inactif" de "éphémère et révolu".
+- Impact : un appel LLM par dreaming (non par tour) ; le coût est marginal au regard du gain en pertinence sur toutes les sessions futures.
+
+## 2026-05-08 — Skills système avec dream.md et daily.md
+- Décision : chaque skill peut exposer un `dream.md` et un `daily.md` en plus de son `SKILL.md`.
+- `dream.md` : déclare les données que ce skill peut fournir au dreaming.
+- `daily.md` : déclare les données que ce skill peut surfacer dans le briefing quotidien.
+- Les skills `dreaming` et `daily` sont eux-mêmes des skills avec leur `SKILL.md` (config : heure cron, paramètres).
+- Pourquoi : la logique métier du dreaming et du daily vit dans des fichiers Markdown configurables, pas dans le code.
+- Impact : le code ne contient que le pipeline d’agrégation ; le comportement est piloté par les skills.
+
+## 2026-05-08 — Session corpus minimal
+- Décision : à la fermeture du REPL (y compris Ctrl-D), écriture automatique d’un fichier session minimal dans `~/.marius/sessions/`.
+- Contenu : projet, CWD, timestamps, nombre de tours — pas de résumé LLM.
+- Le dreaming lit directement `DECISIONS.md` et `ROADMAP.md` des projets concernés pour le contexte détaillé.
+- Pourquoi : éviter de dépendre d’un `/exit` explicite ; garder le fichier session léger (pointeur, pas contenu).
+- Impact : les fichiers session sont archivés après traitement par le dreaming, jamais injectés dans le contexte actif.
+
 ## 2026-05-07 — Session runtime minimal côté kernel
 - Décision : la continuité conversationnelle courte du kernel est portée par une structure de session orientée `turns`, avec rattachement des `ToolResult`, artefacts et résumés dérivés de compaction.
 - Alternatives : stocker directement une simple liste plate de messages, ou déléguer entièrement cet état au host/UI.
@@ -247,3 +287,15 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
   - le mode `power` reste un droit d’usage sans auto-extension de l’allow-list ;
   - la largeur acceptable d’une root candidate devient une responsabilité du gardien ;
   - les métadonnées de résolution doivent progressivement préférer un triplet générique `allow_expansion_status` / `allow_expansion_code` / `allow_expansion_roots` au simple booléen `active_project_promoted`.
+
+## 2026-05-08 — Host router minimal
+- Décision : garder le host comme une surface mince qui transforme une requête entrante en `TurnInput`, délègue au `runtime_orchestrator` puis renvoie un `OutboundPayload` visible.
+- Contrat minimal :
+  - `InboundRequest` porte le canal, la session, le peer, le texte et des métadonnées ;
+  - `HostRouter` gère un registre de sessions léger et un `ui_history_store` visible en mémoire ;
+  - la réponse visible provient du `render_adapter` quand le provider renvoie un assistant, sinon d’un fallback stable.
+- Pourquoi : matérialiser la frontière host sans y réintroduire le cœur du produit ni mélanger transport, session et rendu.
+- Impact :
+  - le host ne possède pas la logique provider ;
+  - l’historique visible reste séparé du contexte interne du kernel ;
+  - cette brique peut servir plus tard de base à CLI/web/Telegram sans changer le noyau.

@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+wheels/
+*.egg
+MANIFEST
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Tests & couverture
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+
+# Mypy / type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# SQLite — bases de données locales
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+# Marius — données runtime (stockées dans ~/.marius/, pas dans le repo)
+marius_providers.json
+config.json
+
+# Docker
+.docker/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Packaging
+*.whl
+pip-wheel-metadata/
+share/python-wheels/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+logs/
+
+# Claude Code plans (artifacts de sessions)
+.hermes/

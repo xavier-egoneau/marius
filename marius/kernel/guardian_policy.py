@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from marius.kernel.project_context import PermissionMode
+from marius.kernel.project_detector import ProjectSignal, detect_project
 
 
 class AllowExpansionReason(str, Enum):
@@ -29,6 +30,8 @@ class AllowExpansionCode(str, Enum):
     EXPLICIT_USER_REQUEST_REQUIRED = "explicit_user_request_required"
     REQUESTED_ROOT_TOO_BROAD = "requested_root_too_broad"
     REQUESTED_ROOT_ALLOWED = "requested_root_allowed"
+    NOT_A_PROJECT = "not_a_project"           # chemin système ou trop large
+    NO_PROJECT_MARKERS = "no_project_markers"  # aucun marqueur détecté → ASK
 
 
 @dataclass(slots=True, frozen=True)
@@ -77,6 +80,17 @@ class DefaultGuardianPolicy:
                 code=AllowExpansionCode.SAFE_MODE_FORBIDS_EXPANSION,
             )
 
+        # ── détection projet ──────────────────────────────────────────────────
+        detection = detect_project(requested_root)
+
+        if detection.signal is ProjectSignal.DENIED:
+            return AllowExpansionDecision(
+                status=AllowExpansionStatus.DENY,
+                code=AllowExpansionCode.NOT_A_PROJECT,
+                metadata={"detected_signal": detection.signal, "path": str(detection.path)},
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
         if not request.current_allowed_roots and request.workspace_root is None:
             return AllowExpansionDecision(
                 status=AllowExpansionStatus.NOT_REQUIRED,
@@ -84,9 +98,19 @@ class DefaultGuardianPolicy:
             )
 
         if not request.explicit_user_request:
+            # Aucun marqueur → demander même avec signal NONE
+            code = (
+                AllowExpansionCode.NO_PROJECT_MARKERS
+                if detection.signal is ProjectSignal.NONE
+                else AllowExpansionCode.EXPLICIT_USER_REQUEST_REQUIRED
+            )
             return AllowExpansionDecision(
                 status=AllowExpansionStatus.ASK,
-                code=AllowExpansionCode.EXPLICIT_USER_REQUEST_REQUIRED,
+                code=code,
+                metadata={
+                    "detected_signal": detection.signal,
+                    "markers_found": detection.markers_found,
+                },
             )
 
         if self._is_too_broad(requested_root, allowed_roots, request.workspace_root):
@@ -99,6 +123,10 @@ class DefaultGuardianPolicy:
             status=AllowExpansionStatus.ALLOW,
             code=AllowExpansionCode.REQUESTED_ROOT_ALLOWED,
             roots_to_add=(requested_root,),
+            metadata={
+                "detected_signal": detection.signal,
+                "markers_found": detection.markers_found,
+            },
         )
 
     def _is_allowed(self, candidate: Path, allowed_roots: tuple[Path, ...]) -> bool:

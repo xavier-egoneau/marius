@@ -1,0 +1,15 @@
+use_default_settings: true
+
+server:
+  secret_key: "marius-searxng-local-only"
+  base_url: "http://localhost:19080"
+  bind_address: "0.0.0.0:8080"
+
+search:
+  formats:
+    - html
+    - json
+
+ui:
+  default_theme: simple
+  default_locale: fr

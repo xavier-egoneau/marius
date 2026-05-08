@@ -1,89 +1,102 @@
 # Marius — Roadmap
 
-## But
-Créer une base agentique modulaire, réutilisable et simple à faire évoluer, tout en conservant la finalité fonctionnelle initiale.
+## État actuel (2026-05-08)
 
-## Priorités
+Le socle agentique est opérationnel en CLI :
+kernel complet · provider ChatGPT OAuth + Ollama · tools filesystem/shell/web/memory ·
+permissions safe/limited/power · mémoire SQLite+FTS5 avec scopes · session corpus ·
+onboarding skill · config agents · SearxNG auto-hébergé
 
-### 0. Identité et cadrage
-- Poser la finalité produit identique et l’approche de réécriture radicalement différente.
-- Définir clairement les deux modes : local et global.
-- Définir le setup initial du mode global : nom utilisateur, nom de l’assistant, style d’interaction, langue, workspace.
+---
 
-### 1. Fondations
-- Définir les contrats du core.
-- Définir le flux de requête.
-- Définir les interfaces entre core, provider, guard, tools, sessions et contexte.
-- Stabiliser la liste des briques standalone dans `BRICKS.md`.
+## Reste à faire
 
-### 2. Session canonique et branches
-- Définir la session canonique commune CLI/web/Telegram en mode global seulement.
-- Définir le comportement des branches ciblées par dossier.
-- Définir les règles de mémoire locale des branches.
-- Définir l’absence de session canonique et de Telegram en mode local.
-- Définir l’ouverture de branches ciblées depuis le web en mode global.
-- Définir les notifications de branche vers la session canonique.
+### 1. Skills system
 
-### 3. Brique provider
-- Ajouter un adaptateur minimal vers les providers.
-- Normaliser l’appel, l’auth, le streaming et les erreurs.
-- Garder cette brique standalone.
+- [ ] **Skills reader** — découverte et chargement de `~/.marius/skills/*/SKILL.md`
+      dans le contexte système au démarrage REPL
+- [ ] **skill_view tool** — l'agent peut lire le contenu d'un skill à la demande
+- [ ] **dream.md / daily.md** — parsing des contrats de données par skill
+- [ ] **`marius skills`** CLI — lister les skills disponibles, les activer par agent
+- [ ] **AGENTS.md global** — créer `~/.marius/AGENTS.md` conventions par défaut
+- [ ] **SOUL.md auto-création** — générer un SOUL.md minimal au premier setup si absent
 
-### 4. Gardien de sécurité
-- Intercepter les actions sensibles.
-- Autoriser / bloquer / demander confirmation.
-- Éviter toute surcharge de verbosité.
+---
 
-### 5. Contexte Markdown
-- Définir les fichiers `.md` source de vérité.
-- Formaliser le projet actif avec une stratégie explicite.
-- Séparer intention, mémoire et décisions.
-- Définir explicitement la place de `SOUL.md`, `USER.md`, `AGENTS.md`, `DECISIONS.md` et `ROADMAP.md`.
-- Garantir un rendu Markdown cohérent entre CLI, web et Telegram.
-- Préserver l’historique visible de l’utilisateur même quand le contexte interne est compacté.
-- Rendre les diffs de développement lisibles et réutilisables dans les surfaces de discussion.
+### 2. Mémoire — Dreaming & Daily
 
-### 6. Skills, dreaming et daily
-- Définir le store de skills partagé.
-- Définir l’activation des skills par agent.
-- Définir les apports `dream.md` / `daily.md` au dreaming et au digest.
+- [ ] **Dreaming tool** — agrège sessions + memory.db + DECISIONS.md/ROADMAP.md
+      + dream.md des skills actifs → appel LLM unique → opérations JSON sur le store
+- [ ] **Daily tool** — handoff dreaming + daily.md des skills → briefing Markdown
+- [ ] **Cron scheduling** — déclenche dreaming/daily aux heures configurées dans leurs skills
+- [ ] **Archive sessions** — déplacer les fichiers session traités dans `sessions/archive/`
+- [ ] **Commandes REPL** `/dream`, `/daily` — déclencher manuellement
 
-### 7. Canaux
-- Définir CLI, web et Telegram comme canaux du produit.
-- Définir les règles de notifications entre surfaces.
-- Définir comment une même conversation reste lisible d’un canal à l’autre, sans casser le format Markdown.
-- Définir comment les artefacts de type diff et les notices de compaction se propagent entre surfaces.
-- Garder le host web/API suffisamment mince pour ne pas faire dériver le cœur du produit vers une architecture web-first.
+---
 
-### 8. Tests et stabilité
-- Tester chaque brique isolément.
-- Vérifier l’absence de couplage fort.
-- Valider la fluidité des réponses.
+### 3. Setup & config
 
-## Règle de conduite
-Avant d’implémenter une nouvelle fonctionnalité, vérifier :
-- est-ce une brique réutilisable ?
-- est-ce standalone ?
-- est-ce vraiment nécessaire maintenant ?
-- est-ce que ça améliore la fluidité ?
+- [ ] **`marius setup` validation** — tester le parcours complet first-run
+- [ ] **SOUL.md dans le wizard** — proposer de remplir le style de l'agent au setup
+- [ ] **`/decisions` et `/roadmap`** — charger DECISIONS.md / ROADMAP.md dans le REPL
+- [ ] **`marius config --list-agents`** — afficher les agents configurés
+- [ ] **Commande `/config`** dans le REPL — reconfigurer un agent en live
 
-## État actuel
-- Architecture définie sur le principe : LLM au centre, guard de sécurité, outils minimaux, contexte en Markdown.
-- Le socle doit aussi préserver l’historique utilisateur, même si le contexte interne est compacté ou réécrit.
-- Les flux dev/self-update doivent exposer les diffs proprement dans l’UI et dans les messages.
-- Liste détaillée des briques à définir ensuite.
+---
 
-## Slices d’implémentation en cours
-- [x] Cadrer la répartition des fichiers Markdown de contexte (`SOUL.md`, `USER.md`, `AGENTS.md`, `DECISIONS.md`, `ROADMAP.md`) [serial] [high]
-- [x] Poser les frontières `kernel` / `host` / `render` / `storage` dans la doc [serial] [high]
-- [x] Créer le squelette Python minimal des couches principales [serial] [high]
-- [x] Ajouter une première brique `session_runtime` orientée tours et indépendante des canaux [serial] [high]
-- [x] Ajouter des tests kernel pour compaction, session runtime et orchestrateur minimal [serial] [high]
-- [x] Brancher un `provider_adapter` minimal sur le `runtime_orchestrator` [serial] [high]
-- [x] Introduire un `ui_history_store` concret distinct du contexte interne [serial] [high]
-- [x] Poser un `render_adapter` Markdown cross-canaux pour messages, notices et diffs [serial] [high]
-- [x] Ajouter un `context_builder` minimal pour assembler explicitement les sources Markdown de contexte [serial] [high]
-- [x] Ajouter un `project_context` minimal pour résoudre le projet actif et préparer les sources du `context_builder` [serial] [high]
-- [x] Étendre `project_context` avec les modes `safe` / `limited` / `power` et une zone allow explicite [serial] [high]
-- [x] Ajouter une `guardian_policy` minimale pour décider des extensions d’allow hors `project_context` [serial] [high]
-- [x] Finaliser l’injection de `guardian_policy` dans `project_context` et la passer au vert en tests [serial] [high]
+### 4. Skill assistant (bloc gateway)
+
+Toutes ces fonctionnalités sont interdépendantes — elles s'activent ensemble.
+
+- [ ] **Gateway** — processus persistant (daemon/service) qui maintient une session
+      active entre les relances
+- [ ] **Service système** — démarrage au boot ou au lancement de session
+      (systemd user service ou launchd)
+- [ ] **Multi-agents** — plusieurs agents nommés gérés par le gateway
+- [ ] **Workspace** — `~/.marius/workspace/<agent>/` par agent, avec mémoire dédiée
+- [ ] **USER.md wizard** — remplir le profil utilisateur via le skill onboarding
+      (aujourd'hui géré par l'onboarding skill, wizard dédié à terme)
+- [ ] **Notifications inter-agents** — une branche peut notifier la session principale
+
+---
+
+### 5. Canaux
+
+- [ ] **Host web** — API HTTP mince + interface web minimale (chat)
+- [ ] **Canal Telegram** — réception et envoi de messages via Bot API
+- [ ] **Commandes Telegram** — `/start`, `/help`, `/status`, `/new`, commandes customs
+- [ ] **Multi-canal** — même session accessible depuis CLI, web et Telegram
+- [ ] **Artefacts cross-canaux** — diffs, notices de compaction lisibles dans tous les canaux
+- [ ] **Rendu Markdown** — tester la cohérence entre CLI (rich), web (HTML) et Telegram
+
+---
+
+### 6. Outillage CLI
+
+- [ ] **`marius doctor`** — diagnostic de l'installation : provider joignable ?
+      SearxNG actif ? config valide ? permissions cohérentes ? SOUL.md présent ?
+      Affiche un rapport clair avec les correctifs suggérés.
+- [ ] **`marius dashboard`** — vue synthétique de l'état courant : agents configurés,
+      sessions récentes, taille mémoire, dernière exécution dreaming/daily,
+      SearxNG status. Inspiré du dashboard Maurice.
+- [ ] **`marius update`** — mise à jour de Marius lui-même
+
+---
+
+### 7. Hardening & production
+
+- [ ] **Fichiers sensibles** — détecter `.env`, `.netrc`, clés SSH → alerte avant lecture/écriture
+- [ ] **Récupération d'erreurs** — provider down, SearxNG down → messages clairs + retry
+- [ ] **Compaction streaming** — déclencher la compaction dans le chemin streaming
+- [ ] **Tests web tools** — tests unitaires pour `web_fetch` et `web_search`
+- [ ] **Tests memory tool** — tests pour `make_memory_tool` + intégration
+- [ ] **Tests config** — tests pour `ConfigStore`, `run_setup`
+
+---
+
+## Principes de conduite
+
+- Chaque brique doit être standalone et testable seule.
+- Le LLM orchestre — les outils servent, n'imposent pas.
+- La complexité s'ajoute par besoin réel, pas par anticipation.
+- La sécurité passe avant la commodité.

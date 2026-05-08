@@ -1,0 +1,17 @@
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: marius-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:19080:8080"
+    volumes:
+      - ./docker/searxng:/etc/searxng:rw
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:19080
