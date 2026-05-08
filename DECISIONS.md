@@ -232,3 +232,18 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
   - un objet `branch` n’est valide qu’avec le scope `branch` ;
   - les chemins documentaires renvoyés pour le projet actif doivent rester sous sa root ;
   - les projets cités restent des références de contexte, pas des extensions implicites de permissions.
+
+## 2026-05-07 — Guardian policy minimale pour l’extension d’allow
+- Décision : extraire hors de `project_context` la décision d’extension de la zone allow dans une brique `guardian_policy` pure et synchrone.
+- Contrat minimal :
+  - `GuardianPolicy.review_allow_expansion(request)` reçoit uniquement le mode de permission, la zone allow actuelle, la root candidate, le workspace éventuel et le signal d’explicitation utilisateur ;
+  - `AllowExpansionDecision` renvoie un statut `not_required` / `allow` / `deny` / `ask`, un `code` stable et les `roots_to_add` exactes quand une extension est accordée ;
+  - `project_context` garde la normalisation des paths, la résolution du projet actif et l’application mécanique de la décision, sans réimplémenter la politique.
+- Pourquoi : empêcher qu’une promotion hors allow soit décidée implicitement par le résolveur de contexte, et garder une politique de sécurité standalone, testable et réutilisable.
+- Impact :
+  - aucune mutation de l’allow-list ne doit arriver sans décision explicite `allow` ;
+  - quand aucune zone allow de base n’est déclarée, le gardien ne bloque pas inutilement le simple contexte projet : il ne mutera pas l’allow-list tant qu’il n’a rien à étendre ;
+  - `project_context` peut lever une erreur métier stable sur `ask` ou `deny` sans fabriquer lui-même la règle ;
+  - le mode `power` reste un droit d’usage sans auto-extension de l’allow-list ;
+  - la largeur acceptable d’une root candidate devient une responsabilité du gardien ;
+  - les métadonnées de résolution doivent progressivement préférer un triplet générique `allow_expansion_status` / `allow_expansion_code` / `allow_expansion_roots` au simple booléen `active_project_promoted`.

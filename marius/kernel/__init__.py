@@ -11,4 +11,5 @@ __all__ = [
     "provider",
     "context_builder",
     "project_context",
+    "guardian_policy",
 ]

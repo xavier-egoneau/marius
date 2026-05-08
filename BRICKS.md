@@ -74,6 +74,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - Évaluer une intention d’action.
 - Produire `allow`, `deny`, `ask`.
 - Gérer un minimum de politique et de TTL d’approbation.
+- Porter une sous-politique pure de décision d’extension d’allow (`guardian_policy`) réutilisable hors UI.
 
 **Dépendances autorisées**
 - Politique de sécurité.
@@ -126,8 +127,9 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - Porter les règles local/global.
 - Décrire le contexte d’une branche ciblée.
 - Produire un préambule et des `ContextSource` pour le `context_builder` sans assembler lui-même le Markdown.
-- Résoudre la zone allow effective à partir du workspace, des roots déjà allowées et du mode `safe` / `limited` / `power`.
-- Promouvoir explicitement un projet hors workspace en mode `limited` quand la demande le justifie.
+- Résoudre la zone allow effective à partir du workspace, des roots déjà allowées et d’une décision injectée par `guardian_policy`.
+- Appliquer mécaniquement la décision du gardien sans réimplémenter la politique de promotion.
+- Ne pas muter l’allow-list quand aucune base allow n’est encore déclarée.
 
 **Dépendances autorisées**
 - Métadonnées projet.

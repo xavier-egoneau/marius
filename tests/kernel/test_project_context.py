@@ -5,6 +5,13 @@ from pathlib import Path
 import pytest
 
 from marius.kernel.context_builder import ContextBuildInput
+from marius.kernel.guardian_policy import (
+    AllowExpansionCode,
+    AllowExpansionDecision,
+    AllowExpansionRequest,
+    AllowExpansionStatus,
+    DefaultGuardianPolicy,
+)
 from marius.kernel.project_context import (
     BranchRef,
     PermissionMode,
@@ -24,6 +31,16 @@ class FakeCatalog:
 
     def describe(self, project: ProjectRef) -> ProjectDocumentPaths:
         return self.documents[project.project_id]
+
+
+class StubGuardianPolicy:
+    def __init__(self, decision: AllowExpansionDecision) -> None:
+        self.decision = decision
+        self.requests: list[AllowExpansionRequest] = []
+
+    def review_allow_expansion(self, request: AllowExpansionRequest) -> AllowExpansionDecision:
+        self.requests.append(request)
+        return self.decision
 
 
 MARIUS = ProjectRef(
@@ -77,6 +94,7 @@ def test_project_context_requires_active_project_in_local_mode() -> None:
         )
 
 
+
 def test_project_context_requires_active_project_for_project_scope() -> None:
     resolver = ProjectContextResolver(catalog=CATALOG)
 
@@ -89,8 +107,9 @@ def test_project_context_requires_active_project_for_project_scope() -> None:
         )
 
 
+
 def test_project_context_safe_mode_rejects_project_outside_workspace() -> None:
-    resolver = ProjectContextResolver(catalog=CATALOG)
+    resolver = ProjectContextResolver(catalog=CATALOG, guardian_policy=DefaultGuardianPolicy())
 
     with pytest.raises(ProjectResolutionError):
         resolver.resolve(
@@ -104,8 +123,9 @@ def test_project_context_safe_mode_rejects_project_outside_workspace() -> None:
         )
 
 
+
 def test_project_context_limited_mode_accepts_already_allowed_project() -> None:
-    resolver = ProjectContextResolver(catalog=CATALOG)
+    resolver = ProjectContextResolver(catalog=CATALOG, guardian_policy=DefaultGuardianPolicy())
 
     resolved = resolver.resolve(
         ProjectContextInput(
@@ -119,12 +139,14 @@ def test_project_context_limited_mode_accepts_already_allowed_project() -> None:
     )
 
     assert resolved.active_project == OUTSIDE
-    assert OUTSIDE.root_path in resolved.allowed_roots
-    assert resolved.metadata["active_project_promoted"] is False
+    assert OUTSIDE.root_path.resolve(strict=False) in resolved.allowed_roots
+    assert resolved.metadata["allow_expansion_status"] == AllowExpansionStatus.NOT_REQUIRED.value
+    assert resolved.metadata["allow_expansion_code"] == AllowExpansionCode.ALREADY_ALLOWED.value
+
 
 
 def test_project_context_limited_mode_rejects_outside_project_without_explicit_request() -> None:
-    resolver = ProjectContextResolver(catalog=CATALOG)
+    resolver = ProjectContextResolver(catalog=CATALOG, guardian_policy=DefaultGuardianPolicy())
 
     with pytest.raises(ProjectResolutionError):
         resolver.resolve(
@@ -138,8 +160,16 @@ def test_project_context_limited_mode_rejects_outside_project_without_explicit_r
         )
 
 
-def test_project_context_limited_mode_promotes_explicit_outside_project() -> None:
-    resolver = ProjectContextResolver(catalog=CATALOG)
+
+def test_project_context_limited_mode_allows_explicit_outside_project_only_after_guardian_allow() -> None:
+    guardian = StubGuardianPolicy(
+        AllowExpansionDecision(
+            status=AllowExpansionStatus.ALLOW,
+            code=AllowExpansionCode.REQUESTED_ROOT_ALLOWED,
+            roots_to_add=(OUTSIDE.root_path.resolve(strict=False),),
+        )
+    )
+    resolver = ProjectContextResolver(catalog=CATALOG, guardian_policy=guardian)
 
     resolved = resolver.resolve(
         ProjectContextInput(
@@ -152,15 +182,45 @@ def test_project_context_limited_mode_promotes_explicit_outside_project() -> Non
         )
     )
 
-    assert resolved.active_project == OUTSIDE
-    assert WORKSPACE_ROOT in resolved.allowed_roots
-    assert OUTSIDE.root_path in resolved.allowed_roots
-    assert resolved.metadata["active_project_promoted"] is True
+    assert len(guardian.requests) == 1
+    assert guardian.requests[0].requested_root == OUTSIDE.root_path.resolve(strict=False)
+    assert guardian.requests[0].explicit_user_request is True
+    assert WORKSPACE_ROOT.resolve(strict=False) in resolved.allowed_roots
+    assert OUTSIDE.root_path.resolve(strict=False) in resolved.allowed_roots
+    assert resolved.metadata["allow_expansion_status"] == AllowExpansionStatus.ALLOW.value
+    assert resolved.metadata["allow_expansion_code"] == AllowExpansionCode.REQUESTED_ROOT_ALLOWED.value
+    assert resolved.metadata["allow_expansion_roots"] == [str(OUTSIDE.root_path.resolve(strict=False))]
     assert "ajouté à la zone allow" in resolved.preamble
 
 
+
+def test_project_context_does_not_mutate_allow_list_on_guardian_ask() -> None:
+    guardian = StubGuardianPolicy(
+        AllowExpansionDecision(
+            status=AllowExpansionStatus.ASK,
+            code=AllowExpansionCode.EXPLICIT_USER_REQUEST_REQUIRED,
+        )
+    )
+    resolver = ProjectContextResolver(catalog=CATALOG, guardian_policy=guardian)
+
+    with pytest.raises(ProjectResolutionError) as exc_info:
+        resolver.resolve(
+            ProjectContextInput(
+                mode=RuntimeMode.GLOBAL,
+                session_scope=SessionScope.PROJECT,
+                permission_mode=PermissionMode.LIMITED,
+                workspace_root=WORKSPACE_ROOT,
+                active_project=OUTSIDE,
+            )
+        )
+
+    assert "explicit request" in str(exc_info.value).lower()
+    assert len(guardian.requests) == 1
+
+
+
 def test_project_context_power_mode_accepts_outside_project_without_promotion() -> None:
-    resolver = ProjectContextResolver(catalog=CATALOG)
+    resolver = ProjectContextResolver(catalog=CATALOG, guardian_policy=DefaultGuardianPolicy())
 
     resolved = resolver.resolve(
         ProjectContextInput(
@@ -173,8 +233,10 @@ def test_project_context_power_mode_accepts_outside_project_without_promotion() 
     )
 
     assert resolved.active_project == OUTSIDE
-    assert resolved.metadata["active_project_promoted"] is False
-    assert resolved.metadata["permission_mode"] == PermissionMode.POWER.value
+    assert resolved.metadata["allow_expansion_status"] == AllowExpansionStatus.NOT_REQUIRED.value
+    assert resolved.metadata["allow_expansion_code"] == AllowExpansionCode.POWER_MODE_NO_MUTATION.value
+    assert resolved.metadata["allow_expansion_roots"] == []
+
 
 
 def test_project_context_requires_active_project_for_branch_scope() -> None:
@@ -190,6 +252,7 @@ def test_project_context_requires_active_project_for_branch_scope() -> None:
         )
 
 
+
 def test_project_context_requires_branch_details_for_branch_scope() -> None:
     resolver = ProjectContextResolver(catalog=CATALOG)
 
@@ -201,6 +264,7 @@ def test_project_context_requires_branch_details_for_branch_scope() -> None:
                 active_project=MARIUS,
             )
         )
+
 
 
 def test_project_context_rejects_branch_details_outside_branch_scope() -> None:
@@ -217,6 +281,7 @@ def test_project_context_rejects_branch_details_outside_branch_scope() -> None:
         )
 
 
+
 def test_project_context_rejects_active_project_duplicated_in_cited_projects() -> None:
     resolver = ProjectContextResolver(catalog=CATALOG)
 
@@ -229,6 +294,7 @@ def test_project_context_rejects_active_project_duplicated_in_cited_projects() -
                 cited_projects=[MARIUS],
             )
         )
+
 
 
 def test_project_context_allows_global_scope_without_active_project() -> None:
@@ -251,6 +317,9 @@ def test_project_context_allows_global_scope_without_active_project() -> None:
     assert "Aucun projet actif" in resolved.preamble
     assert resolved.metadata["active_project_id"] is None
     assert resolved.metadata["cited_project_ids"] == ["marius"]
+    assert resolved.metadata["allow_expansion_status"] is None
+    assert resolved.metadata["allow_expansion_code"] is None
+
 
 
 def test_project_context_builds_context_input_for_active_project_only() -> None:
@@ -280,6 +349,7 @@ def test_project_context_builds_context_input_for_active_project_only() -> None:
     assert resolved.metadata["cited_project_ids"] == ["maurice"]
 
 
+
 def test_project_context_rejects_catalog_documents_outside_active_project_root() -> None:
     catalog = FakeCatalog(
         {
@@ -302,6 +372,7 @@ def test_project_context_rejects_catalog_documents_outside_active_project_root()
         )
 
 
+
 def test_project_context_preamble_mentions_mode_active_project_and_cited_projects() -> None:
     resolver = ProjectContextResolver(catalog=CATALOG)
 
@@ -322,6 +393,7 @@ def test_project_context_preamble_mentions_mode_active_project_and_cited_project
     assert "Projet actif : Marius" in resolved.preamble
     assert "Projet cité : Maurice" in resolved.preamble
     assert "Le projet actif a été ajouté à la zone allow" not in resolved.preamble
+
 
 
 def test_project_context_preamble_mentions_branch_context_when_present() -> None:

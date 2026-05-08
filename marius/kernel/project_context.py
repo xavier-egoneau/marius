@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from marius.kernel.context_builder import ContextBuildInput, ContextSource
 
@@ -88,8 +88,9 @@ class ProjectResolutionError(ValueError):
 
 
 class ProjectContextResolver:
-    def __init__(self, *, catalog: ProjectCatalog) -> None:
+    def __init__(self, *, catalog: ProjectCatalog, guardian_policy: Any | None = None) -> None:
         self.catalog = catalog
+        self.guardian_policy = guardian_policy
 
     def resolve(self, context_input: ProjectContextInput) -> ResolvedProjectContext:
         self._validate(context_input)
@@ -99,10 +100,11 @@ class ProjectContextResolver:
             context_input.allowed_roots,
             workspace_root=context_input.workspace_root,
         )
+        allow_expansion = None
         active_project_promoted = False
 
         if active_project is not None:
-            allowed_roots, active_project_promoted = self._resolve_allowed_roots(
+            allowed_roots, allow_expansion, active_project_promoted = self._apply_guardian_policy(
                 context_input,
                 allowed_roots=allowed_roots,
             )
@@ -110,6 +112,7 @@ class ProjectContextResolver:
         preamble = self._build_preamble(
             context_input,
             allowed_roots=allowed_roots,
+            allow_expansion=allow_expansion,
             active_project_promoted=active_project_promoted,
         )
         sources: list[ContextSource] = []
@@ -118,6 +121,14 @@ class ProjectContextResolver:
             documents = self.catalog.describe(active_project)
             self._validate_documents_for_project(active_project, documents)
             sources = self._build_sources(documents)
+
+        allow_expansion_status = None
+        allow_expansion_code = None
+        allow_expansion_roots: list[str] = []
+        if allow_expansion is not None:
+            allow_expansion_status = allow_expansion.status.value
+            allow_expansion_code = allow_expansion.code.value
+            allow_expansion_roots = [str(root) for root in allow_expansion.roots_to_add]
 
         return ResolvedProjectContext(
             active_project=active_project,
@@ -139,6 +150,9 @@ class ProjectContextResolver:
                 "cited_project_ids": [project.project_id for project in context_input.cited_projects],
                 "branch_id": context_input.branch.branch_id if context_input.branch else None,
                 "active_project_promoted": active_project_promoted,
+                "allow_expansion_status": allow_expansion_status,
+                "allow_expansion_code": allow_expansion_code,
+                "allow_expansion_roots": allow_expansion_roots,
             },
         )
 
@@ -169,35 +183,62 @@ class ProjectContextResolver:
                     "The active project cannot also be listed as a cited project"
                 )
 
-    def _resolve_allowed_roots(
+    def _apply_guardian_policy(
         self,
         context_input: ProjectContextInput,
         *,
         allowed_roots: list[Path],
-    ) -> tuple[list[Path], bool]:
-        active_root = context_input.active_project.root_path
-        permission_mode = context_input.permission_mode
-
-        if permission_mode is PermissionMode.POWER:
-            return allowed_roots, False
-
-        if not allowed_roots:
-            return allowed_roots, False
-
-        if self._is_allowed(active_root, allowed_roots):
-            return allowed_roots, False
-
-        if permission_mode is PermissionMode.SAFE:
-            raise ProjectResolutionError(
-                "Safe mode requires the active project to stay inside the allow zone"
-            )
-
-        if context_input.activate_requested_project:
-            return self._append_unique(allowed_roots, active_root), True
-
-        raise ProjectResolutionError(
-            "Limited mode requires an explicit request before allowing an active project outside the current allow zone"
+    ) -> tuple[list[Path], Any | None, bool]:
+        from marius.kernel.guardian_policy import (
+            AllowExpansionCode,
+            AllowExpansionDecision,
+            AllowExpansionReason,
+            AllowExpansionStatus,
+            AllowExpansionRequest,
+            DefaultGuardianPolicy,
         )
+
+        guardian_policy = self.guardian_policy or DefaultGuardianPolicy()
+        active_project = context_input.active_project
+        assert active_project is not None
+        requested_root = self._normalize_path(active_project.root_path)
+        current_allowed_roots = tuple(allowed_roots)
+        decision = guardian_policy.review_allow_expansion(
+            AllowExpansionRequest(
+                permission_mode=context_input.permission_mode,
+                workspace_root=self._normalize_path(context_input.workspace_root)
+                if context_input.workspace_root is not None
+                else None,
+                current_allowed_roots=current_allowed_roots,
+                requested_root=requested_root,
+                reason=AllowExpansionReason.ACTIVATE_PROJECT,
+                explicit_user_request=context_input.activate_requested_project,
+            )
+        )
+
+        if decision.status is AllowExpansionStatus.NOT_REQUIRED:
+            return allowed_roots, decision, False
+
+        if decision.status is AllowExpansionStatus.ALLOW:
+            updated_roots = list(allowed_roots)
+            for root in decision.roots_to_add:
+                updated_roots = self._append_unique(updated_roots, self._normalize_path(root))
+            active_project_promoted = any(
+                self._normalize_path(root) == requested_root for root in decision.roots_to_add
+            )
+            return updated_roots, decision, active_project_promoted
+
+        message = self._guardian_failure_message(decision.code)
+        raise ProjectResolutionError(message)
+
+    def _guardian_failure_message(self, code: Any) -> str:
+        if code.value == "explicit_user_request_required":
+            return "Limited mode requires an explicit request before allowing an active project outside the current allow zone"
+        if code.value == "safe_mode_forbids_expansion":
+            return "Safe mode requires the active project to stay inside the allow zone"
+        if code.value == "requested_root_too_broad":
+            return "The requested root is too broad to be added to the allow zone"
+        return "The guardian policy refused the allow expansion request"
 
     def _build_sources(self, documents: ProjectDocumentPaths) -> list[ContextSource]:
         ordered_documents = [
@@ -233,6 +274,7 @@ class ProjectContextResolver:
         context_input: ProjectContextInput,
         *,
         allowed_roots: list[Path],
+        allow_expansion: Any | None,
         active_project_promoted: bool,
     ) -> str:
         lines = [f"Mode {context_input.mode.value}."]
@@ -258,9 +300,17 @@ class ProjectContextResolver:
                 "Les projets cités restent des références tant qu'un basculement explicite n'a pas eu lieu."
             )
 
+        if allow_expansion is not None:
+            lines.append(
+                f"Expansion de zone allow : {allow_expansion.status.value} / {allow_expansion.code.value}."
+            )
+            if allow_expansion.roots_to_add:
+                formatted_roots = ", ".join(str(root) for root in allow_expansion.roots_to_add)
+                lines.append(f"Roots à ajouter : {formatted_roots}.")
+
         if active_project_promoted:
             lines.append(
-                "Le projet actif a été ajouté à la zone allow suite à une demande explicite."
+                "Le projet actif a été ajouté à la zone allow suite à une décision du gardien."
             )
 
         if allowed_roots:
@@ -288,13 +338,6 @@ class ProjectContextResolver:
         if root in roots:
             return list(roots)
         return [*roots, root]
-
-    def _is_allowed(self, candidate: Path, allowed_roots: list[Path]) -> bool:
-        candidate = self._normalize_path(candidate)
-        for root in allowed_roots:
-            if candidate == root or root in candidate.parents:
-                return True
-        return False
 
     def _normalize_path(self, path: Path) -> Path:
         return path.expanduser().resolve(strict=False)
