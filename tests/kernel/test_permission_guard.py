@@ -69,6 +69,15 @@ def test_limited_allows_read_inside_cwd(cwd: Path) -> None:
     assert g.check("read_file", {"path": str(cwd / "src" / "main.py")}) is True
 
 
+def test_limited_treats_vision_as_file_read(cwd: Path, tmp_path: Path) -> None:
+    asked = []
+    g = PermissionGuard(mode="limited", cwd=cwd, on_ask=lambda t, a, r: asked.append(r) or False)
+
+    assert g.check("vision", {"path": str(cwd / "image.png")}) is True
+    assert g.check("vision", {"path": str(tmp_path / "outside.png")}) is False
+    assert asked
+
+
 def test_limited_asks_read_outside_cwd(cwd: Path, tmp_path: Path) -> None:
     asked = []
     g = PermissionGuard(mode="limited", cwd=cwd, on_ask=lambda t, a, r: asked.append(r) or False)

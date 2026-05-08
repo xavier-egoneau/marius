@@ -298,6 +298,7 @@ class ChatGPTOAuthAdapter:
             payload["tools"] = _to_chatgpt_tools(request.tools)
 
         pending_tool_calls: list[dict[str, Any]] = []
+        saw_text_delta = False
 
         try:
             response = _http_open_headers(url, payload, headers=_chatgpt_headers(self.entry.api_key), timeout=self.timeout)
@@ -310,15 +311,32 @@ class ChatGPTOAuthAdapter:
             if event_type == "response.output_text.delta":
                 delta = event.get("delta") or ""
                 if delta:
+                    saw_text_delta = True
                     yield ProviderChunk(type="text_delta", delta=delta)
 
+            elif event_type == "response.output_text.done":
+                text = event.get("text") or ""
+                if text and not saw_text_delta:
+                    saw_text_delta = True
+                    yield ProviderChunk(type="text_delta", delta=text)
+
             elif event_type == "response.output_item.done":
-                call = _normalize_chatgpt_tool_call(event.get("item") or {})
+                item = event.get("item") or {}
+                call = _normalize_chatgpt_tool_call(item)
                 if call is not None:
                     pending_tool_calls.append(call)
+                else:
+                    text = _chatgpt_text_from_item(item)
+                    if text and not saw_text_delta:
+                        saw_text_delta = True
+                        yield ProviderChunk(type="text_delta", delta=text)
 
             elif event_type == "response.completed":
                 response_data = event.get("response") or {}
+                completed_text = _chatgpt_text_from_response(response_data)
+                if completed_text and not saw_text_delta:
+                    saw_text_delta = True
+                    yield ProviderChunk(type="text_delta", delta=completed_text)
                 usage_raw = response_data.get("usage") or {}
                 if usage_raw:
                     yield ProviderChunk(
@@ -338,6 +356,7 @@ class ChatGPTOAuthAdapter:
                         ],
                         finish_reason="tool_calls",
                     )
+                    return
                 yield ProviderChunk(type="done", finish_reason="stop")
                 return
 
@@ -388,15 +407,29 @@ def _split_system(messages: list[Message]) -> tuple[str, list[Message]]:
 
 def _to_chatgpt_input(messages: list[Message]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
+    open_call_ids: set[str] = set()
     for msg in messages:
         if msg.role == Role.TOOL:
-            result.append({
-                "type": "function_call_output",
-                "call_id": msg.correlation_id or "",
-                "output": msg.content,
-            })
+            call_id = msg.correlation_id or ""
+            if call_id in open_call_ids:
+                result.append({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": msg.content,
+                })
+                open_call_ids.discard(call_id)
+            elif msg.content:
+                result.append({
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": f"Résultat d'outil précédent :\n{msg.content}",
+                    }],
+                })
         elif msg.tool_calls:
             for tc in msg.tool_calls:
+                open_call_ids.add(tc.id)
                 result.append({
                     "type": "function_call",
                     "call_id": tc.id,
@@ -451,6 +484,29 @@ def _chatgpt_tool_calls_from_response(response: dict[str, Any]) -> list[dict[str
     return calls
 
 
+def _chatgpt_text_from_response(response: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for item in response.get("output") or []:
+        text = _chatgpt_text_from_item(item)
+        if text:
+            parts.append(text)
+    return "".join(parts)
+
+
+def _chatgpt_text_from_item(item: dict[str, Any]) -> str:
+    if item.get("type") != "message":
+        return ""
+    parts: list[str] = []
+    for content in item.get("content") or []:
+        if not isinstance(content, dict):
+            continue
+        if content.get("type") in {"output_text", "text"}:
+            text = content.get("text") or ""
+            if text:
+                parts.append(text)
+    return "".join(parts)
+
+
 def _http_open_headers(
     url: str,
     payload: dict[str, Any],
@@ -466,7 +522,7 @@ def _http_open_headers(
         return urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as exc:
         raise ProviderError(
-            f"HTTP {exc.code} sur {url}",
+            _http_error_message(exc, url),
             provider_name=url,
             retryable=exc.code in {429, 500, 502, 503, 504},
         ) from exc
@@ -602,7 +658,7 @@ def _http_open(
         return urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as exc:
         raise ProviderError(
-            f"HTTP {exc.code} sur {url}",
+            _http_error_message(exc, url),
             provider_name=url,
             retryable=exc.code in {429, 500, 502, 503, 504},
         ) from exc
@@ -663,7 +719,7 @@ def _http_post(
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raise ProviderError(
-            f"HTTP {exc.code} sur {url}",
+            _http_error_message(exc, url),
             provider_name=url,
             retryable=exc.code in {429, 500, 502, 503, 504},
         ) from exc
@@ -679,3 +735,14 @@ def _http_post(
             provider_name=url,
             retryable=False,
         ) from exc
+
+
+def _http_error_message(exc: urllib.error.HTTPError, url: str) -> str:
+    detail = ""
+    try:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        detail = ""
+    if len(detail) > 800:
+        detail = detail[:799] + "…"
+    return f"HTTP {exc.code} sur {url}" + (f" — {detail}" if detail else "")

@@ -18,7 +18,7 @@ from pathlib import Path
 
 _MARIUS_HOME = Path.home() / ".marius"
 
-_SCHEMA = """
+_TABLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
     memory_id    INTEGER PRIMARY KEY AUTOINCREMENT,
     content      TEXT NOT NULL UNIQUE,
@@ -28,7 +28,9 @@ CREATE TABLE IF NOT EXISTS memories (
     tags         TEXT NOT NULL DEFAULT '',
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+"""
 
+_SUPPORT_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
 CREATE INDEX IF NOT EXISTS idx_memories_scope    ON memories(scope);
 
@@ -87,14 +89,24 @@ class MemoryStore:
 
     def _init_db(self) -> None:
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.executescript(_SCHEMA)
-        # Migration sûre : ajoute les colonnes manquantes sans casser les DBs existantes
+        self._conn.executescript(_TABLE_SCHEMA)
+        # Migration sûre : ajoute les colonnes manquantes avant les index/triggers
+        # qui les référencent, pour les DBs créées par les premières versions.
         existing = {r[1] for r in self._conn.execute("PRAGMA table_info(memories)").fetchall()}
         for stmt in _MIGRATIONS:
             col = stmt.split("ADD COLUMN")[1].split()[0]
             if col not in existing:
                 self._conn.execute(stmt)
+                existing.add(col)
+        self._conn.executescript(_SUPPORT_SCHEMA)
+        self._rebuild_fts()
         self._conn.commit()
+
+    def _rebuild_fts(self) -> None:
+        try:
+            self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')")
+        except sqlite3.OperationalError:
+            pass
 
     # ── write ─────────────────────────────────────────────────────────────────
 
@@ -139,7 +151,7 @@ class MemoryStore:
             if row is None:
                 return False
             self._conn.execute(
-                "UPDATE memories SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE memory_id = ?",
+                "UPDATE memories SET content = ? WHERE memory_id = ?",
                 (new_content, row["memory_id"]),
             )
             self._conn.commit()

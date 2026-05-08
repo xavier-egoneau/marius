@@ -34,6 +34,13 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _KV_RE = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_-]*):\s*(.*)$", re.MULTILINE)
 
 _MARIUS_HOME = Path.home() / ".marius"
+_SYSTEM_SKILLS: dict[str, tuple[str, str]] = {
+    "assistant": (
+        "Bloc assistant durable : IDENTITY.md, USER.md et onboarding conditionnel "
+        "(workspace/gateway/daily à venir).",
+        "system",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -62,10 +69,20 @@ class SkillReader:
 
     def list(self) -> list[SkillMeta]:
         """Scanne le répertoire et retourne les métadonnées de tous les skills."""
-        if not self._dir.exists():
-            return []
+        metas: list[SkillMeta] = [
+            SkillMeta(
+                name=name,
+                description=description,
+                skill_dir=self._dir / name,
+                skill_file=self._dir / name / "SKILL.md",
+                version=version,
+            )
+            for name, (description, version) in sorted(_SYSTEM_SKILLS.items())
+        ]
 
-        metas: list[SkillMeta] = []
+        if not self._dir.exists():
+            return metas
+
         for skill_dir in sorted(self._dir.iterdir()):
             if not skill_dir.is_dir():
                 continue
@@ -74,11 +91,22 @@ class SkillReader:
                 continue
             meta = _parse_meta(skill_file, skill_dir)
             if meta is not None:
+                metas = [m for m in metas if m.name != meta.name]
                 metas.append(meta)
         return metas
 
     def load(self, name: str) -> Skill | None:
         """Charge un skill complet par nom. Retourne None si introuvable."""
+        if name in _SYSTEM_SKILLS:
+            description, version = _SYSTEM_SKILLS[name]
+            meta = SkillMeta(
+                name=name,
+                description=description,
+                skill_dir=self._dir / name,
+                skill_file=self._dir / name / "SKILL.md",
+                version=version,
+            )
+            return Skill(meta=meta, content="")
         skill_dir = self._dir / name
         skill_file = skill_dir / "SKILL.md"
         if not skill_file.exists():
@@ -98,7 +126,7 @@ class SkillReader:
         return result
 
     def exists(self, name: str) -> bool:
-        return (self._dir / name / "SKILL.md").exists()
+        return name in _SYSTEM_SKILLS or (self._dir / name / "SKILL.md").exists()
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

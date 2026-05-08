@@ -23,6 +23,12 @@ def main() -> None:
     # marius setup
     subs.add_parser("setup", help="Configurer Marius (first-run ou reconfiguration)")
 
+    # marius logs
+    logs_p = subs.add_parser("logs", help="Afficher le journal local de diagnostic")
+    logs_p.add_argument("--tail", metavar="N", type=int, default=80, help="Nombre d'entrées à afficher")
+    logs_p.add_argument("--path", action="store_true", help="Afficher le chemin du fichier de logs")
+    logs_p.add_argument("--clear", action="store_true", help="Vider le journal local")
+
     # marius config [--agent NOM]
     config_p = subs.add_parser("config", help="Reconfigurer un agent")
     config_p.add_argument("--agent", metavar="NOM", default=None)
@@ -70,6 +76,10 @@ def main() -> None:
     if args.command == "setup":
         from marius.config.wizard import run_setup
         run_setup()
+        return
+
+    if args.command == "logs":
+        _cmd_logs(args)
         return
 
     if args.command == "config":
@@ -255,6 +265,80 @@ def _cmd_gateway(args) -> None:
         return
 
     console.print("[dim]Usage : marius gateway [start|stop|status][/]\n")
+
+
+def _cmd_logs(args) -> None:
+    """Affiche le journal local de diagnostic."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from marius.storage.log_store import clear_logs, log_path, read_logs
+
+    console = Console(highlight=False)
+    path = log_path()
+
+    if getattr(args, "path", False):
+        console.print(str(path))
+        return
+
+    if getattr(args, "clear", False):
+        clear_logs()
+        console.print(f"\n[dim]Logs vidés : {path}[/]\n")
+        return
+
+    entries = read_logs(limit=max(0, int(getattr(args, "tail", 80) or 80)))
+    console.print()
+    console.print("[bold color(208)]Logs Marius[/]")
+    console.print(f"[dim]{path}[/]\n")
+    if not entries:
+        console.print("  [dim]Aucune entrée.[/]\n")
+        return
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style="dim", no_wrap=True)
+    table.add_column(style="bold", no_wrap=True)
+    table.add_column()
+    for entry in entries:
+        table.add_row(_short_time(entry.timestamp), entry.event, _format_log_data(entry.data))
+    console.print(table)
+    console.print()
+
+
+def _short_time(timestamp: str) -> str:
+    # ISO UTC : 2026-05-09T12:34:56.123+00:00 → 12:34:56
+    if "T" in timestamp:
+        return timestamp.split("T", 1)[1].split(".", 1)[0].split("+", 1)[0]
+    return timestamp
+
+
+def _format_log_data(data: dict) -> str:
+    preferred = [
+        "cwd",
+        "project",
+        "provider",
+        "provider_kind",
+        "model",
+        "permission_mode",
+        "user_preview",
+        "assistant_preview",
+        "tool",
+        "target",
+        "ok",
+        "error",
+        "retryable",
+        "tool_results",
+        "input_tokens",
+        "estimated_input_tokens",
+    ]
+    parts = []
+    for key in preferred:
+        if key not in data or data[key] in ("", None):
+            continue
+        value = str(data[key])
+        if len(value) > 160:
+            value = value[:159] + "…"
+        parts.append(f"{key}={value}")
+    return "  ".join(parts)
 
 
 def _cmd_skills(args) -> None:

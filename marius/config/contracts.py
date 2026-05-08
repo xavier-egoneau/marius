@@ -12,6 +12,7 @@ ALL_TOOLS: list[str] = [
     "run_bash",
     "web_fetch",
     "web_search",
+    "vision",
     "skill_view",
 ]
 

@@ -24,15 +24,18 @@ from marius.kernel.context_window import FALLBACK_CONTEXT_WINDOW, resolve_contex
 from marius.kernel.contracts import Message, Role, ToolCall, ToolResult
 from marius.kernel.memory_context import format_memory_block
 from marius.kernel.permission_guard import PermissionGuard
+from marius.kernel.posture import maybe_activate_dev_posture, uses_dev_posture
 from marius.kernel.provider import ProviderError
 from marius.kernel.runtime import RuntimeOrchestrator, TurnInput
 from marius.kernel.session import SessionRuntime
+from marius.kernel.session_observations import format_session_observations, observe_tool_result
 from marius.kernel.tool_router import ToolRouter
 from marius.provider_config.contracts import ProviderEntry
 from marius.provider_config.registry import PROVIDER_REGISTRY
 from marius.provider_config.store import ProviderStore
 from marius.provider_config.wizard import run_add_provider, run_set_model
 from marius.storage.memory_store import MemoryStore
+from marius.storage.log_store import log_event, preview
 from marius.storage.project_store import ProjectStore
 from marius.storage.session_corpus import SessionRecord, write_session_file
 from marius.storage.ui_history import InMemoryVisibleHistoryStore, VisibleHistoryEntry
@@ -40,6 +43,7 @@ from marius.tools.filesystem import LIST_DIR, READ_FILE, WRITE_FILE
 from marius.tools.memory import make_memory_tool
 from marius.tools.shell import RUN_BASH
 from marius.tools.skills import SKILL_VIEW
+from marius.tools.vision import VISION
 from marius.tools.web import WEB_FETCH, WEB_SEARCH
 
 
@@ -396,6 +400,7 @@ _STATIC_TOOL_REGISTRY = {
     "run_bash":   RUN_BASH,
     "web_fetch":  WEB_FETCH,
     "web_search": WEB_SEARCH,
+    "vision":     VISION,
     "skill_view": SKILL_VIEW,
 }
 
@@ -449,6 +454,7 @@ _TOOL_VERBS: dict[str, str] = {
     "run_bash":   "Exécution",
     "web_fetch":  "Fetch",
     "web_search": "Recherche web",
+    "vision":     "Vision",
     "skill_view": "Skill",
 }
 
@@ -459,6 +465,7 @@ _TOOL_TARGET_KEYS: dict[str, str] = {
     "run_bash":   "command",
     "web_fetch":  "url",
     "web_search": "query",
+    "vision":     "path",
     "skill_view": "name",
 }
 
@@ -501,23 +508,37 @@ def run_repl(
     history = history if history is not None else InMemoryVisibleHistoryStore()
     session_id = "default"
     state = {"verbose": verbose}
+    log_event("repl_start", {
+        "session_id": session_id,
+        "cwd": str(cwd),
+        "project": cwd.name,
+        "provider": entry.name,
+        "provider_kind": entry.provider,
+        "model": entry.model,
+        "permission_mode": permission_mode,
+        "tools": enabled_tools or "all",
+    })
 
+    session = SessionRuntime(
+        session_id=session_id,
+        metadata={"provider": entry.name, "model": entry.model},
+    )
     # Snapshot mémoire à l'ouverture — stable pour toute la session
     active_memories = memory_store.get_active_context(cwd)
     memory_block = format_memory_block(active_memories)
 
-    active_skills = agent_config.skills if agent_config is not None else None
-    system_prompt, loaded_context = build_system_prompt(cwd, active_skills=active_skills)
-    if memory_block is not None:
-        system_prompt = f"{system_prompt}\n\n{memory_block.text}".strip()
+    active_skills = list(agent_config.skills) if agent_config is not None else None
+    system_prompt, loaded_context = _build_session_system_prompt(
+        cwd,
+        active_skills=active_skills,
+        memory_block=memory_block,
+        session=session,
+        agent_name=agent_config.name if agent_config is not None else None,
+    )
     orchestrator = RuntimeOrchestrator(
         provider=adapter,
         tool_router=tool_router,
         compaction_config=CompactionConfig(context_window_tokens=window),
-    )
-    session = SessionRuntime(
-        session_id=session_id,
-        metadata={"provider": entry.name, "model": entry.model},
     )
 
     # Enregistre le projet actif
@@ -555,9 +576,18 @@ def run_repl(
                 continue
 
             stop_event = threading.Event()
+            system_prompt, _ = _build_session_system_prompt(
+                cwd,
+                active_skills=active_skills,
+                memory_block=memory_block,
+                session=session,
+                agent_name=agent_config.name if agent_config is not None else None,
+            )
             _run_turn(
                 orchestrator, session, entry, message,
                 static_system_prompt=system_prompt,
+                active_skills=active_skills,
+                project_root=cwd,
                 tool_router=tool_router,
                 history=history,
                 session_id=session_id,
@@ -568,6 +598,12 @@ def run_repl(
             stop_event = None
 
     except Exception as exc:
+        log_event("repl_unexpected_error", {
+            "session_id": session_id,
+            "cwd": str(cwd),
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        })
         _console.print(f"\n[error]Erreur inattendue : {exc}[/]\n")
     finally:
         # Écrit le fichier de corpus session — silencieux, ne bloque jamais
@@ -598,6 +634,28 @@ def _write_session_record(
         pass
 
 
+def _build_session_system_prompt(
+    cwd: Path,
+    *,
+    active_skills: list[str] | None,
+    memory_block: "Any | None",
+    session: SessionRuntime,
+    agent_name: str | None = None,
+) -> tuple[str, list[str]]:
+    system_prompt, loaded_context = build_system_prompt(
+        cwd,
+        active_skills=active_skills,
+        agent_name=agent_name,
+        dev_posture=uses_dev_posture(active_skills, session.state.metadata),
+    )
+    if memory_block is not None:
+        system_prompt = f"{system_prompt}\n\n{memory_block.text}".strip()
+    observations = format_session_observations(session.state.metadata)
+    if observations:
+        system_prompt = f"{system_prompt}\n\n{observations}".strip()
+    return system_prompt, loaded_context
+
+
 def _run_turn(
     orchestrator: RuntimeOrchestrator,
     session: SessionRuntime,
@@ -605,6 +663,8 @@ def _run_turn(
     text: str,
     *,
     static_system_prompt: str = "",
+    active_skills: list[str] | None = None,
+    project_root: Path | None = None,
     tool_router: ToolRouter | None = None,
     history: InMemoryVisibleHistoryStore | None = None,
     session_id: str = "default",
@@ -623,6 +683,15 @@ def _run_turn(
 
     if history is not None:
         history.append(session_id, VisibleHistoryEntry(role="user", content=text))
+
+    log_event("turn_start", {
+        "session_id": session_id,
+        "cwd": str(Path.cwd()),
+        "provider": entry.name,
+        "provider_kind": entry.provider,
+        "model": entry.model,
+        "user_preview": preview(text),
+    })
 
     word = random.choice(_SPINNER_WORDS)
     status = Status(
@@ -648,14 +717,39 @@ def _run_turn(
         streaming_started["v"] = False
         verb = _tool_verb(call)
         target = _tool_target(call)
+        if project_root is not None and maybe_activate_dev_posture(
+            session.state.metadata,
+            active_skills,
+            call,
+            project_root,
+        ):
+            log_event("posture_switch", {
+                "session_id": session_id,
+                "posture": session.state.metadata.get("posture"),
+                "trigger_tool": call.name,
+                "target": preview(target, limit=200),
+            })
+        log_event("tool_start", {
+            "session_id": session_id,
+            "tool": call.name,
+            "target": preview(target, limit=200),
+        })
         if target:
             _console.print(f"\n  [tool.bullet]●[/] [tool.verb]{verb}[/]  [tool.target]{target}[/]")
         else:
             _console.print(f"\n  [tool.bullet]●[/] [tool.verb]{verb}[/]")
 
     def on_tool_result(call: ToolCall, result: ToolResult) -> None:
+        observe_tool_result(session.state.metadata, call, result, project_root=project_root)
         style = "tool.ok" if result.ok else "tool.err"
         label = "ok" if result.ok else "erreur"
+        log_event("tool_result", {
+            "session_id": session_id,
+            "tool": call.name,
+            "ok": result.ok,
+            "summary_preview": preview(result.summary, limit=300),
+            "error": preview(result.error or "", limit=300),
+        })
         _console.print(f"    [{style}]{label}[/]")
 
         if verbose and result.summary:
@@ -696,16 +790,45 @@ def _run_turn(
         )
     except ProviderError as exc:
         status.stop()
+        log_event("provider_error", {
+            "session_id": session_id,
+            "provider": entry.name,
+            "provider_kind": entry.provider,
+            "model": entry.model,
+            "retryable": exc.retryable,
+            "error": str(exc),
+            "provider_name": exc.provider_name,
+        })
         _console.print(f"\n[error]  Erreur provider : {exc}[/]\n")
         return
     except Exception as exc:
         status.stop()
+        log_event("turn_unexpected_error", {
+            "session_id": session_id,
+            "provider": entry.name,
+            "model": entry.model,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        })
         _console.print(f"\n[error]  Erreur inattendue : {exc}[/]\n")
         return
     finally:
         status.stop()
 
     if turn_output.assistant_message:
+        assistant_content = turn_output.assistant_message.content
+        event_name = "turn_empty_response" if not assistant_content.strip() else "turn_done"
+        log_event(event_name, {
+            "session_id": session_id,
+            "provider": entry.name,
+            "provider_kind": entry.provider,
+            "model": entry.model,
+            "streaming_started": streaming_started["v"],
+            "tool_results": len(turn_output.tool_results),
+            "assistant_preview": preview(assistant_content),
+            "input_tokens": turn_output.usage.provider_input_tokens,
+            "estimated_input_tokens": turn_output.usage.estimated_input_tokens,
+        })
         if streaming_started["v"]:
             # Les tokens ont déjà été affichés en streaming — juste un saut de ligne
             _console.print("\n")
@@ -719,7 +842,7 @@ def _run_turn(
                 session_id,
                 VisibleHistoryEntry(
                     role="assistant",
-                    content=turn_output.assistant_message.content,
+                    content=assistant_content,
                 ),
             )
 
@@ -730,5 +853,3 @@ def _run_turn(
 
 
 # ── point d'entrée ────────────────────────────────────────────────────────────
-
-

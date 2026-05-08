@@ -24,6 +24,7 @@ from marius.config.contracts import (
     MariusConfig,
 )
 from marius.config.store import ConfigStore
+from marius.kernel.skills import SkillReader
 from marius.provider_config.store import ProviderStore
 from marius.provider_config.wizard import run_add_provider
 
@@ -208,8 +209,16 @@ def _configure_agent(
     new_tools = _apply_tool_changes(list(current_tools), raw)
 
     skills_default = existing.skills if existing else []
+    available_skills = SkillReader().list()
+    if available_skills:
+        c.print("\n  Skills disponibles :\n")
+        active = set(skills_default)
+        for meta in available_skills:
+            mark = "[green]✓[/]" if meta.name in active else "[dim]○[/]"
+            c.print(f"    {mark} {meta.name}  [dim]{meta.description}[/]")
+        c.print()
     skills_raw = c.input(
-        f"  Skills actifs [[dim]{', '.join(skills_default) or 'aucun'}[/]]: "
+        f"  Skills actifs (ex: assistant) [[dim]{', '.join(skills_default) or 'aucun'}[/]]: "
     ).strip()
     skills = [s.strip() for s in skills_raw.split(",") if s.strip()] if skills_raw else skills_default
 

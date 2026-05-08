@@ -138,6 +138,40 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
 - Toute décision d’architecture durable doit être ajoutée ici.
 - Si une règle devient fausse, on la corrige explicitement plutôt que de la laisser dériver.
 
+## 2026-05-09 — Logs locaux de diagnostic
+- Décision : ajouter un journal local JSONL sous `~/.marius/logs/marius.jsonl`, consultable avec `marius logs`.
+- Portée initiale : démarrage REPL/gateway, début/fin de tour, réponse vide, erreurs provider, erreurs inattendues, appels outils et résultats outils.
+- Principe : previews courts et métadonnées utiles plutôt que transcription complète, pour diagnostiquer sans transformer les logs en historique conversationnel concurrent.
+- Impact : le logging est best-effort et ne doit jamais bloquer l’expérience utilisateur ; la commande CLI sert au debug et aux tests manuels.
+
+## 2026-05-09 — Observations courtes de session
+- Décision : ajouter une couche d’observations de session non persistante, dérivée des résultats d’outils vérifiés.
+- Portée initiale : chemins listés, fichiers lus/écrits, chemins invalides et candidats proposés après `file_not_found` / `dir_not_found`.
+- Pourquoi : l’agent doit apprendre pendant la session sans transformer chaque correction temporaire en mémoire durable.
+- Impact : ces observations sont injectées dans le prompt système des tours suivants sous `<session_observations>` ; elles restent bornées, dédupliquées, et disparaissent à la fermeture de session.
+- Règle : les observations guident le LLM mais ne remplacent pas son orchestration ; les outils ne produisent toujours pas de réponse finale à sa place.
+
+## 2026-05-09 — Postures agent
+- Décision : les règles de travail propres à un agent vivent dans `~/.marius/agents/<agent>/postures/`.
+- Portée initiale : `postures/dev.md`, chargé seulement quand le contexte dev est actif.
+- Pourquoi : ces règles dépendent de l’agent configuré plus que du profil utilisateur global, et ne sont pas des capacités activables comme les skills.
+- Impact : sans skill `assistant`, `postures/dev.md` est chargé dès le démarrage local ; avec `assistant`, il est chargé après le trigger de posture dev.
+- Règle : la posture système garde les invariants minimaux, puis la posture agent précise/surcharge les habitudes de travail.
+
+## 2026-05-09 — Skill système assistant conditionnel
+- Décision : `assistant` devient un skill système reconnu par la configuration, même avant le bloc gateway/workspace complet.
+- Portée initiale : quand `assistant` est actif, le contexte charge `IDENTITY.md`, `USER.md` et le skill `onboarding` si ces fichiers manquent. Quand `assistant` est absent, l’onboarding n’est pas injecté automatiquement.
+- Pourquoi : l’identité humaine durable et l’onboarding appartiennent au bloc assistant, pas au socle local minimal.
+- Impact : `marius skills activate assistant` active ce comportement ; le wizard d’agent affiche `assistant` dans les skills disponibles.
+- Règle de posture : sans `assistant`, l’agent est orienté dev local, concis et opérationnel ; il évite l’onboarding, le profil durable et les échanges personnels non demandés.
+- En mode `assistant`, la posture démarre normale puis bascule en dev projet dès qu’un outil filesystem/shell touche le projet courant ; la bascule vaut pour les tours suivants.
+
+## 2026-05-08 — Vision comme outil système local
+- Décision : la vision est exposée comme un `ToolEntry` système (`vision`) et non comme un provider conversationnel concurrent.
+- Implémentation initiale : lecture d’une image locale autorisée par le gardien, appel Ollama local `/api/chat`, modèle `gemma4` par défaut, surcharge possible via `MARIUS_VISION_MODEL` et `MARIUS_VISION_OLLAMA_URL`.
+- Pourquoi : le LLM principal garde l’orchestration et reformule la réponse finale ; l’outil ne fournit qu’une observation visuelle exploitable.
+- Impact : `vision` suit la politique de lecture fichier (`read_file`) pour les permissions et reste une brique standalone sous `marius/tools/`. Les anciennes configs qui portaient exactement les outils par défaut pré-vision sont migrées vers le nouveau défaut, sans modifier les listes personnalisées.
+
 ## 2026-05-08 — Suppression du mode local/global — capacités progressives
 - Décision : pas de distinction local/global. Marius a un seul mode ; les fonctionnalités avancées s'activent via des skills.
 - Règle : `marius` se lance toujours dans le répertoire courant. La mémoire (project_store + memory.db) est active dans tous les cas.

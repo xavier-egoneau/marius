@@ -4,8 +4,10 @@
 
 Le socle agentique est opérationnel en CLI :
 kernel complet · provider ChatGPT OAuth + Ollama · tools filesystem/shell/web/memory ·
-permissions safe/limited/power · mémoire SQLite+FTS5 avec scopes · session corpus ·
-onboarding skill · config agents · SearxNG auto-hébergé
+vision Ollama locale · permissions safe/limited/power · mémoire SQLite+FTS5 avec scopes · session corpus ·
+logs locaux · onboarding skill · config agents · SearxNG auto-hébergé
+observations courtes de session non persistantes
+postures agent conditionnelles
 
 ---
 
@@ -25,6 +27,8 @@ onboarding skill · config agents · SearxNG auto-hébergé
 
 ### 2. Mémoire — Dreaming & Daily
 
+- [x] **Observations courtes de session** — faits vérifiés par les outils
+      injectés au tour suivant sans persister dans `memory.db`
 - [ ] **Dreaming tool** — agrège sessions + memory.db + DECISIONS.md/ROADMAP.md
       + dream.md des skills actifs → appel LLM unique → opérations JSON sur le store
 - [ ] **Daily tool** — handoff dreaming + daily.md des skills → briefing Markdown
@@ -48,6 +52,10 @@ onboarding skill · config agents · SearxNG auto-hébergé
 
 Toutes ces fonctionnalités sont interdépendantes — elles s'activent ensemble.
 
+- [x] **Skill système `assistant` minimal** — active IDENTITY.md / USER.md
+      + onboarding conditionnel sans l’imposer au socle local
+- [x] **Posture dev agent** — charge `~/.marius/agents/<agent>/postures/dev.md`
+      uniquement quand la posture dev est active
 - [ ] **Gateway** — processus persistant (daemon/service) qui maintient une session
       active entre les relances
 - [ ] **Service système** — démarrage au boot ou au lancement de session
@@ -60,7 +68,30 @@ Toutes ces fonctionnalités sont interdépendantes — elles s'activent ensemble
 
 ---
 
-### 5. Canaux
+### 5. Subagents
+
+Un agent peut spawner des subagents pour déléguer une tâche ciblée.
+Le subagent tourne en isolation, rend son résultat au parent, puis s'arrête.
+
+- [ ] **`spawn_agent` tool** — l'agent parent crée un subagent nommé avec une instruction,
+      des tools restreints et un contexte dédié. Retourne le résultat final du subagent.
+- [ ] **Lifecycle subagent** — démarrage, exécution, retour de résultat, nettoyage.
+      Le subagent est éphémère : pas de session persistante, pas de mémoire propre.
+- [ ] **Config héritée** — le subagent hérite du provider et du mode de permission du parent,
+      sauf override explicite (ex : subagent read-only en mode safe).
+- [ ] **Exécution synchrone** — le parent attend le résultat avant de continuer
+      (adapté aux tâches courtes : analyse, recherche, rédaction).
+- [ ] **Exécution asynchrone** — le parent reçoit une notification gateway quand c'est prêt
+      (adapté aux tâches longues : build, test suite, refactor).
+- [ ] **Skills catalogue — skill `dev`** — active les commandes REPL dédiées au développement :
+      `/plan` planification, `/dev` implémentation, `/commit` commit guidé,
+      `/review` revue de code, `/test` lancement + analyse des tests.
+      Un skill peut déclarer des commandes REPL dans son frontmatter SKILL.md ;
+      le REPL les enregistre au chargement du skill.
+
+---
+
+### 6. Canaux
 
 - [ ] **Host web** — API HTTP mince + interface web minimale (chat)
 - [ ] **Canal Telegram** — réception et envoi de messages via Bot API
@@ -71,7 +102,7 @@ Toutes ces fonctionnalités sont interdépendantes — elles s'activent ensemble
 
 ---
 
-### 6. Outillage CLI
+### 7. Outillage CLI
 
 - [ ] **`marius doctor`** — diagnostic de l'installation : provider joignable ?
       SearxNG actif ? config valide ? permissions cohérentes ? SOUL.md présent ?
@@ -83,7 +114,7 @@ Toutes ces fonctionnalités sont interdépendantes — elles s'activent ensemble
 
 ---
 
-### 7. Hardening & production
+### 8. Hardening & production
 
 - [ ] **Fichiers sensibles** — détecter `.env`, `.netrc`, clés SSH → alerte avant lecture/écriture
 - [ ] **Récupération d'erreurs** — provider down, SearxNG down → messages clairs + retry

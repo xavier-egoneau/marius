@@ -13,6 +13,24 @@ from marius.kernel.tool_router import ToolDefinition, ToolEntry, ToolRouter
 from marius.kernel.contracts import ToolResult
 
 
+class _ToolCallsThenDoneAdapter:
+    def __init__(self, call: ToolCall) -> None:
+        self.call = call
+        self.calls: list[ProviderRequest] = []
+
+    def generate(self, request: ProviderRequest):
+        raise AssertionError("stream should be used")
+
+    def stream(self, request: ProviderRequest):
+        self.calls.append(request)
+        if len(self.calls) == 1:
+            yield ProviderChunk(type="tool_calls", tool_calls=[self.call], finish_reason="tool_calls")
+            yield ProviderChunk(type="done", finish_reason="stop")
+            return
+        yield ProviderChunk(type="text_delta", delta="Après outil.")
+        yield ProviderChunk(type="done", finish_reason="stop")
+
+
 def _user(text: str = "Go") -> Message:
     return Message(role=Role.USER, content=text, created_at=datetime(2026, 5, 8, 10, 0, 0))
 
@@ -114,3 +132,27 @@ def test_runtime_streaming_with_tool_calls():
     assert "echo" in tool_starts
     assert output.assistant_message.content == "Terminé."
     assert len(output.tool_results) == 1
+
+
+def test_runtime_streaming_preserves_tool_calls_when_done_chunk_says_stop():
+    def _echo_handler(args: dict) -> ToolResult:
+        return ToolResult(tool_call_id="", ok=True, summary=f"echo:{args.get('text', '')}")
+
+    tool_call = ToolCall(id="c1", name="echo", arguments={"text": "world"})
+    router = ToolRouter([ToolEntry(
+        definition=ToolDefinition(name="echo", description="", parameters={}),
+        handler=_echo_handler,
+    )])
+    orchestrator = RuntimeOrchestrator(
+        provider=_ToolCallsThenDoneAdapter(tool_call),
+        tool_router=router,
+    )
+
+    output = orchestrator.run_turn(
+        TurnInput(session=_session(), user_message=_user()),
+        on_text_delta=lambda _delta: None,
+    )
+
+    assert len(output.tool_results) == 1
+    assert output.tool_results[0].ok is True
+    assert output.assistant_message.content == "Après outil."

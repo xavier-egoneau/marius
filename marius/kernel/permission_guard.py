@@ -106,7 +106,7 @@ class PermissionGuard:
         if tool_name == "run_bash":
             return self._check_shell(arguments)
 
-        if tool_name in ("read_file", "list_dir"):
+        if tool_name in ("read_file", "list_dir", "vision"):
             return self._check_read(arguments)
 
         if tool_name == "write_file":

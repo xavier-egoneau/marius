@@ -257,7 +257,7 @@ class RuntimeOrchestrator:
                     )
                 elif chunk.usage and isinstance(chunk.usage, ContextUsage):
                     final_usage = chunk.usage
-                if chunk.finish_reason:
+                if chunk.finish_reason and not tool_calls:
                     finish_reason = chunk.finish_reason
 
         assistant_msg = Message(

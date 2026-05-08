@@ -28,17 +28,21 @@ from marius.kernel.context_window import FALLBACK_CONTEXT_WINDOW, resolve_contex
 from marius.kernel.contracts import Message, Role, ToolCall, ToolResult
 from marius.kernel.memory_context import format_memory_block
 from marius.kernel.permission_guard import PermissionGuard
+from marius.kernel.posture import maybe_activate_dev_posture, uses_dev_posture
 from marius.kernel.runtime import RuntimeOrchestrator, TurnInput
 from marius.kernel.session import SessionRuntime
+from marius.kernel.session_observations import format_session_observations, observe_tool_result
 from marius.kernel.tool_router import ToolRouter
 from marius.provider_config.contracts import ProviderEntry
 from marius.provider_config.registry import PROVIDER_REGISTRY
 from marius.storage.memory_store import MemoryStore
+from marius.storage.log_store import log_event, preview
 from marius.storage.session_corpus import SessionRecord, write_session_file
 from marius.tools.filesystem import LIST_DIR, READ_FILE, WRITE_FILE
 from marius.tools.memory import make_memory_tool
 from marius.tools.shell import RUN_BASH
 from marius.tools.skills import SKILL_VIEW
+from marius.tools.vision import VISION
 from marius.tools.web import WEB_FETCH, WEB_SEARCH
 
 from .protocol import (
@@ -57,6 +61,7 @@ _STATIC_TOOLS = {
     "run_bash":   RUN_BASH,
     "web_fetch":  WEB_FETCH,
     "web_search": WEB_SEARCH,
+    "vision":     VISION,
     "skill_view": SKILL_VIEW,
 }
 
@@ -98,15 +103,16 @@ class GatewayServer:
         self.workspace = ws
         self.memory_store = MemoryStore(memory_db_path(agent_name))
 
-        active_skills = list(agent_config.skills) if agent_config else []
+        self.active_skills = list(agent_config.skills) if agent_config else []
         self.system_prompt, self.loaded_context = build_system_prompt(
             ws,
-            active_skills=active_skills or None,
+            active_skills=self.active_skills or None,
+            agent_name=agent_name,
         )
         active_memories = self.memory_store.get_active_context(ws)
-        memory_block = format_memory_block(active_memories)
-        if memory_block:
-            self.system_prompt = f"{self.system_prompt}\n\n{memory_block.text}".strip()
+        self.memory_block = format_memory_block(active_memories)
+        if self.memory_block:
+            self.system_prompt = f"{self.system_prompt}\n\n{self.memory_block.text}".strip()
 
         self._send_lock = threading.Lock()
         self._conn: socket.socket | None = None
@@ -132,6 +138,15 @@ class GatewayServer:
             compaction_config=CompactionConfig(context_window_tokens=window),
         )
         self._opened_at = datetime.now(timezone.utc).isoformat()
+        log_event("gateway_start", {
+            "agent": agent_name,
+            "cwd": str(ws),
+            "provider": entry.name,
+            "provider_kind": entry.provider,
+            "model": entry.model,
+            "permission_mode": permission_mode,
+            "tools": enabled_tools or "all",
+        })
 
     # ── permission interactive ────────────────────────────────────────────────
 
@@ -300,6 +315,15 @@ class GatewayServer:
             content=text,
             created_at=datetime.now(timezone.utc),
         )
+        log_event("turn_start", {
+            "session_id": self.agent_name,
+            "agent": self.agent_name,
+            "cwd": str(self.workspace),
+            "provider": self.entry.name,
+            "provider_kind": self.entry.provider,
+            "model": self.entry.model,
+            "user_preview": preview(text),
+        })
 
         def on_text_delta(delta: str) -> None:
             if stop_event.is_set():
@@ -307,31 +331,96 @@ class GatewayServer:
             self._send(conn, DeltaEvent(text=delta))
 
         def on_tool_start(call: ToolCall) -> None:
+            target = tool_target(call.name, call.arguments)
+            if maybe_activate_dev_posture(
+                self.session.state.metadata,
+                self.active_skills,
+                call,
+                self.workspace,
+            ):
+                log_event("posture_switch", {
+                    "session_id": self.agent_name,
+                    "agent": self.agent_name,
+                    "posture": self.session.state.metadata.get("posture"),
+                    "trigger_tool": call.name,
+                    "target": preview(target, limit=200),
+                })
+            log_event("tool_start", {
+                "session_id": self.agent_name,
+                "tool": call.name,
+                "target": preview(target, limit=200),
+            })
             self._send(conn, ToolStartEvent(
                 name=call.name,
-                target=tool_target(call.name, call.arguments),
+                target=target,
             ))
 
         def on_tool_result(call: ToolCall, result: ToolResult) -> None:
+            observe_tool_result(self.session.state.metadata, call, result, project_root=self.workspace)
+            log_event("tool_result", {
+                "session_id": self.agent_name,
+                "tool": call.name,
+                "ok": result.ok,
+                "summary_preview": preview(result.summary, limit=300),
+                "error": preview(result.error or "", limit=300),
+            })
             self._send(conn, ToolResultEvent(name=call.name, ok=result.ok))
 
         try:
-            self.orchestrator.run_turn(
+            system_prompt = self._system_prompt_for_session()
+            output = self.orchestrator.run_turn(
                 TurnInput(
                     session=self.session,
                     user_message=user_message,
-                    system_prompt=self.system_prompt,
+                    system_prompt=system_prompt,
                 ),
                 on_text_delta=on_text_delta,
                 on_tool_start=on_tool_start,
                 on_tool_result=on_tool_result,
             )
+            if output.assistant_message is not None:
+                content = output.assistant_message.content
+                event_name = "turn_empty_response" if not content.strip() else "turn_done"
+                log_event(event_name, {
+                    "session_id": self.agent_name,
+                    "agent": self.agent_name,
+                    "provider": self.entry.name,
+                    "provider_kind": self.entry.provider,
+                    "model": self.entry.model,
+                    "tool_results": len(output.tool_results),
+                    "assistant_preview": preview(content),
+                    "input_tokens": output.usage.provider_input_tokens,
+                    "estimated_input_tokens": output.usage.estimated_input_tokens,
+                })
         except KeyboardInterrupt:
+            log_event("turn_interrupted", {"session_id": self.agent_name, "agent": self.agent_name})
             self._send(conn, ErrorEvent(message="Inférence interrompue."))
         except Exception as exc:
+            log_event("turn_unexpected_error", {
+                "session_id": self.agent_name,
+                "agent": self.agent_name,
+                "provider": self.entry.name,
+                "model": self.entry.model,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            })
             self._send(conn, ErrorEvent(message=str(exc)))
         finally:
             self._send(conn, DoneEvent())
+
+    def _system_prompt_for_session(self) -> str:
+        system_prompt, _loaded = build_system_prompt(
+            self.workspace,
+            active_skills=self.active_skills or None,
+            agent_name=self.agent_name,
+            dev_posture=uses_dev_posture(self.active_skills, self.session.state.metadata),
+        )
+        if self.memory_block:
+            system_prompt = f"{system_prompt}\n\n{self.memory_block.text}".strip()
+        observations = format_session_observations(self.session.state.metadata)
+        if observations:
+            system_prompt = f"{system_prompt}\n\n{observations}".strip()
+        return system_prompt
 
     def _write_corpus(self) -> None:
         try:

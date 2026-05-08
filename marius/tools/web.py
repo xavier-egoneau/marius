@@ -65,6 +65,7 @@ def _handle_web_fetch(arguments: dict) -> ToolResult:
         truncated = True
 
     return ToolResult(
+        tool_call_id="",
         ok=True,
         summary=f"Page récupérée : {url}",
         data={
@@ -153,6 +154,7 @@ def _handle_web_search(arguments: dict) -> ToolResult:
     ]
 
     return ToolResult(
+        tool_call_id="",
         ok=True,
         summary=f"{len(results)} résultat(s) pour : {query}",
         data={"query": query, "results": results},
@@ -199,4 +201,4 @@ def _decode(raw: bytes, content_type: str) -> str:
 
 
 def _error(message: str, *, retryable: bool = False) -> ToolResult:
-    return ToolResult(ok=False, summary=message, data=None)
+    return ToolResult(tool_call_id="", ok=False, summary=message)

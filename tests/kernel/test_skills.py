@@ -46,12 +46,14 @@ def _make_skill(
 
 def test_list_empty_dir(tmp_path: Path) -> None:
     reader = SkillReader(tmp_path)
-    assert reader.list() == []
+    metas = reader.list()
+    assert [m.name for m in metas] == ["assistant"]
 
 
 def test_list_nonexistent_dir(tmp_path: Path) -> None:
     reader = SkillReader(tmp_path / "nope")
-    assert reader.list() == []
+    metas = reader.list()
+    assert [m.name for m in metas] == ["assistant"]
 
 
 def test_list_returns_skills(tmp_path: Path) -> None:
@@ -59,23 +61,23 @@ def test_list_returns_skills(tmp_path: Path) -> None:
     _make_skill(tmp_path, "writing", description="Writing skill")
     reader = SkillReader(tmp_path)
     metas = reader.list()
-    assert len(metas) == 2
+    assert len(metas) == 3
     names = {m.name for m in metas}
-    assert names == {"dev", "writing"}
+    assert names == {"assistant", "dev", "writing"}
 
 
 def test_list_ignores_dirs_without_skill_md(tmp_path: Path) -> None:
     _make_skill(tmp_path, "good")
     (tmp_path / "empty_dir").mkdir()
     reader = SkillReader(tmp_path)
-    assert len(reader.list()) == 1
+    assert {m.name for m in reader.list()} == {"assistant", "good"}
 
 
 def test_list_ignores_files(tmp_path: Path) -> None:
     _make_skill(tmp_path, "good")
     (tmp_path / "not_a_dir.md").write_text("hello")
     reader = SkillReader(tmp_path)
-    assert len(reader.list()) == 1
+    assert {m.name for m in reader.list()} == {"assistant", "good"}
 
 
 def test_list_sorted_alphabetically(tmp_path: Path) -> None:
@@ -84,7 +86,7 @@ def test_list_sorted_alphabetically(tmp_path: Path) -> None:
     _make_skill(tmp_path, "medium")
     reader = SkillReader(tmp_path)
     names = [m.name for m in reader.list()]
-    assert names == ["alpha", "medium", "zebra"]
+    assert names == ["assistant", "alpha", "medium", "zebra"]
 
 
 # ── SkillReader.load ──────────────────────────────────────────────────────────
@@ -93,6 +95,14 @@ def test_list_sorted_alphabetically(tmp_path: Path) -> None:
 def test_load_not_found(tmp_path: Path) -> None:
     reader = SkillReader(tmp_path)
     assert reader.load("nope") is None
+
+
+def test_load_system_assistant_skill(tmp_path: Path) -> None:
+    reader = SkillReader(tmp_path)
+    skill = reader.load("assistant")
+    assert skill is not None
+    assert skill.meta.name == "assistant"
+    assert skill.content == ""
 
 
 def test_load_basic(tmp_path: Path) -> None:
@@ -187,6 +197,10 @@ def test_exists_true(tmp_path: Path) -> None:
 
 def test_exists_false(tmp_path: Path) -> None:
     assert SkillReader(tmp_path).exists("dev") is False
+
+
+def test_exists_system_assistant_skill(tmp_path: Path) -> None:
+    assert SkillReader(tmp_path).exists("assistant") is True
 
 
 # ── format_skill_context ──────────────────────────────────────────────────────

@@ -50,6 +50,7 @@ _TOOL_VERBS: dict[str, str] = {
     "run_bash":   "Exécution",
     "web_fetch":  "Fetch",
     "web_search": "Recherche web",
+    "vision":     "Vision",
     "skill_view": "Skill",
 }
 

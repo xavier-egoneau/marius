@@ -25,6 +25,32 @@ def test_read_file_not_found():
     assert result.error == "file_not_found"
 
 
+def test_read_file_not_found_suggests_same_filename(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "wysiwyg").mkdir()
+    (tmp_path / "wysiwyg" / "checks.html").write_text("<html></html>", encoding="utf-8")
+
+    result = READ_FILE.handler({"path": "./checks.html"})
+
+    assert result.ok is False
+    assert result.error == "file_not_found"
+    assert "wysiwyg/checks.html" in result.summary
+
+
+def test_read_file_not_found_prioritizes_requested_suffix(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "core.js").write_text("other", encoding="utf-8")
+    (tmp_path / "wysiwyg" / "js").mkdir(parents=True)
+    (tmp_path / "wysiwyg" / "js" / "core.js").write_text("core", encoding="utf-8")
+
+    result = READ_FILE.handler({"path": "./js/core.js"})
+
+    assert result.ok is False
+    assert result.error == "file_not_found"
+    assert result.summary.index("wysiwyg/js/core.js") < result.summary.index("other/core.js")
+
+
 def test_read_file_produces_artifact(tmp_path):
     f = tmp_path / "data.txt"
     f.write_text("contenu", encoding="utf-8")
@@ -38,8 +64,35 @@ def test_list_dir_returns_entries(tmp_path):
     (tmp_path / "sub").mkdir()
     result = LIST_DIR.handler({"path": str(tmp_path)})
     assert result.ok is True
+    assert "Dossier :" in result.summary
     assert "a.py" in result.summary
     assert "sub" in result.summary
+
+
+def test_list_dir_returns_paths_with_requested_prefix(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "wysiwyg" / "js").mkdir(parents=True)
+    (tmp_path / "wysiwyg" / "checks.html").write_text("", encoding="utf-8")
+
+    result = LIST_DIR.handler({"path": "./wysiwyg"})
+
+    assert result.ok is True
+    assert "Dossier : wysiwyg" in result.summary
+    assert "wysiwyg/checks.html" in result.summary
+    assert "wysiwyg/js" in result.summary
+
+
+def test_list_dir_hides_noise_dirs(tmp_path):
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "app.py").write_text("", encoding="utf-8")
+
+    result = LIST_DIR.handler({"path": str(tmp_path)})
+
+    assert result.ok is True
+    assert "app.py" in result.summary
+    assert "__pycache__" not in result.summary
+    assert ".git" not in result.summary
 
 
 def test_list_dir_default_path():

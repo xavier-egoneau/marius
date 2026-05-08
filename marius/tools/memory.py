@@ -82,38 +82,39 @@ def make_memory_tool(store: MemoryStore, cwd: Path) -> ToolEntry:
         old_text = (arguments.get("old_text") or "").strip()
 
         if target not in ("agent", "user"):
-            return ToolResult(ok=False, summary=f"Cible invalide : {target!r}. Utiliser 'agent' ou 'user'.", data=None)
+            return ToolResult(tool_call_id="", ok=False, summary=f"Cible invalide : {target!r}. Utiliser 'agent' ou 'user'.")
 
         category = _CATEGORY_MAP[target]
 
         if action == "add":
             if not content:
-                return ToolResult(ok=False, summary="'content' requis pour 'add'.", data=None)
+                return ToolResult(tool_call_id="", ok=False, summary="'content' requis pour 'add'.")
             try:
                 memory_id = store.add(content, scope="global", category=category)
                 return ToolResult(
+                    tool_call_id="",
                     ok=True,
                     summary=f"Mémorisé dans {target} (#{memory_id}).",
                     data={"memory_id": memory_id, "target": target},
                 )
             except ValueError as exc:
-                return ToolResult(ok=False, summary=str(exc), data=None)
+                return ToolResult(tool_call_id="", ok=False, summary=str(exc))
 
         if action == "replace":
             if not old_text or not content:
-                return ToolResult(ok=False, summary="'old_text' et 'content' requis pour 'replace'.", data=None)
+                return ToolResult(tool_call_id="", ok=False, summary="'old_text' et 'content' requis pour 'replace'.")
             if store.replace(old_text, content):
-                return ToolResult(ok=True, summary=f"Entrée mise à jour dans {target}.", data=None)
-            return ToolResult(ok=False, summary=f"Aucune entrée trouvée contenant : {old_text!r}", data=None)
+                return ToolResult(tool_call_id="", ok=True, summary=f"Entrée mise à jour dans {target}.")
+            return ToolResult(tool_call_id="", ok=False, summary=f"Aucune entrée trouvée contenant : {old_text!r}")
 
         if action == "remove":
             if not old_text:
-                return ToolResult(ok=False, summary="'old_text' requis pour 'remove'.", data=None)
+                return ToolResult(tool_call_id="", ok=False, summary="'old_text' requis pour 'remove'.")
             if store.remove_by_text(old_text):
-                return ToolResult(ok=True, summary=f"Entrée supprimée de {target}.", data=None)
-            return ToolResult(ok=False, summary=f"Aucune entrée trouvée contenant : {old_text!r}", data=None)
+                return ToolResult(tool_call_id="", ok=True, summary=f"Entrée supprimée de {target}.")
+            return ToolResult(tool_call_id="", ok=False, summary=f"Aucune entrée trouvée contenant : {old_text!r}")
 
-        return ToolResult(ok=False, summary=f"Action inconnue : {action!r}. Utiliser add, replace ou remove.", data=None)
+        return ToolResult(tool_call_id="", ok=False, summary=f"Action inconnue : {action!r}. Utiliser add, replace ou remove.")
 
     return ToolEntry(
         definition=ToolDefinition(

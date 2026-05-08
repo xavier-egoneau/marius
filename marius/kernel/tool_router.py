@@ -79,7 +79,10 @@ class ToolRouter:
             )
 
         try:
-            return entry.handler(call.arguments)
+            result = entry.handler(call.arguments)
+            if not result.tool_call_id:
+                result.tool_call_id = call.id
+            return result
         except Exception as exc:
             return ToolResult(
                 tool_call_id=call.id,

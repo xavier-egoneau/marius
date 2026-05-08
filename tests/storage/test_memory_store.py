@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,24 @@ def test_remove_makes_entry_disappear(store: MemoryStore) -> None:
     store.remove(memory_id)
     entries = store.list()
     assert all(e.id != memory_id for e in entries)
+
+
+# ── replace ───────────────────────────────────────────────────────────────────
+
+
+def test_replace_existing_entry(store: MemoryStore) -> None:
+    store.add("ancienne préférence")
+
+    assert store.replace("ancienne", "nouvelle préférence") is True
+
+    entries = store.list()
+    assert entries[0].content == "nouvelle préférence"
+
+
+def test_replace_nonexistent_entry_returns_false(store: MemoryStore) -> None:
+    store.add("souvenir présent")
+
+    assert store.replace("absent", "nouveau souvenir") is False
 
 
 # ── list ──────────────────────────────────────────────────────────────────────
@@ -148,3 +167,36 @@ def test_search_also_matches_tags(store: MemoryStore) -> None:
 def test_context_manager_closes_cleanly(tmp_path: Path) -> None:
     with MemoryStore(db_path=tmp_path / "cm.db") as s:
         s.add("test context manager")
+
+
+# ── migrations ────────────────────────────────────────────────────────────────
+
+
+def test_migrates_pre_scope_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "old-memory.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE memories (
+            memory_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+            content    TEXT NOT NULL UNIQUE,
+            category   TEXT NOT NULL DEFAULT 'general',
+            tags       TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO memories (content, category, tags)
+            VALUES ('ancien souvenir pytest', 'general', 'tests');
+        """
+    )
+    conn.close()
+
+    store = MemoryStore(db_path=db_path)
+    try:
+        entries = store.list()
+        assert len(entries) == 1
+        assert entries[0].content == "ancien souvenir pytest"
+        assert entries[0].scope == "global"
+        assert entries[0].project_path is None
+        assert store.search("pytest")[0].content == "ancien souvenir pytest"
+    finally:
+        store.close()

@@ -12,6 +12,23 @@ from typing import Any
 from marius.kernel.contracts import Artifact, ArtifactType, ToolResult
 from marius.kernel.tool_router import ToolDefinition, ToolEntry
 
+_MAX_MISSING_PATH_CANDIDATES = 5
+_MAX_MISSING_PATH_DEPTH = 6
+_MAX_MISSING_PATH_VISITS = 3000
+_SKIP_SEARCH_DIRS = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "vendor",
+}
+
 
 def _read_file(arguments: dict[str, Any]) -> ToolResult:
     path_str = arguments.get("path", "")
@@ -31,7 +48,12 @@ def _read_file(arguments: dict[str, Any]) -> ToolResult:
             artifacts=[Artifact(type=ArtifactType.FILE, path=str(path), data={"content": content})],
         )
     except FileNotFoundError:
-        return ToolResult(tool_call_id="", ok=False, summary=f"Fichier introuvable : {path}", error="file_not_found")
+        return ToolResult(
+            tool_call_id="",
+            ok=False,
+            summary=_missing_file_summary(path),
+            error="file_not_found",
+        )
     except PermissionError:
         return ToolResult(tool_call_id="", ok=False, summary=f"Permission refusée : {path}", error="permission_denied")
     except Exception as exc:
@@ -45,21 +67,30 @@ def _list_dir(arguments: dict[str, Any]) -> ToolResult:
     try:
         entries = sorted(path.iterdir(), key=lambda p: (p.is_file(), p.name))
     except FileNotFoundError:
-        return ToolResult(tool_call_id="", ok=False, summary=f"Dossier introuvable : {path}", error="dir_not_found")
+        return ToolResult(
+            tool_call_id="",
+            ok=False,
+            summary=f"Dossier introuvable : {path}. Liste le dossier parent avant de réessayer.",
+            error="dir_not_found",
+        )
     except PermissionError:
         return ToolResult(tool_call_id="", ok=False, summary=f"Permission refusée : {path}", error="permission_denied")
 
-    lines = []
-    for entry in entries:
+    display_path = _display_path(path)
+    visible_entries = [entry for entry in entries if not _skip_display_entry(entry)]
+    lines = [f"Dossier : {display_path}"]
+    for entry in visible_entries:
         prefix = "📁 " if entry.is_dir() else "  "
-        lines.append(f"{prefix}{entry.name}")
+        lines.append(f"{prefix}{_display_path(entry)}")
 
-    summary = "\n".join(lines) if lines else "(dossier vide)"
+    if not visible_entries:
+        lines.append("(dossier vide)")
+    summary = "\n".join(lines)
     return ToolResult(
         tool_call_id="",
         ok=True,
         summary=summary,
-        data={"path": str(path), "count": len(entries)},
+        data={"path": str(path), "count": len(visible_entries)},
     )
 
 
@@ -133,3 +164,76 @@ WRITE_FILE = ToolEntry(
     ),
     handler=_write_file,
 )
+
+
+def _missing_file_summary(path: Path) -> str:
+    candidates = _find_missing_file_candidates(path)
+    if not candidates:
+        return f"Fichier introuvable : {path}. Liste le dossier parent avant de réessayer."
+
+    formatted = ", ".join(candidates)
+    return (
+        f"Fichier introuvable : {path}. "
+        f"Candidat(s) existant(s) dans le projet : {formatted}. "
+        "Utilise un chemin listé ou liste le dossier parent avant de réessayer."
+    )
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.resolve(strict=False).relative_to(Path.cwd().resolve(strict=False)))
+    except (OSError, RuntimeError, ValueError):
+        return str(path)
+
+
+def _skip_display_entry(path: Path) -> bool:
+    name = path.name
+    return name in _SKIP_SEARCH_DIRS or name.startswith(".")
+
+
+def _find_missing_file_candidates(path: Path) -> list[str]:
+    if not path.name:
+        return []
+
+    root = Path.cwd()
+    requested_suffix = _path_suffix(path)
+    exact_suffix_matches: list[str] = []
+    same_name_matches: list[str] = []
+    visited = 0
+
+    for current_root, dirs, files in os.walk(root):
+        current = Path(current_root)
+        dirs[:] = [d for d in dirs if d not in _SKIP_SEARCH_DIRS and not d.startswith(".")]
+        depth = len(current.relative_to(root).parts)
+        if depth >= _MAX_MISSING_PATH_DEPTH:
+            dirs[:] = []
+
+        visited += len(dirs) + len(files)
+        if visited > _MAX_MISSING_PATH_VISITS:
+            break
+
+        if path.name not in files:
+            continue
+
+        candidate = current / path.name
+        try:
+            display = str(candidate.relative_to(root))
+        except ValueError:
+            display = str(candidate)
+
+        if requested_suffix and tuple(Path(display).parts[-len(requested_suffix):]) == requested_suffix:
+            exact_suffix_matches.append(display)
+        else:
+            same_name_matches.append(display)
+
+        if len(exact_suffix_matches) + len(same_name_matches) >= _MAX_MISSING_PATH_CANDIDATES:
+            break
+
+    return (exact_suffix_matches + same_name_matches)[:_MAX_MISSING_PATH_CANDIDATES]
+
+
+def _path_suffix(path: Path) -> tuple[str, ...]:
+    parts = tuple(part for part in path.parts if part not in ("", "."))
+    if path.is_absolute() or len(parts) <= 1:
+        return ()
+    return parts

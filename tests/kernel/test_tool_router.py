@@ -74,3 +74,27 @@ def test_tool_router_passes_arguments_to_handler():
     router = ToolRouter([entry])
     router.dispatch(ToolCall(id="c1", name="echo", arguments={"foo": "bar"}))
     assert received == {"foo": "bar"}
+
+
+def test_tool_router_fills_missing_tool_call_id():
+    entry = _make_entry("echo")
+    router = ToolRouter([entry])
+
+    result = router.dispatch(ToolCall(id="call_123", name="echo", arguments={}))
+
+    assert result.tool_call_id == "call_123"
+
+
+def test_tool_router_preserves_handler_tool_call_id():
+    def handler(args: dict) -> ToolResult:
+        return ToolResult(tool_call_id="custom", ok=True, summary="done")
+
+    entry = ToolEntry(
+        definition=ToolDefinition(name="echo", description="", parameters={}),
+        handler=handler,
+    )
+    router = ToolRouter([entry])
+
+    result = router.dispatch(ToolCall(id="call_123", name="echo", arguments={}))
+
+    assert result.tool_call_id == "custom"

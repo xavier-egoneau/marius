@@ -109,6 +109,7 @@ _TOOL_TARGET_KEYS: dict[str, str] = {
     "run_bash":   "command",
     "web_fetch":  "url",
     "web_search": "query",
+    "vision":     "path",
     "skill_view": "name",
 }
 

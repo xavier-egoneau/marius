@@ -8,10 +8,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from .context_builder import ContextBuildInput, ContextBuilder, ContextSource
+from .posture import ASSISTANT_SKILL
 from .skills import SkillReader, format_skill_context
 
 _MARIUS_HOME = Path.home() / ".marius"
-_ONBOARDING_SKILL = _MARIUS_HOME / "skills" / "onboarding" / "SKILL.md"
 
 
 class _FileReader:
@@ -22,10 +22,11 @@ class _FileReader:
             return None
 
 
-def needs_onboarding() -> bool:
+def needs_onboarding(marius_home: Path | None = None) -> bool:
     """True si IDENTITY.md ou USER.md est absent ou vide."""
+    home = Path(marius_home) if marius_home is not None else _MARIUS_HOME
     for filename in ("IDENTITY.md", "USER.md"):
-        path = _MARIUS_HOME / filename
+        path = home / filename
         if not path.exists():
             return True
         if not path.read_text(encoding="utf-8").strip():
@@ -37,25 +38,29 @@ def build_system_prompt(
     project_root: Path,
     active_skills: list[str] | None = None,
     skills_dir: Path | None = None,
+    marius_home: Path | None = None,
+    agent_name: str | None = None,
+    dev_posture: bool = False,
 ) -> tuple[str, list[str]]:
-    """Assemble le system prompt en quatre couches :
+    """Assemble le system prompt en couches déclarées :
 
-    1. Sources globales ~/.marius/ : SOUL → IDENTITY → USER → AGENTS
+    1. Sources globales de base ~/.marius/ : SOUL → AGENTS
     2. AGENTS.md projet/workspace si différent du global
-    3. Skill onboarding si IDENTITY.md ou USER.md est absent/vide
+    3. Si skill `assistant` actif : IDENTITY → USER, puis onboarding si besoin hors posture dev
     4. Skills actifs de l'agent
 
     Retourne (markdown_assemblé, clés_chargées).
     """
+    home = Path(marius_home) if marius_home is not None else _MARIUS_HOME
+    assistant_enabled = ASSISTANT_SKILL in set(active_skills or [])
+    dev_context_active = not assistant_enabled or dev_posture
     sources: list[ContextSource] = [
-        ContextSource(key="soul",     title="Identité philosophique",  path=_MARIUS_HOME / "SOUL.md",     required=False),
-        ContextSource(key="identity", title="Identité opérationnelle", path=_MARIUS_HOME / "IDENTITY.md", required=False),
-        ContextSource(key="user",     title="Profil utilisateur",      path=_MARIUS_HOME / "USER.md",     required=False),
-        ContextSource(key="agents",   title="Conventions",             path=_MARIUS_HOME / "AGENTS.md",   required=False),
+        ContextSource(key="soul",   title="Identité philosophique", path=home / "SOUL.md",   required=False),
+        ContextSource(key="agents", title="Conventions",            path=home / "AGENTS.md", required=False),
     ]
 
     project_agents = project_root / "AGENTS.md"
-    global_agents  = _MARIUS_HOME / "AGENTS.md"
+    global_agents  = home / "AGENTS.md"
     if project_agents.exists() and project_agents.resolve() != global_agents.resolve():
         sources.append(ContextSource(
             key="agents_project",
@@ -64,16 +69,68 @@ def build_system_prompt(
             required=False,
         ))
 
-    if needs_onboarding():
+    agent_dev_posture = _agent_posture_path(home, agent_name, "dev")
+    if dev_context_active and agent_dev_posture is not None:
         sources.append(ContextSource(
-            key="onboarding",
-            title="Onboarding",
-            path=_ONBOARDING_SKILL,
+            key="agent_posture_dev",
+            title="Posture dev agent",
+            path=agent_dev_posture,
             required=False,
         ))
 
+    if assistant_enabled:
+        sources.extend([
+            ContextSource(key="identity", title="Identité opérationnelle", path=home / "IDENTITY.md", required=False),
+            ContextSource(key="user",     title="Profil utilisateur",      path=home / "USER.md",     required=False),
+        ])
+
+    onboarding_skill = home / "skills" / "onboarding" / "SKILL.md"
+    if assistant_enabled and not dev_posture and needs_onboarding(home):
+        sources.append(ContextSource(
+            key="onboarding",
+            title="Onboarding",
+            path=onboarding_skill,
+            required=False,
+        ))
+
+    if assistant_enabled and dev_posture:
+        preamble = (
+            "## Capacités actives\n"
+            "- Skill assistant actif, posture dev projet active.\n"
+            "- Tu travailles sur le projet courant : privilégie lecture/édition/tests et résultats vérifiés.\n"
+            "- Réponds court par défaut : 1 à 5 lignes, ou 3 à 5 puces maximum si une liste est utile.\n"
+            "- Si un outil renvoie `file_not_found` ou `dir_not_found`, tiens compte des candidats proposés, "
+            "liste le dossier parent, puis réessaie avec le chemin vérifié au lieu de répéter l'hypothèse.\n"
+            "- Quand `list_dir` retourne des chemins préfixés, conserve ces chemins exacts dans tes prochaines lectures/écritures.\n"
+            "- Pas d'onboarding, pas de profil durable, pas d'introduction ni conclusion décorative "
+            "sauf demande explicite."
+        )
+    elif assistant_enabled:
+        preamble = (
+            "## Capacités actives\n"
+            "- Skill assistant actif : tu peux utiliser IDENTITY.md, USER.md "
+            "et l'onboarding conditionnel quand ces fichiers manquent."
+        )
+    else:
+        preamble = (
+            "## Capacités actives\n"
+            "- Skill assistant inactif : tu es en mode dev local.\n"
+            "- Ne démarre pas d'onboarding, ne cherche pas IDENTITY.md ou USER.md, "
+            "et réponds à la demande courante avec le contexte disponible.\n"
+            "- Cette posture dev local prime sur le style général de SOUL.md.\n"
+            "- Réponds court par défaut : 1 à 5 lignes, ou 3 à 5 puces maximum si une liste est utile.\n"
+            "- Pas d'introduction, pas de reformulation de la demande, pas de conclusion décorative.\n"
+            "- Privilégie uniquement les actions, constats utiles, chemins/fichiers, commandes et résultats vérifiés.\n"
+            "- Si un outil renvoie `file_not_found` ou `dir_not_found`, tiens compte des candidats proposés, "
+            "liste le dossier parent, puis réessaie avec le chemin vérifié au lieu de répéter l'hypothèse.\n"
+            "- Quand `list_dir` retourne des chemins préfixés, conserve ces chemins exacts dans tes prochaines lectures/écritures.\n"
+            "- Ne propose pas plusieurs suites possibles sauf si l'utilisateur demande explicitement des options.\n"
+            "- N'ajoute pas de questions d'installation, de profil durable ou de conversation personnelle "
+            "sauf si l'utilisateur les demande explicitement."
+        )
+
     builder = ContextBuilder(reader=_FileReader())
-    bundle  = builder.build(ContextBuildInput(sources=sources))
+    bundle  = builder.build(ContextBuildInput(preamble=preamble, sources=sources))
     loaded_keys: list[str] = [s.key for s in bundle.loaded_sources]
 
     skill_keys: list[str] = []
@@ -90,3 +147,15 @@ def build_system_prompt(
         markdown = bundle.markdown
 
     return markdown, loaded_keys + skill_keys
+
+
+def _agent_posture_path(home: Path, agent_name: str | None, posture: str) -> Path | None:
+    if not agent_name:
+        return None
+    try:
+        agents_root = (home / "agents").resolve(strict=False)
+        path = (agents_root / agent_name / "postures" / f"{posture}.md").resolve(strict=False)
+        path.relative_to(agents_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path

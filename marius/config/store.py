@@ -6,10 +6,19 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .contracts import AgentConfig, MariusConfig
+from .contracts import AgentConfig, DEFAULT_TOOLS, MariusConfig
 
 _MARIUS_HOME = Path.home() / ".marius"
 DEFAULT_CONFIG_PATH = _MARIUS_HOME / "config.json"
+_PRE_VISION_DEFAULT_TOOLS = [
+    "read_file",
+    "list_dir",
+    "write_file",
+    "run_bash",
+    "web_fetch",
+    "web_search",
+    "skill_view",
+]
 
 
 class ConfigStore:
@@ -59,7 +68,7 @@ def _from_dict(raw: dict[str, Any]) -> MariusConfig:
             name=data["name"],
             provider_id=data["provider_id"],
             model=data["model"],
-            tools=data.get("tools", []),
+            tools=_normalize_tools(data.get("tools")),
             skills=data.get("skills", []),
         )
         for name, data in raw.get("agents", {}).items()
@@ -69,3 +78,12 @@ def _from_dict(raw: dict[str, Any]) -> MariusConfig:
         main_agent=raw.get("main_agent", "main"),
         agents=agents,
     )
+
+
+def _normalize_tools(raw_tools: Any) -> list[str]:
+    if not isinstance(raw_tools, list):
+        return list(DEFAULT_TOOLS)
+    tools = [str(tool) for tool in raw_tools]
+    if tools == _PRE_VISION_DEFAULT_TOOLS:
+        return list(DEFAULT_TOOLS)
+    return tools
