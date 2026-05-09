@@ -51,7 +51,8 @@ from .protocol import (
     ToolStartEvent, WelcomeEvent, decode, encode, tool_target,
 )
 from .workspace import (
-    ensure_workspace, memory_db_path, pid_path, sessions_dir, socket_path,
+    daily_cache_path, ensure_workspace, jobs_path,
+    memory_db_path, pid_path, sessions_dir, socket_path,
 )
 
 _STATIC_TOOLS = {
@@ -115,8 +116,10 @@ class GatewayServer:
             self.system_prompt = f"{self.system_prompt}\n\n{self.memory_block.text}".strip()
 
         self._send_lock = threading.Lock()
+        self._turn_lock  = threading.Lock()   # sérialise CLI + Telegram
         self._conn: socket.socket | None = None
         self._pending_perms: dict[str, tuple[threading.Event, list[bool]]] = {}
+        self.telegram_chat_id: int | None = None   # mémorisé pour pushs daily
 
         guard = PermissionGuard(
             mode=permission_mode,
@@ -147,6 +150,130 @@ class GatewayServer:
             "permission_mode": permission_mode,
             "tools": enabled_tools or "all",
         })
+
+        # Scheduler — démarré si activé dans la config agent
+        self._scheduler = None
+        if getattr(agent_config, "scheduler_enabled", False):
+            self._start_scheduler(agent_config)
+
+    # ── scheduler ─────────────────────────────────────────────────────────────
+
+    def _start_scheduler(self, agent_config: Any) -> None:
+        from marius.kernel.scheduler import JobStore, Scheduler, ensure_jobs
+
+        store = JobStore(jobs_path(self.agent_name))
+        ensure_jobs(
+            store,
+            dream_time=getattr(agent_config, "dream_time", ""),
+            daily_time=getattr(agent_config, "daily_time", ""),
+        )
+
+        handlers: dict[str, Any] = {}
+        if getattr(agent_config, "dream_time", ""):
+            handlers["dreaming"] = self._run_scheduled_dream
+        if getattr(agent_config, "daily_time", ""):
+            handlers["daily"] = self._run_scheduled_daily
+
+        if not handlers:
+            return
+
+        self._scheduler = Scheduler(store, handlers)
+        t = threading.Thread(target=self._scheduler.run_forever, daemon=True)
+        t.start()
+
+    def _run_scheduled_dream(self) -> None:
+        from marius.dreaming.engine import run_dreaming
+        run_dreaming(
+            memory_store=self.memory_store,
+            entry=self.entry,
+            active_skills=self.active_skills or None,
+            project_root=self.workspace,
+        )
+
+    def _run_scheduled_daily(self) -> None:
+        from marius.dreaming.engine import run_daily
+        briefing = run_daily(
+            memory_store=self.memory_store,
+            entry=self.entry,
+            active_skills=self.active_skills or None,
+            project_root=self.workspace,
+        )
+        cache = daily_cache_path(self.agent_name)
+        try:
+            cache.write_text(briefing, encoding="utf-8")
+        except OSError:
+            pass
+        # Push Telegram si un chat_id est mémorisé
+        self._push_daily_telegram(briefing)
+
+    def _push_daily_telegram(self, briefing: str) -> None:
+        chat_id = self.telegram_chat_id
+        if chat_id is None:
+            return
+        try:
+            from marius.channels.telegram.config import load as load_tg_cfg
+            from marius.channels.telegram.api import send_message
+            cfg = load_tg_cfg()
+            if cfg and cfg.enabled:
+                send_message(cfg.token, chat_id, briefing)
+        except Exception:
+            pass
+
+    # ── Telegram channel ──────────────────────────────────────────────────────
+
+    def _start_telegram(self) -> None:
+        from marius.channels.telegram.config import load as load_tg_cfg
+        from marius.channels.telegram.poller import TelegramPoller
+        from .workspace import telegram_offset_path
+
+        cfg = load_tg_cfg()
+        if not cfg or not cfg.enabled or cfg.agent_name != self.agent_name:
+            return
+
+        self._telegram_poller = TelegramPoller(
+            cfg=cfg,
+            gateway=self,
+            offset_path=telegram_offset_path(self.agent_name),
+        )
+        self._telegram_poller.start()
+
+    def run_turn_for_telegram(self, text: str) -> str:
+        """Exécute un tour depuis Telegram. Bloquant, sérialisé via turn_lock."""
+        from marius.kernel.contracts import Message, Role
+        cancel_event = threading.Event()
+        response_parts: list[str] = []
+
+        def on_text_delta(delta: str) -> None:
+            if cancel_event.is_set():
+                raise KeyboardInterrupt
+            response_parts.append(delta)
+
+        user_message = Message(
+            role=Role.USER,
+            content=text,
+            created_at=datetime.now(timezone.utc),
+        )
+        from marius.kernel.runtime import TurnInput
+        with self._turn_lock:
+            try:
+                self.orchestrator.run_turn(
+                    TurnInput(
+                        session=self.session,
+                        user_message=user_message,
+                        system_prompt=self.system_prompt,
+                    ),
+                    on_text_delta=on_text_delta,
+                )
+            except KeyboardInterrupt:
+                pass
+            except Exception as exc:
+                return f"Erreur : {exc}"
+        return "".join(response_parts)
+
+    def new_conversation(self) -> None:
+        """Réinitialise la session (appelable depuis Telegram /new)."""
+        self.session.state.turns.clear()
+        self.session.state.compaction_notices.clear()
 
     # ── permission interactive ────────────────────────────────────────────────
 
@@ -221,7 +348,13 @@ class GatewayServer:
 
         pid_path(self.agent_name).write_text(str(os.getpid()), encoding="utf-8")
 
+        # Telegram poller (thread daemon, si configuré pour cet agent)
+        self._telegram_poller = None
+        self._start_telegram()
+
         def _sigterm(sig, frame):
+            if self._telegram_poller:
+                self._telegram_poller.stop()
             sys.exit(0)
         signal.signal(signal.SIGTERM, _sigterm)
 
@@ -368,16 +501,17 @@ class GatewayServer:
 
         try:
             system_prompt = self._system_prompt_for_session()
-            output = self.orchestrator.run_turn(
-                TurnInput(
-                    session=self.session,
-                    user_message=user_message,
-                    system_prompt=system_prompt,
-                ),
-                on_text_delta=on_text_delta,
-                on_tool_start=on_tool_start,
-                on_tool_result=on_tool_result,
-            )
+            with self._turn_lock:
+                output = self.orchestrator.run_turn(
+                    TurnInput(
+                        session=self.session,
+                        user_message=user_message,
+                        system_prompt=system_prompt,
+                    ),
+                    on_text_delta=on_text_delta,
+                    on_tool_start=on_tool_start,
+                    on_tool_result=on_tool_result,
+                )
             if output.assistant_message is not None:
                 content = output.assistant_message.content
                 event_name = "turn_empty_response" if not content.strip() else "turn_done"
@@ -427,12 +561,19 @@ class GatewayServer:
             turns = len(self.session.state.turns)
             if turns == 0:
                 return
+            from marius.storage.session_corpus import build_transcript
+            messages: list = []
+            for turn in self.session.state.turns:
+                messages.extend(turn.input_messages)
+                if turn.assistant_message:
+                    messages.append(turn.assistant_message)
             record = SessionRecord(
                 project=self.agent_name,
                 cwd=str(self.workspace),
                 opened_at=self._opened_at,
                 closed_at=datetime.now(timezone.utc).isoformat(),
                 turns=turns,
+                transcript=build_transcript(messages),
             )
             write_session_file(record, sessions_dir(self.agent_name))
         except Exception:

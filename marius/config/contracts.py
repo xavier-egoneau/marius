@@ -14,6 +14,7 @@ ALL_TOOLS: list[str] = [
     "web_search",
     "vision",
     "skill_view",
+    "spawn_agent",
 ]
 
 # Outils actifs par défaut pour un nouvel agent
@@ -27,6 +28,9 @@ class AgentConfig:
     model: str
     tools: list[str] = field(default_factory=lambda: list(DEFAULT_TOOLS))
     skills: list[str] = field(default_factory=list)
+    dream_time: str = "02:00"        # HH:MM UTC — vide = désactivé
+    daily_time: str = "08:00"        # HH:MM UTC — vide = désactivé
+    scheduler_enabled: bool = True
 
 
 @dataclass

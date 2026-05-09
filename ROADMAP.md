@@ -1,13 +1,14 @@
 # Marius — Roadmap
 
-## État actuel (2026-05-08)
+## État actuel (2026-05-09)
 
 Le socle agentique est opérationnel en CLI :
 kernel complet · provider ChatGPT OAuth + Ollama · tools filesystem/shell/web/memory ·
-vision Ollama locale · permissions safe/limited/power · mémoire SQLite+FTS5 avec scopes · session corpus ·
-logs locaux · onboarding skill · config agents · SearxNG auto-hébergé
-observations courtes de session non persistantes
-postures agent conditionnelles
+vision Ollama locale · permissions safe/limited/power · mémoire SQLite+FTS5 avec scopes ·
+session corpus · logs locaux · onboarding skill · config agents · SearxNG auto-hébergé ·
+observations courtes de session · postures agent conditionnelles ·
+skills reader + skill_view + marius skills CLI · gateway (socket Unix, session persistante) ·
+dreaming + daily (LLM direct, /dream /daily) · skill dev (plan/dev/commit/review/test/resume/pr)
 
 ---
 
@@ -15,11 +16,12 @@ postures agent conditionnelles
 
 ### 1. Skills system
 
-- [ ] **Skills reader** — découverte et chargement de `~/.marius/skills/*/SKILL.md`
+- [x] **Skills reader** — découverte et chargement de `~/.marius/skills/*/SKILL.md`
       dans le contexte système au démarrage REPL
-- [ ] **skill_view tool** — l'agent peut lire le contenu d'un skill à la demande
-- [ ] **dream.md / daily.md** — parsing des contrats de données par skill
-- [ ] **`marius skills`** CLI — lister les skills disponibles, les activer par agent
+- [x] **skill_view tool** — l'agent peut lire le contenu d'un skill à la demande
+- [x] **DREAM.md / DAILY.md / core/** — parsing des contrats et commandes par skill
+- [x] **`marius skills`** CLI — lister les skills disponibles, les activer par agent
+- [x] **Commandes REPL depuis les skills** — frontmatter `commands:` + `core/<cmd>.md`
 - [ ] **AGENTS.md global** — créer `~/.marius/AGENTS.md` conventions par défaut
 - [ ] **SOUL.md auto-création** — générer un SOUL.md minimal au premier setup si absent
 
@@ -29,12 +31,19 @@ postures agent conditionnelles
 
 - [x] **Observations courtes de session** — faits vérifiés par les outils
       injectés au tour suivant sans persister dans `memory.db`
-- [ ] **Dreaming tool** — agrège sessions + memory.db + DECISIONS.md/ROADMAP.md
-      + dream.md des skills actifs → appel LLM unique → opérations JSON sur le store
-- [ ] **Daily tool** — handoff dreaming + daily.md des skills → briefing Markdown
-- [ ] **Cron scheduling** — déclenche dreaming/daily aux heures configurées dans leurs skills
-- [ ] **Archive sessions** — déplacer les fichiers session traités dans `sessions/archive/`
-- [ ] **Commandes REPL** `/dream`, `/daily` — déclencher manuellement
+- [x] **Dreaming** — agrège memory.db + DREAM.md des skills + DECISIONS/ROADMAP
+      → appel LLM unique → opérations JSON appliquées au store
+- [x] **Daily** — mémoires + DAILY.md des skills → briefing Markdown (appel LLM direct)
+- [x] **Archive sessions** — fichiers session archivés après dreaming
+- [x] **Commandes REPL** `/dream`, `/daily` — déclenchement manuel
+- [ ] **Contenu des sessions dans le corpus** — sauvegarder un transcript lisible
+      (user + assistant, sans tool calls) pour que le dreaming puisse analyser les conversations,
+      pas seulement le store mémoire
+- [ ] **Rapport de dream persisté** — sauvegarder chaque dream en JSON
+      (`~/.marius/dreams/dream_<ts>.json`) ; le daily lit le dernier rapport
+      au lieu de recalculer depuis zéro
+- [x] **Cron scheduling** — scheduler dans le gateway (jobs.json persistant, reprise après
+      redémarrage, poll 60s, `dream_time`/`daily_time` dans `AgentConfig`, daily mis en cache)
 
 ---
 
@@ -58,8 +67,10 @@ Toutes ces fonctionnalités sont interdépendantes — elles s'activent ensemble
       uniquement quand la posture dev est active
 - [ ] **Gateway** — processus persistant (daemon/service) qui maintient une session
       active entre les relances
-- [ ] **Service système** — démarrage au boot ou au lancement de session
-      (systemd user service ou launchd)
+- [x] **Service système** — service systemd user template (`marius-gateway@.service`),
+      `marius gateway install-service` / `enable` / `disable` / `status` (avec état systemd).
+      Conditionné au skill `assistant` — `marius --agent X` et `gateway start/enable`
+      bloqués avec message clair si le skill n'est pas activé.
 - [ ] **Multi-agents** — plusieurs agents nommés gérés par le gateway
 - [ ] **Workspace** — `~/.marius/workspace/<agent>/` par agent, avec mémoire dédiée
 - [ ] **USER.md wizard** — remplir le profil utilisateur via le skill onboarding
@@ -73,29 +84,28 @@ Toutes ces fonctionnalités sont interdépendantes — elles s'activent ensemble
 Un agent peut spawner des subagents pour déléguer une tâche ciblée.
 Le subagent tourne en isolation, rend son résultat au parent, puis s'arrête.
 
-- [ ] **`spawn_agent` tool** — l'agent parent crée un subagent nommé avec une instruction,
-      des tools restreints et un contexte dédié. Retourne le résultat final du subagent.
-- [ ] **Lifecycle subagent** — démarrage, exécution, retour de résultat, nettoyage.
-      Le subagent est éphémère : pas de session persistante, pas de mémoire propre.
-- [ ] **Config héritée** — le subagent hérite du provider et du mode de permission du parent,
-      sauf override explicite (ex : subagent read-only en mode safe).
-- [ ] **Exécution synchrone** — le parent attend le résultat avant de continuer
-      (adapté aux tâches courtes : analyse, recherche, rédaction).
-- [ ] **Exécution asynchrone** — le parent reçoit une notification gateway quand c'est prêt
-      (adapté aux tâches longues : build, test suite, refactor).
-- [ ] **Skills catalogue — skill `dev`** — active les commandes REPL dédiées au développement :
-      `/plan` planification, `/dev` implémentation, `/commit` commit guidé,
-      `/review` revue de code, `/test` lancement + analyse des tests.
-      Un skill peut déclarer des commandes REPL dans son frontmatter SKILL.md ;
-      le REPL les enregistre au chargement du skill.
+- [x] **`spawn_agent` tool** — workers délégués bornés (depth=1, max 5/appel, timeout 5min,
+      contexte minimal task+fichiers, rapport structuré status/summary/changed_files/blocker).
+      Le worker qui a besoin de plus de parallélisme retourne `needs_arbitration` —
+      l'orchestrateur spawne alors de nouveaux workers (pas de récursion directe).
+- [x] **Lifecycle worker** — éphémère, sans mémoire propre, auto-deny permissions interactives,
+      cancel_event pour timeout, limite d'itérations d'outils.
+- [x] **Skill `dev`** — `/plan` `/dev` `/commit` `/review` `/test` `/resume` `/pr`
+      + tâches `[parallélisable]` / `[dépend de: X]` dans PLAN.md.
+- [ ] **Exécution asynchrone** — notification gateway quand un worker long se termine
+      (adapté aux builds, test suites, refactors lourds).
 
 ---
 
 ### 6. Canaux
 
 - [ ] **Host web** — API HTTP mince + interface web minimale (chat)
-- [ ] **Canal Telegram** — réception et envoi de messages via Bot API
-- [ ] **Commandes Telegram** — `/start`, `/help`, `/status`, `/new`, commandes customs
+- [x] **Canal Telegram** — polling long (stdlib, pas de dépendance externe), thread intégré
+      dans le gateway, turn_lock pour sérialiser CLI + Telegram sur la même session.
+      Push daily automatique si chat_id mémorisé.
+- [x] **Commandes Telegram** — `/start` `/help` `/new` `/daily` `/status`
+- [x] **`marius telegram setup`** — wizard (token BotFather, allowed_users, agent)
+- [x] **`marius telegram status`** — affiche bot username, agent, users autorisés
 - [ ] **Multi-canal** — même session accessible depuis CLI, web et Telegram
 - [ ] **Artefacts cross-canaux** — diffs, notices de compaction lisibles dans tous les canaux
 - [ ] **Rendu Markdown** — tester la cohérence entre CLI (rich), web (HTML) et Telegram

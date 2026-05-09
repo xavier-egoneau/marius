@@ -6,7 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from marius.kernel.skills import Skill, SkillMeta, SkillReader, format_skill_context
+from marius.kernel.skills import (
+    Skill, SkillCommand, SkillMeta, SkillReader,
+    collect_skill_commands, format_skill_context,
+)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -22,12 +25,15 @@ def _make_skill(
     dream: str | None = None,
     daily: str | None = None,
     core: dict[str, str] | None = None,
+    commands: list[str] | None = None,
 ) -> Path:
     skill_dir = root / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     fm_lines = [f"name: {name}", f"description: {description}"]
     if version:
         fm_lines.append(f"version: {version}")
+    if commands:
+        fm_lines.append(f"commands: {', '.join(commands)}")
     fm = "\n".join(fm_lines)
     (skill_dir / "SKILL.md").write_text(f"---\n{fm}\n---\n{body}", encoding="utf-8")
     if dream is not None:
@@ -240,3 +246,82 @@ def test_format_multiple_skills(tmp_path: Path) -> None:
     assert "## Skill : dev" in result
     assert "## Skill : writing" in result
     assert result.index("dev") < result.index("writing")
+
+
+# ── SkillCommand ──────────────────────────────────────────────────────────────
+
+
+def _write_cmd_file(skill_dir: Path, cmd_name: str, description: str, prompt: str) -> None:
+    core_dir = skill_dir / "core"
+    core_dir.mkdir(exist_ok=True)
+    (core_dir / f"{cmd_name}.md").write_text(
+        f"---\ndescription: {description}\n---\n{prompt}",
+        encoding="utf-8",
+    )
+
+
+def test_command_loaded_from_core(tmp_path: Path) -> None:
+    skill_dir = _make_skill(tmp_path, "dev", commands=["plan"])
+    _write_cmd_file(skill_dir, "plan", "Planifier l'implémentation", "Tu es en mode planification.")
+    skill = SkillReader(tmp_path).load("dev")
+    assert skill is not None
+    assert "plan" in skill.commands
+    cmd = skill.commands["plan"]
+    assert cmd.name == "plan"
+    assert cmd.description == "Planifier l'implémentation"
+    assert "planification" in cmd.prompt
+    assert cmd.skill_name == "dev"
+
+
+def test_command_ignored_if_core_file_missing(tmp_path: Path) -> None:
+    _make_skill(tmp_path, "dev", commands=["plan", "dev"])
+    # No core files written
+    skill = SkillReader(tmp_path).load("dev")
+    assert skill is not None
+    assert skill.commands == {}
+
+
+def test_multiple_commands(tmp_path: Path) -> None:
+    skill_dir = _make_skill(tmp_path, "dev", commands=["plan", "commit", "review"])
+    _write_cmd_file(skill_dir, "plan",   "Planifier",  "Prompt plan.")
+    _write_cmd_file(skill_dir, "commit", "Committer",  "Prompt commit.")
+    _write_cmd_file(skill_dir, "review", "Réviser",    "Prompt review.")
+    skill = SkillReader(tmp_path).load("dev")
+    assert skill is not None
+    assert set(skill.commands.keys()) == {"plan", "commit", "review"}
+
+
+def test_command_without_frontmatter(tmp_path: Path) -> None:
+    skill_dir = _make_skill(tmp_path, "dev", commands=["plan"])
+    core_dir = skill_dir / "core"
+    core_dir.mkdir(exist_ok=True)
+    (core_dir / "plan.md").write_text("Prompt direct sans frontmatter.", encoding="utf-8")
+    skill = SkillReader(tmp_path).load("dev")
+    assert skill is not None
+    cmd = skill.commands.get("plan")
+    assert cmd is not None
+    assert cmd.description == "plan"   # fallback = nom de la commande
+    assert "Prompt direct" in cmd.prompt
+
+
+def test_collect_skill_commands_merges(tmp_path: Path) -> None:
+    sd1 = _make_skill(tmp_path, "dev",     commands=["plan", "commit"])
+    sd2 = _make_skill(tmp_path, "writing", commands=["draft"])
+    _write_cmd_file(sd1, "plan",   "Planifier", "P plan.")
+    _write_cmd_file(sd1, "commit", "Committer", "P commit.")
+    _write_cmd_file(sd2, "draft",  "Rédiger",   "P draft.")
+    reader = SkillReader(tmp_path)
+    skills = reader.load_all(["dev", "writing"])
+    cmds = collect_skill_commands(skills)
+    assert set(cmds.keys()) == {"plan", "commit", "draft"}
+
+
+def test_collect_skill_commands_last_skill_wins(tmp_path: Path) -> None:
+    sd1 = _make_skill(tmp_path, "dev",     commands=["plan"])
+    sd2 = _make_skill(tmp_path, "writing", commands=["plan"])
+    _write_cmd_file(sd1, "plan", "Dev plan",     "Dev prompt.")
+    _write_cmd_file(sd2, "plan", "Writing plan", "Writing prompt.")
+    reader = SkillReader(tmp_path)
+    skills = reader.load_all(["dev", "writing"])
+    cmds = collect_skill_commands(skills)
+    assert cmds["plan"].skill_name == "writing"  # writing chargé en dernier

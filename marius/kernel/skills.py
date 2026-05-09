@@ -10,18 +10,23 @@ Structure d'un skill :
         ├── SKILL.md      ← instructions + frontmatter YAML (requis)
         ├── DREAM.md      ← contrat données pour le dreaming (optionnel)
         ├── DAILY.md      ← contrat données pour le daily (optionnel)
-        └── core/         ← fichiers additionnels du skill (optionnel)
-
-Localisation :
-    - Mode local   : ~/.marius/skills/
-    - Mode assistant : ~/.marius/workspace/<agent>/skills/  (futur)
+        └── core/         ← fichiers additionnels + prompts des commandes (optionnel)
+            ├── plan.md   ← prompt pour la commande /plan
+            └── ...
 
 Frontmatter SKILL.md :
     ---
     name: mon-skill
     description: Ce que fait ce skill
-    version: 1.0.0       (optionnel)
+    version: 1.0.0           (optionnel)
+    commands: plan, dev, commit   (optionnel — noms des commandes REPL)
     ---
+
+Frontmatter core/<cmd>.md :
+    ---
+    description: Courte description affichée dans /help
+    ---
+    <prompt injecté avant l'entrée utilisateur quand la commande est invoquée>
 """
 
 from __future__ import annotations
@@ -53,12 +58,22 @@ class SkillMeta:
 
 
 @dataclass(frozen=True)
+class SkillCommand:
+    """Commande REPL déclarée par un skill."""
+    name: str
+    description: str
+    prompt: str   # injecté avant l'entrée utilisateur lors de l'invocation
+    skill_name: str = ""
+
+
+@dataclass(frozen=True)
 class Skill:
     meta: SkillMeta
-    content: str                          # corps de SKILL.md sans le frontmatter
-    dream_content: str = ""               # contenu de DREAM.md si présent
-    daily_content: str = ""               # contenu de DAILY.md si présent
-    core_files: dict[str, str] = field(default_factory=dict)  # core/<nom> → contenu
+    content: str                                    # corps de SKILL.md sans le frontmatter
+    dream_content: str = ""                         # contenu de DREAM.md si présent
+    daily_content: str = ""                         # contenu de DAILY.md si présent
+    core_files: dict[str, str] = field(default_factory=dict)    # core/<nom> → contenu brut
+    commands: dict[str, SkillCommand] = field(default_factory=dict)  # nom → commande
 
 
 class SkillReader:
@@ -99,13 +114,18 @@ class SkillReader:
         """Charge un skill complet par nom. Retourne None si introuvable."""
         if name in _SYSTEM_SKILLS:
             description, version = _SYSTEM_SKILLS[name]
+            skill_dir  = self._dir / name
+            skill_file = skill_dir / "SKILL.md"
             meta = SkillMeta(
                 name=name,
                 description=description,
-                skill_dir=self._dir / name,
-                skill_file=self._dir / name / "SKILL.md",
+                skill_dir=skill_dir,
+                skill_file=skill_file,
                 version=version,
             )
+            # Si un SKILL.md existe, on lit son contenu (surcharge le system skill)
+            if skill_file.exists():
+                return _load_skill(meta)
             return Skill(meta=meta, content="")
         skill_dir = self._dir / name
         skill_file = skill_dir / "SKILL.md"
@@ -170,11 +190,12 @@ def _load_skill(meta: SkillMeta) -> Skill:
         raw = meta.skill_file.read_text(encoding="utf-8")
     except OSError:
         return Skill(meta=meta, content="")
-    _, body = _parse_frontmatter(raw)
+    fm, body = _parse_frontmatter(raw)
 
     dream_content = _read_optional(meta.skill_dir / "DREAM.md")
     daily_content = _read_optional(meta.skill_dir / "DAILY.md")
     core_files    = _read_core_dir(meta.skill_dir / "core")
+    commands      = _parse_commands(fm, meta.skill_dir / "core", meta.name)
 
     return Skill(
         meta=meta,
@@ -182,6 +203,7 @@ def _load_skill(meta: SkillMeta) -> Skill:
         dream_content=dream_content,
         daily_content=daily_content,
         core_files=core_files,
+        commands=commands,
     )
 
 
@@ -204,6 +226,47 @@ def _read_core_dir(core_dir: Path) -> dict[str, str]:
             except OSError:
                 pass
     return files
+
+
+def _parse_commands(
+    fm: dict[str, str], core_dir: Path, skill_name: str
+) -> dict[str, SkillCommand]:
+    """Construit les commandes déclarées dans le frontmatter SKILL.md.
+
+    Chaque commande listée dans `commands:` cherche son prompt dans
+    core/<nom>.md. Si le fichier est absent, la commande est ignorée.
+    """
+    raw_cmds = fm.get("commands", "")
+    cmd_names = [c.strip() for c in raw_cmds.split(",") if c.strip()]
+    if not cmd_names:
+        return {}
+
+    commands: dict[str, SkillCommand] = {}
+    for cmd_name in cmd_names:
+        cmd_file = core_dir / f"{cmd_name}.md"
+        if not cmd_file.exists():
+            continue
+        try:
+            raw = cmd_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        cmd_fm, prompt_body = _parse_frontmatter(raw)
+        description = cmd_fm.get("description", cmd_name)
+        commands[cmd_name] = SkillCommand(
+            name=cmd_name,
+            description=description,
+            prompt=prompt_body.strip(),
+            skill_name=skill_name,
+        )
+    return commands
+
+
+def collect_skill_commands(skills: list[Skill]) -> dict[str, SkillCommand]:
+    """Agrège toutes les commandes de plusieurs skills. En cas de conflit, le dernier skill gagne."""
+    commands: dict[str, SkillCommand] = {}
+    for skill in skills:
+        commands.update(skill.commands)
+    return commands
 
 
 def format_skill_context(skills: list[Skill]) -> str:

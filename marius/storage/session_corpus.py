@@ -33,6 +33,7 @@ class SessionRecord:
     opened_at: str
     closed_at: str
     turns: int
+    transcript: str = ""   # messages user + assistant (sans tool calls)
 
 
 def write_session_file(
@@ -41,13 +42,15 @@ def write_session_file(
 ) -> Path:
     """Écrit le fichier de corpus pour une session terminée.
 
+    Le fichier contient les métadonnées en frontmatter YAML et le transcript
+    de la conversation (user + assistant uniquement) dans le corps.
+
     Retourne le chemin du fichier créé.
     Silencieux en cas d'erreur — ne doit jamais bloquer la fermeture du REPL.
     """
     base = Path(sessions_dir) if sessions_dir else _MARIUS_HOME / "sessions"
     base.mkdir(parents=True, exist_ok=True)
 
-    # Nom du fichier depuis opened_at
     try:
         dt = datetime.fromisoformat(record.opened_at)
     except ValueError:
@@ -56,7 +59,6 @@ def write_session_file(
     filename = dt.strftime("%Y-%m-%d-%Hh%M.md")
     path = base / filename
 
-    # Évite l'écrasement si une session identique a déjà été écrite (rare)
     stem = path.stem
     suffix = path.suffix
     counter = 1
@@ -64,6 +66,7 @@ def write_session_file(
         path = base / f"{stem}-{counter}{suffix}"
         counter += 1
 
+    body = f"\n{record.transcript.strip()}\n" if record.transcript.strip() else ""
     content = (
         "---\n"
         f"project: {record.project}\n"
@@ -71,7 +74,8 @@ def write_session_file(
         f"opened_at: {record.opened_at}\n"
         f"closed_at: {record.closed_at}\n"
         f"turns: {record.turns}\n"
-        "---\n"
+        f"---\n"
+        f"{body}"
     )
 
     try:
@@ -80,6 +84,25 @@ def write_session_file(
         pass
 
     return path
+
+
+def build_transcript(messages: list) -> str:
+    """Construit un transcript lisible depuis une liste de Message.
+
+    N'inclut que les rôles USER et ASSISTANT — pas les tool calls ni system.
+    """
+    lines: list[str] = []
+    for msg in messages:
+        role = getattr(msg, "role", None)
+        content = getattr(msg, "content", "") or ""
+        if role is None:
+            continue
+        role_name = role.value if hasattr(role, "value") else str(role)
+        if role_name == "user":
+            lines.append(f"**User** : {content.strip()}")
+        elif role_name == "assistant" and content.strip():
+            lines.append(f"**Assistant** : {content.strip()}")
+    return "\n\n".join(lines)
 
 
 def list_unprocessed(sessions_dir: Path | None = None) -> list[Path]:

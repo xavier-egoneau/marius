@@ -56,6 +56,9 @@ def _to_dict(config: MariusConfig) -> dict[str, Any]:
                 "model": agent.model,
                 "tools": agent.tools,
                 "skills": agent.skills,
+                "dream_time": agent.dream_time,
+                "daily_time": agent.daily_time,
+                "scheduler_enabled": agent.scheduler_enabled,
             }
             for name, agent in config.agents.items()
         },
@@ -70,6 +73,9 @@ def _from_dict(raw: dict[str, Any]) -> MariusConfig:
             model=data["model"],
             tools=_normalize_tools(data.get("tools")),
             skills=data.get("skills", []),
+            dream_time=data.get("dream_time", "02:00"),
+            daily_time=data.get("daily_time", "08:00"),
+            scheduler_enabled=bool(data.get("scheduler_enabled", True)),
         )
         for name, data in raw.get("agents", {}).items()
     }

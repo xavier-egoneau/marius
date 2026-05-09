@@ -29,6 +29,18 @@ def pid_path(agent_name: str) -> Path:
     return _RUN_DIR / f"{agent_name}.pid"
 
 
+def jobs_path(agent_name: str) -> Path:
+    return workspace_dir(agent_name) / "jobs.json"
+
+
+def telegram_offset_path(agent_name: str) -> Path:
+    return _RUN_DIR / f"telegram_{agent_name}.offset"
+
+
+def daily_cache_path(agent_name: str) -> Path:
+    return workspace_dir(agent_name) / "daily_latest.md"
+
+
 def ensure_workspace(agent_name: str) -> Path:
     """Crée les dossiers du workspace si nécessaires. Retourne le workspace dir."""
     ws = workspace_dir(agent_name)

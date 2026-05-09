@@ -23,6 +23,7 @@ from marius.config.contracts import (
     AgentConfig,
     MariusConfig,
 )
+from marius.kernel.scheduler import validate_hhmm
 from marius.config.store import ConfigStore
 from marius.kernel.skills import SkillReader
 from marius.provider_config.store import ProviderStore
@@ -197,30 +198,92 @@ def _configure_agent(
     model_default = existing.model if existing else selected.model
     model = c.input(f"  Modèle [[dim]{model_default}[/]]: ").strip() or model_default
 
-    c.print("\n  Tools actifs :\n")
+    # ── tools ─────────────────────────────────────────────────────────────────
     current_tools = set(existing.tools if existing else DEFAULT_TOOLS)
-    for tool in ALL_TOOLS:
+    c.print("\n  Tools actifs :\n")
+    for i, tool in enumerate(ALL_TOOLS, 1):
         mark = "[green]✓[/]" if tool in current_tools else "[dim]○[/]"
-        c.print(f"    {mark} {tool}")
+        c.print(f"    [color(208)][{i:2}][/] {mark} {tool}")
     c.print()
-    raw = c.input(
-        "  Modifier (ex: -run_bash +web_fetch) [[dim]Entrée pour garder[/]]: "
-    ).strip()
-    new_tools = _apply_tool_changes(list(current_tools), raw)
+    active_tool_idx = ", ".join(
+        str(i) for i, t in enumerate(ALL_TOOLS, 1) if t in current_tools
+    )
+    raw = c.input(f"  Numéros actifs [[dim]{active_tool_idx}[/]]: ").strip()
+    if raw:
+        chosen = {s.strip() for s in raw.split(",")}
+        new_tools = [
+            ALL_TOOLS[int(n) - 1]
+            for n in chosen
+            if n.isdigit() and 1 <= int(n) <= len(ALL_TOOLS)
+        ]
+        new_tools = [t for t in ALL_TOOLS if t in set(new_tools)]   # ordre canonique
+    else:
+        new_tools = [t for t in ALL_TOOLS if t in current_tools]
 
-    skills_default = existing.skills if existing else []
+    # ── skills ────────────────────────────────────────────────────────────────
+    skills_default = list(existing.skills) if existing else []
     available_skills = SkillReader().list()
+    skills = list(skills_default)
     if available_skills:
+        skill_names = [m.name for m in available_skills]
+        active_s = set(skills_default)
+
+        # Si assistant est actif, onboarding est inclus par défaut
+        from marius.kernel.posture import ASSISTANT_SKILL
+        if ASSISTANT_SKILL in active_s and "onboarding" in skill_names:
+            active_s.add("onboarding")
+
         c.print("\n  Skills disponibles :\n")
-        active = set(skills_default)
-        for meta in available_skills:
-            mark = "[green]✓[/]" if meta.name in active else "[dim]○[/]"
-            c.print(f"    {mark} {meta.name}  [dim]{meta.description}[/]")
+        for i, meta in enumerate(available_skills, 1):
+            mark = "[green]✓[/]" if meta.name in active_s else "[dim]○[/]"
+            c.print(f"    [color(208)][{i:2}][/] {mark} {meta.name}  [dim]{meta.description}[/]")
         c.print()
-    skills_raw = c.input(
-        f"  Skills actifs (ex: assistant) [[dim]{', '.join(skills_default) or 'aucun'}[/]]: "
-    ).strip()
-    skills = [s.strip() for s in skills_raw.split(",") if s.strip()] if skills_raw else skills_default
+        active_skill_idx = ", ".join(
+            str(i) for i, m in enumerate(available_skills, 1) if m.name in active_s
+        ) or "aucun"
+        raw_s = c.input(f"  Numéros actifs [[dim]{active_skill_idx}[/]]: ").strip()
+        if raw_s:
+            chosen_s = {s.strip() for s in raw_s.split(",")}
+            skills = [
+                available_skills[int(n) - 1].name
+                for n in chosen_s
+                if n.isdigit() and 1 <= int(n) <= len(available_skills)
+            ]
+
+    # Scheduler — affiché seulement si le skill assistant est actif
+    from marius.kernel.posture import ASSISTANT_SKILL
+    prev_skills   = set(existing.skills if existing else [])
+    assistant_new = ASSISTANT_SKILL in set(skills) and ASSISTANT_SKILL not in prev_skills
+    # Si assistant vient d'être activé → scheduler ON par défaut
+    if assistant_new:
+        scheduler_enabled = True
+    else:
+        scheduler_enabled = getattr(existing, "scheduler_enabled", True)
+    dream_time = getattr(existing, "dream_time", "02:00")
+    daily_time  = getattr(existing, "daily_time",  "08:00")
+
+    if ASSISTANT_SKILL in set(skills):
+        c.print("\n  [bold]Scheduler[/]  [dim](dreaming/daily automatiques)[/]\n")
+        raw_enabled = c.input(
+            f"  Activer le scheduler ? [[dim]{'O' if scheduler_enabled else 'n'}[/]]: "
+        ).strip().lower()
+        if raw_enabled:
+            scheduler_enabled = raw_enabled in ("o", "oui", "y", "yes", "1", "true")
+
+        if scheduler_enabled:
+            raw_dream = c.input(f"  Heure dreaming HH:MM [[dim]{dream_time}[/]]: ").strip()
+            if raw_dream:
+                try:
+                    dream_time = validate_hhmm(raw_dream)
+                except ValueError as e:
+                    c.print(f"  [dim]Format invalide ({e}) — conservé : {dream_time}[/]")
+
+            raw_daily = c.input(f"  Heure daily   HH:MM [[dim]{daily_time}[/]]: ").strip()
+            if raw_daily:
+                try:
+                    daily_time = validate_hhmm(raw_daily)
+                except ValueError as e:
+                    c.print(f"  [dim]Format invalide ({e}) — conservé : {daily_time}[/]")
 
     return AgentConfig(
         name=name,
@@ -228,6 +291,9 @@ def _configure_agent(
         model=model,
         tools=new_tools,
         skills=skills,
+        scheduler_enabled=scheduler_enabled,
+        dream_time=dream_time,
+        daily_time=daily_time,
     )
 
 

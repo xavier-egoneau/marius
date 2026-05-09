@@ -22,6 +22,7 @@ from marius.kernel.compaction import CompactionConfig, CompactionLevel, compacti
 from marius.kernel.context_factory import build_system_prompt
 from marius.kernel.context_window import FALLBACK_CONTEXT_WINDOW, resolve_context_window
 from marius.kernel.contracts import Message, Role, ToolCall, ToolResult
+from marius.kernel.skills import SkillCommand, SkillReader, collect_skill_commands
 from marius.kernel.memory_context import format_memory_block
 from marius.kernel.permission_guard import PermissionGuard
 from marius.kernel.posture import maybe_activate_dev_posture, uses_dev_posture
@@ -37,12 +38,13 @@ from marius.provider_config.wizard import run_add_provider, run_set_model
 from marius.storage.memory_store import MemoryStore
 from marius.storage.log_store import log_event, preview
 from marius.storage.project_store import ProjectStore
-from marius.storage.session_corpus import SessionRecord, write_session_file
+from marius.storage.session_corpus import SessionRecord, build_transcript, write_session_file
 from marius.storage.ui_history import InMemoryVisibleHistoryStore, VisibleHistoryEntry
 from marius.tools.filesystem import LIST_DIR, READ_FILE, WRITE_FILE
 from marius.tools.memory import make_memory_tool
 from marius.tools.shell import RUN_BASH
 from marius.tools.skills import SKILL_VIEW
+from marius.tools.spawn_agent import make_spawn_agent_tool
 from marius.tools.vision import VISION
 from marius.tools.web import WEB_FETCH, WEB_SEARCH
 
@@ -96,6 +98,8 @@ _COMMANDS: dict[str, str] = {
     "/remember":  "mémoriser un fait  (/remember <texte>)",
     "/memories":  "lister les souvenirs enregistrés",
     "/forget":    "supprimer un souvenir  (/forget <id>)",
+    "/dream":     "consolider la mémoire (dreaming LLM)",
+    "/daily":     "générer le briefing du jour",
     "/stop":      "interrompre l'inférence en cours",
     "/help":      "afficher toutes les commandes",
     "/exit":      "quitter Marius",
@@ -182,7 +186,7 @@ def _welcome(entry: ProviderEntry, loaded_context: list[str] | None = None) -> N
 # ── commandes ─────────────────────────────────────────────────────────────────
 
 
-def _cmd_help() -> None:
+def _cmd_help(skill_commands: dict[str, SkillCommand] | None = None) -> None:
     _console.print()
     _console.print("[bold color(208)]Commandes disponibles[/]\n")
     t = Table.grid(padding=(0, 2))
@@ -190,6 +194,16 @@ def _cmd_help() -> None:
     t.add_column(style="cmd.desc")
     for name, desc in _COMMANDS.items():
         t.add_row(name, desc)
+    if skill_commands:
+        _console.print(t)
+        _console.print()
+        _console.print("[bold color(208)]Commandes skills[/]\n")
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="cmd.name", no_wrap=True)
+        t.add_column(style="cmd.desc")
+        t.add_column(style="dim")
+        for sc in skill_commands.values():
+            t.add_row(f"/{sc.name}", sc.description, f"[{sc.skill_name}]")
     _console.print(t)
     _console.print()
 
@@ -294,6 +308,74 @@ def _cmd_forget(raw_id: str, memory_store: MemoryStore) -> None:
         _console.print(f"\n  [dim]Souvenir #{memory_id} introuvable.[/]\n")
 
 
+# ── dreaming / daily ─────────────────────────────────────────────────────────
+
+
+def _cmd_dream(
+    memory_store: MemoryStore,
+    entry: ProviderEntry,
+    active_skills: list[str] | None,
+    cwd: Path,
+) -> None:
+    from marius.dreaming.engine import run_dreaming
+
+    _console.print("\n  [dim]Dreaming en cours…[/]")
+    with Status("[dim]Consolidation mémorielle…[/]", spinner="dots", spinner_style="color(208)", console=_console):
+        result = run_dreaming(
+            memory_store=memory_store,
+            entry=entry,
+            active_skills=active_skills,
+            project_root=cwd,
+        )
+    _console.print(f"\n  [dim]{result}[/]\n")
+
+
+def _cmd_daily(
+    memory_store: MemoryStore,
+    entry: ProviderEntry,
+    active_skills: list[str] | None,
+    cwd: Path,
+    agent_name: str | None = None,
+) -> None:
+    # Vérifie d'abord le cache généré par le scheduler du gateway (< 12h)
+    briefing = _read_daily_cache(agent_name)
+    if briefing:
+        _console.print("\n  [dim]Briefing du scheduler (cache)[/]")
+    else:
+        from marius.dreaming.engine import run_daily
+        with Status("[dim]Génération du briefing…[/]", spinner="dots", spinner_style="color(208)", console=_console):
+            briefing = run_daily(
+                memory_store=memory_store,
+                entry=entry,
+                active_skills=active_skills,
+                project_root=cwd,
+            )
+    _console.print()
+    _console.print(Markdown(briefing))
+    _console.print()
+
+
+def _read_daily_cache(agent_name: str | None, max_age_hours: float = 12.0) -> str | None:
+    """Retourne le briefing mis en cache par le scheduler si récent."""
+    if not agent_name:
+        return None
+    try:
+        from marius.gateway.workspace import daily_cache_path
+        import os
+        cache = daily_cache_path(agent_name)
+        if not cache.exists():
+            return None
+        age_hours = (Path(os.devnull).stat().st_mtime - cache.stat().st_mtime) / 3600
+        # Utilise l'heure de modification du fichier
+        import time as _time
+        age_hours = (_time.time() - cache.stat().st_mtime) / 3600
+        if age_hours > max_age_hours:
+            return None
+        return cache.read_text(encoding="utf-8")
+    except (OSError, ImportError):
+        return None
+
+
 # ── compaction ────────────────────────────────────────────────────────────────
 
 
@@ -333,14 +415,19 @@ def _dispatch_command(
     entry: ProviderEntry,
     memory_store: MemoryStore,
     stop_event: threading.Event | None = None,
-) -> tuple[bool, SessionRuntime]:
-    """Gère les commandes slash. Retourne (continuer, session)."""
+    skill_commands: dict[str, SkillCommand] | None = None,
+) -> tuple[bool, SessionRuntime, str | None]:
+    """Gère les commandes slash.
+
+    Retourne (continuer, session, turn_message).
+    turn_message est non-None si la commande doit déclencher un tour LLM.
+    """
     parts = message.split(maxsplit=1)
     cmd = parts[0].lower()
     arg = parts[1] if len(parts) > 1 else ""
 
     if cmd == "/exit":
-        return False, session
+        return False, session, None
 
     if cmd == "/stop":
         if stop_event is not None:
@@ -348,46 +435,56 @@ def _dispatch_command(
             _console.print("\n  [dim]Inférence interrompue.[/]\n")
         else:
             _console.print("\n  [dim]Aucune inférence en cours.[/]\n")
-        return True, session
+        return True, session, None
 
     if cmd == "/help":
-        _cmd_help()
-        return True, session
+        _cmd_help(skill_commands)
+        return True, session, None
 
     if cmd == "/model":
         run_set_model(store=store, console=_console)
-        return True, session
+        return True, session, None
 
     if cmd == "/provider":
         run_add_provider(store=store, console=_console)
-        return True, session
+        return True, session, None
 
     if cmd == "/context":
         _cmd_context(session, entry)
-        return True, session
+        return True, session, None
 
     if cmd == "/compact":
         _cmd_compact(session, orchestrator, entry)
-        return True, session
+        return True, session, None
 
     if cmd == "/new":
         session = _cmd_new(session)
-        return True, session
+        return True, session, None
 
     if cmd == "/remember":
         _cmd_remember(arg, memory_store)
-        return True, session
+        return True, session, None
 
     if cmd == "/memories":
         _cmd_memories(memory_store)
-        return True, session
+        return True, session, None
 
     if cmd == "/forget":
         _cmd_forget(arg, memory_store)
-        return True, session
+        return True, session, None
+
+    # Commandes dynamiques issues des skills
+    cmd_name = cmd.lstrip("/")
+    if skill_commands and cmd_name in skill_commands:
+        skill_cmd = skill_commands[cmd_name]
+        if not skill_cmd.prompt and not arg:
+            _console.print(f"  [dim]Usage : {cmd} <description>[/]\n")
+            return True, session, None
+        turn_msg = f"{skill_cmd.prompt}\n\n{arg}".strip() if skill_cmd.prompt else arg
+        return True, session, turn_msg
 
     _console.print(f"[dim]Commande inconnue : {cmd}. Tapez /help pour la liste.[/]\n")
-    return True, session
+    return True, session, None
 
 
 # ── boucle principale ─────────────────────────────────────────────────────────
@@ -427,35 +524,50 @@ def _build_tool_router(
     cwd: Path,
     *,
     guard: "Any | None" = None,
+    entry: "Any | None" = None,
+    permission_mode: str = "limited",
 ) -> ToolRouter:
     """Construit le router depuis la liste des tools actifs de l'agent.
 
-    Le memory tool est créé avec le store et le CWD injectés.
-    Si enabled_tools est None (pas de config), tous les tools sont actifs.
+    Les outils dynamiques (memory, spawn_agent) sont créés avec le contexte
+    de la session injecté. Si enabled_tools est None, tous les tools sont actifs.
     """
     memory_tool = make_memory_tool(memory_store, cwd)
     registry = {**_STATIC_TOOL_REGISTRY, "memory": memory_tool}
 
+    # spawn_agent est construit en deux passes : d'abord la registry sans lui,
+    # puis on l'ajoute avec la liste finale des entries comme context.
     if enabled_tools is None:
-        return ToolRouter(list(registry.values()), guard=guard)
-    entries = [registry[name] for name in enabled_tools if name in registry]
-    # memory tool toujours présent — l'agent doit toujours pouvoir mémoriser
-    if memory_tool not in entries:
-        entries.insert(0, memory_tool)
-    return ToolRouter(entries, guard=guard)
+        base_entries = list(registry.values())
+    else:
+        base_entries = [registry[name] for name in enabled_tools if name in registry]
+        if memory_tool not in base_entries:
+            base_entries.insert(0, memory_tool)
+
+    if entry is not None and (enabled_tools is None or "spawn_agent" in enabled_tools):
+        spawn_tool = make_spawn_agent_tool(
+            entry,
+            base_entries,
+            permission_mode=permission_mode,
+            cwd=cwd,
+        )
+        base_entries = [*base_entries, spawn_tool]
+
+    return ToolRouter(base_entries, guard=guard)
 
 
 # ── verbes d'affichage pour les outils ───────────────────────────────────────
 
 _TOOL_VERBS: dict[str, str] = {
-    "read_file":  "Lecture",
-    "list_dir":   "Exploration",
-    "write_file": "Écriture",
-    "run_bash":   "Exécution",
-    "web_fetch":  "Fetch",
-    "web_search": "Recherche web",
-    "vision":     "Vision",
-    "skill_view": "Skill",
+    "read_file":   "Lecture",
+    "list_dir":    "Exploration",
+    "write_file":  "Écriture",
+    "run_bash":    "Exécution",
+    "web_fetch":   "Fetch",
+    "web_search":  "Recherche web",
+    "vision":      "Vision",
+    "skill_view":  "Skill",
+    "spawn_agent": "Workers",
 }
 
 _TOOL_TARGET_KEYS: dict[str, str] = {
@@ -504,7 +616,12 @@ def run_repl(
         cwd=cwd,
         on_ask=_make_ask_callback(),
     )
-    tool_router = _build_tool_router(enabled_tools, memory_store, cwd, guard=guard)
+    tool_router = _build_tool_router(
+        enabled_tools, memory_store, cwd,
+        guard=guard,
+        entry=entry,
+        permission_mode=permission_mode,
+    )
     history = history if history is not None else InMemoryVisibleHistoryStore()
     session_id = "default"
     state = {"verbose": verbose}
@@ -528,6 +645,13 @@ def run_repl(
     memory_block = format_memory_block(active_memories)
 
     active_skills = list(agent_config.skills) if agent_config is not None else None
+
+    # Commandes REPL déclarées par les skills actifs
+    skill_commands: dict[str, SkillCommand] = {}
+    if active_skills:
+        _reader = SkillReader()
+        skill_commands = collect_skill_commands(_reader.load_all(active_skills))
+
     system_prompt, loaded_context = _build_session_system_prompt(
         cwd,
         active_skills=active_skills,
@@ -561,18 +685,55 @@ def run_repl(
                 continue
 
             if message.startswith("/"):
-                if message.split()[0].lower() == "/verbose":
+                cmd0 = message.split()[0].lower()
+
+                if cmd0 == "/verbose":
                     state["verbose"] = not state["verbose"]
                     label = "activé" if state["verbose"] else "désactivé"
                     _console.print(f"\n  [dim]Mode verbose {label}.[/]\n")
                     continue
 
-                go_on, session = _dispatch_command(
+                if cmd0 == "/dream":
+                    _cmd_dream(memory_store, entry, active_skills, cwd)
+                    continue
+
+                if cmd0 == "/daily":
+                    _cmd_daily(
+                        memory_store, entry, active_skills, cwd,
+                        agent_name=agent_config.name if agent_config is not None else None,
+                    )
+                    continue
+
+                go_on, session, turn_msg = _dispatch_command(
                     message, store, session, orchestrator, entry, memory_store,
                     stop_event=stop_event,
+                    skill_commands=skill_commands or None,
                 )
                 if not go_on:
                     break
+                if turn_msg is not None:
+                    # Commande skill → déclenche un tour avec le prompt injecté
+                    stop_event = threading.Event()
+                    system_prompt, _ = _build_session_system_prompt(
+                        cwd,
+                        active_skills=active_skills,
+                        memory_block=memory_block,
+                        session=session,
+                        agent_name=agent_config.name if agent_config is not None else None,
+                    )
+                    _run_turn(
+                        orchestrator, session, entry, turn_msg,
+                        static_system_prompt=system_prompt,
+                        active_skills=active_skills,
+                        project_root=cwd,
+                        tool_router=tool_router,
+                        history=history,
+                        session_id=session_id,
+                        verbose=state["verbose"],
+                        memory_store=memory_store,
+                        stop_event=stop_event,
+                    )
+                    stop_event = None
                 continue
 
             stop_event = threading.Event()
@@ -622,12 +783,15 @@ def _write_session_record(
         turns = len(session.state.turns)
         if turns == 0:
             return  # session vide — pas de fichier à écrire
+        messages = session.internal_messages(include_summary=True, include_tool_results=False)
+        transcript = build_transcript(messages)
         record = SessionRecord(
             project=cwd.name,
             cwd=str(cwd),
             opened_at=opened_at,
             closed_at=closed_at,
             turns=turns,
+            transcript=transcript,
         )
         write_session_file(record)
     except Exception:

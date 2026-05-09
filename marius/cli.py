@@ -29,9 +29,17 @@ def main() -> None:
     logs_p.add_argument("--path", action="store_true", help="Afficher le chemin du fichier de logs")
     logs_p.add_argument("--clear", action="store_true", help="Vider le journal local")
 
-    # marius config [--agent NOM]
+    # marius config [show | tool | --agent NOM]
     config_p = subs.add_parser("config", help="Reconfigurer un agent")
     config_p.add_argument("--agent", metavar="NOM", default=None)
+    config_sub = config_p.add_subparsers(dest="config_cmd", metavar="action")
+
+    config_show = config_sub.add_parser("show", help="Afficher la configuration courante")
+    config_show.add_argument("--agent", metavar="NOM", default=None)
+
+    config_tool = config_sub.add_parser("tool", help="Activer/désactiver un tool  (+nom / -nom)")
+    config_tool.add_argument("change", metavar="+NOM|-NOM", help="Ex: +web_search ou -run_bash")
+    config_tool.add_argument("--agent", metavar="NOM", default=None)
 
     # marius add provider
     add_p = subs.add_parser("add", help="Ajouter une ressource")
@@ -59,15 +67,27 @@ def main() -> None:
     skills_deactivate.add_argument("skill", metavar="NOM", help="Nom du skill à désactiver")
     skills_deactivate.add_argument("--agent", metavar="NOM", default=None, help="Agent cible (défaut : agent principal)")
 
-    # marius gateway [start | stop | status]
+    # marius telegram [setup | status]
+    tg_p = subs.add_parser("telegram", help="Configurer le canal Telegram")
+    tg_sub = tg_p.add_subparsers(dest="tg_cmd", metavar="action")
+    tg_sub.add_parser("setup",  help="Wizard de configuration du bot Telegram")
+    tg_sub.add_parser("status", help="Statut du canal Telegram")
+
+    # marius gateway [start | stop | status | install-service | enable | disable]
     gw_p = subs.add_parser("gateway", help="Gérer le gateway (processus persistant)")
     gw_sub = gw_p.add_subparsers(dest="gw_cmd", metavar="action")
-    gw_start = gw_sub.add_parser("start", help="Démarrer le gateway")
+    gw_start = gw_sub.add_parser("start", help="Démarrer le gateway manuellement")
     gw_start.add_argument("--agent", metavar="NOM", default=None)
     gw_stop = gw_sub.add_parser("stop", help="Arrêter le gateway")
     gw_stop.add_argument("--agent", metavar="NOM", default=None)
     gw_status = gw_sub.add_parser("status", help="Statut du gateway")
     gw_status.add_argument("--agent", metavar="NOM", default=None)
+    gw_sub.add_parser("install-service", help="Installer le service systemd user")
+    gw_sub.add_parser("uninstall-service", help="Désinstaller le service systemd user")
+    gw_enable = gw_sub.add_parser("enable", help="Activer le gateway au démarrage de session")
+    gw_enable.add_argument("--agent", metavar="NOM", default=None)
+    gw_disable = gw_sub.add_parser("disable", help="Désactiver le gateway au démarrage")
+    gw_disable.add_argument("--agent", metavar="NOM", default=None)
 
     args = parser.parse_args()
 
@@ -83,8 +103,15 @@ def main() -> None:
         return
 
     if args.command == "config":
-        from marius.config.wizard import run_agent_config
-        run_agent_config(agent_name=getattr(args, "agent", None))
+        config_cmd = getattr(args, "config_cmd", None)
+        agent_arg  = getattr(args, "agent", None)
+        if config_cmd == "show":
+            _cmd_config_show(getattr(args, "agent", None))
+        elif config_cmd == "tool":
+            _cmd_config_tool(args.change, agent_arg)
+        else:
+            from marius.config.wizard import run_agent_config
+            run_agent_config(agent_name=agent_arg)
         return
 
     if args.command == "add" and getattr(args, "resource", None) == "provider":
@@ -104,6 +131,10 @@ def main() -> None:
 
     if args.command == "skills":
         _cmd_skills(args)
+        return
+
+    if args.command == "telegram":
+        _cmd_telegram(args)
         return
 
     if args.command == "gateway":
@@ -166,7 +197,10 @@ def _launch(agent_name: str | None = None) -> None:
 
     # ── lancement ─────────────────────────────────────────────────────────────
     if agent_name:
-        # Mode gateway : --agent spécifié → connexion au processus persistant
+        # Mode gateway — nécessite le skill assistant
+        if not _has_assistant_skill(agent_cfg):
+            _print_assistant_required(console, name)
+            sys.exit(1)
         _launch_gateway(agent_name=name, console=console)
     else:
         # Mode local : REPL classique dans le CWD
@@ -176,6 +210,190 @@ def _launch(agent_name: str | None = None) -> None:
             agent_config=agent_cfg,
             permission_mode=config.permission_mode,
         )
+
+
+def _cmd_telegram(args) -> None:
+    from rich.console import Console
+    console = Console(highlight=False)
+    tg_cmd = getattr(args, "tg_cmd", None)
+
+    if tg_cmd == "setup" or tg_cmd is None:
+        from marius.channels.telegram.setup import run_telegram_setup
+        run_telegram_setup(console)
+        return
+
+    if tg_cmd == "status":
+        from marius.channels.telegram.config import is_configured, load as load_tg
+        from marius.channels.telegram.api import get_me
+        from rich.table import Table
+
+        cfg = load_tg()
+        console.print()
+        if not cfg:
+            console.print("[dim]Telegram non configuré. Lancez marius telegram setup.[/]\n")
+            return
+
+        me = get_me(cfg.token) if cfg.token else None
+        bot_label   = f"@{me['username']}" if me else "[dim]inaccessible[/]"
+        users_label = ", ".join(str(u) for u in cfg.allowed_users) or "tous"
+        enabled_label = "[green]activé[/]" if cfg.enabled else "[dim]désactivé[/]"
+
+        t = Table.grid(padding=(0, 2))
+        t.add_column(style="dim", no_wrap=True)
+        t.add_column()
+        t.add_row("bot",     bot_label)
+        t.add_row("agent",   cfg.agent_name)
+        t.add_row("users",   users_label)
+        t.add_row("statut",  enabled_label)
+        console.print("[bold color(208)]Canal Telegram[/]\n")
+        console.print(t)
+        console.print()
+        return
+
+    console.print("[dim]Usage : marius telegram [setup|status][/]\n")
+
+
+def _cmd_config_show(agent_name: str | None = None) -> None:
+    """Affiche la configuration courante d'un agent sans éditer."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from marius.config.contracts import ALL_TOOLS
+    from marius.config.store import ConfigStore
+    from marius.kernel.posture import ASSISTANT_SKILL
+    from marius.provider_config.store import ProviderStore
+
+    console = Console(highlight=False)
+    config_store = ConfigStore()
+    config = config_store.load()
+    if config is None:
+        console.print("\n[dim]Aucune configuration. Lancez[/] marius setup[dim].[/]\n")
+        return
+
+    provider_store = ProviderStore()
+    providers = {p.id: p for p in provider_store.load()}
+
+    name = agent_name or config.main_agent
+    agent_cfg = config.get_agent(name)
+    if agent_cfg is None:
+        console.print(f"\n[bold color(208)]Agent inconnu :[/] {name}\n")
+        return
+
+    provider = providers.get(agent_cfg.provider_id)
+    provider_label = f"{provider.name}  [dim]{provider.model}[/]" if provider else f"[dim]{agent_cfg.provider_id}[/]"
+    is_main = name == config.main_agent
+    star = "  [color(208)]★ agent principal[/]" if is_main else ""
+
+    console.print()
+    console.print(f"[bold color(208)]Agent :[/] {name}{star}\n")
+
+    # Provider + scheduler
+    meta = Table.grid(padding=(0, 2))
+    meta.add_column(style="dim", no_wrap=True)
+    meta.add_column()
+    meta.add_row("provider",    provider_label)
+    meta.add_row("modèle",      agent_cfg.model)
+    meta.add_row("permissions", config.permission_mode)
+    if getattr(agent_cfg, "scheduler_enabled", False):
+        meta.add_row("dreaming",  getattr(agent_cfg, "dream_time", "—"))
+        meta.add_row("daily",     getattr(agent_cfg, "daily_time", "—"))
+    console.print(meta)
+
+    # Skills
+    active_skills = set(agent_cfg.skills or [])
+    console.print(f"\n[bold]Skills[/]  [dim]({len(active_skills)} actif(s))[/]\n")
+    from marius.kernel.skills import SkillReader
+    available = {m.name: m for m in SkillReader().list()}
+    skill_t = Table.grid(padding=(0, 2))
+    skill_t.add_column(no_wrap=True)
+    skill_t.add_column(style="dim")
+    skill_t.add_column(style="dim")
+    for s in agent_cfg.skills:
+        meta_s = available.get(s)
+        desc = meta_s.description if meta_s else ""
+        gw_note = "  [color(208)]→ gateway[/]" if s == ASSISTANT_SKILL else ""
+        skill_t.add_row(f"[green]✓[/] {s}", desc, gw_note)
+    for s in sorted(available):
+        if s not in active_skills:
+            meta_s = available[s]
+            skill_t.add_row(f"[dim]○ {s}[/]", meta_s.description, "")
+    console.print(skill_t)
+
+    # Tools
+    active_tools = set(agent_cfg.tools or [])
+    console.print(f"\n[bold]Tools[/]  [dim]({len(active_tools)} actif(s))[/]\n")
+    tool_t = Table.grid(padding=(0, 2))
+    tool_t.add_column(no_wrap=True)
+    for tool in ALL_TOOLS:
+        if tool in active_tools:
+            tool_t.add_row(f"[green]✓[/] {tool}")
+        else:
+            tool_t.add_row(f"[dim]○ {tool}[/]")
+    console.print(tool_t)
+
+    console.print(
+        f"\n[dim]  marius config tool +<nom> / -<nom>  pour activer/désactiver un tool[/]"
+        f"\n[dim]  marius skills activate <nom>         pour activer un skill[/]\n"
+    )
+
+
+def _cmd_config_tool(change: str, agent_name: str | None = None) -> None:
+    """Active ou désactive un tool pour un agent : +nom ou -nom."""
+    from rich.console import Console
+    from marius.config.contracts import ALL_TOOLS
+    from marius.config.store import ConfigStore
+    from dataclasses import replace
+
+    console = Console(highlight=False)
+    change = change.strip()
+    if not change or change[0] not in ("+", "-"):
+        console.print("\n[dim]Usage : marius config tool +<nom> ou -<nom>[/]\n")
+        return
+
+    action  = change[0]
+    tool_name = change[1:].strip()
+    if not tool_name:
+        console.print("\n[dim]Nom de tool manquant.[/]\n")
+        return
+    if tool_name not in ALL_TOOLS:
+        console.print(
+            f"\n[bold color(208)]Tool inconnu :[/] {tool_name}\n"
+            f"  Tools disponibles : {', '.join(ALL_TOOLS)}\n"
+        )
+        return
+
+    config_store = ConfigStore()
+    config = config_store.load()
+    if config is None:
+        console.print("\n[dim]Aucune configuration. Lancez[/] marius setup[dim].[/]\n")
+        return
+
+    name = agent_name or config.main_agent
+    agent_cfg = config.get_agent(name)
+    if agent_cfg is None:
+        console.print(f"\n[bold color(208)]Agent inconnu :[/] {name}\n")
+        return
+
+    tools = list(agent_cfg.tools or [])
+    if action == "+":
+        if tool_name in tools:
+            console.print(f"\n[dim]Tool '{tool_name}' déjà actif pour {name}.[/]\n")
+            return
+        tools.append(tool_name)
+        verb = "activé"
+    else:
+        if tool_name not in tools:
+            console.print(f"\n[dim]Tool '{tool_name}' n'est pas actif pour {name}.[/]\n")
+            return
+        tools.remove(tool_name)
+        verb = "désactivé"
+
+    # Préserver l'ordre de ALL_TOOLS
+    ordered = [t for t in ALL_TOOLS if t in set(tools)]
+    updated = replace(agent_cfg, tools=ordered)
+    config.agents[name] = updated
+    config_store.save(config)
+    console.print(f"\n[dim]Tool '{tool_name}' {verb} pour l'agent '{name}'.[/]\n")
 
 
 def _launch_gateway(agent_name: str, console) -> None:
@@ -223,6 +441,10 @@ def _cmd_gateway(args) -> None:
         if not name:
             console.print("\n[dim]Aucun agent configuré. Lancez marius setup.[/]\n")
             return
+        agent_cfg = config.get_agent(name) if config else None
+        if not _has_assistant_skill(agent_cfg):
+            _print_assistant_required(console, name)
+            return
         if is_running(name):
             console.print(f"\n[dim]Gateway '{name}' déjà actif.[/]\n")
             return
@@ -250,21 +472,106 @@ def _cmd_gateway(args) -> None:
         if config is None:
             console.print("\n[dim]Aucune configuration trouvée.[/]\n")
             return
-        console.print()
+        from marius.gateway.service import (
+            agent_active_state, agent_enabled_state, is_service_installed, is_systemd_available,
+        )
         from rich.table import Table
+        console.print()
         t = Table.grid(padding=(0, 2))
         t.add_column(style="bold", no_wrap=True)
-        t.add_column()
+        t.add_column()   # process
+        t.add_column()   # systemd actif
+        t.add_column(style="dim")  # systemd enabled
+        use_systemd = is_systemd_available() and is_service_installed()
         for agent_name in config.agents:
-            running = is_running(agent_name)
-            status_label = "[green]actif[/]" if running else "[dim]inactif[/]"
-            t.add_row(agent_name, status_label)
+            proc_label = "[green]actif[/]" if is_running(agent_name) else "[dim]inactif[/]"
+            if use_systemd:
+                sd_state   = agent_active_state(agent_name)
+                sd_enabled = agent_enabled_state(agent_name)
+                sd_label   = f"[green]{sd_state}[/]" if sd_state == "active" else f"[dim]{sd_state}[/]"
+                t.add_row(agent_name, proc_label, sd_label, sd_enabled)
+            else:
+                t.add_row(agent_name, proc_label)
         console.print("[bold color(208)]État des gateways[/]\n")
         console.print(t)
+        if use_systemd:
+            console.print("\n  [dim]service systemd installé[/]")
+        else:
+            console.print("\n  [dim]service systemd non installé — lancez marius gateway install-service[/]")
         console.print()
         return
 
-    console.print("[dim]Usage : marius gateway [start|stop|status][/]\n")
+    if gw_cmd == "install-service":
+        from marius.gateway.service import install_service, is_systemd_available, linger_hint
+        if not is_systemd_available():
+            console.print("\n[bold color(208)]systemd non disponible sur ce système.[/]\n")
+            return
+        path = install_service()
+        console.print(f"\n[dim]Service installé : {path}[/]")
+        hint = linger_hint()
+        if hint:
+            console.print(
+                f"\n  [bold color(208)]Pour démarrer sans session ouverte :[/]\n"
+                f"    {hint}\n"
+            )
+        console.print(
+            "\n  Activez un agent avec :\n"
+            "    [bold]marius gateway enable --agent main[/]\n"
+        )
+        return
+
+    if gw_cmd == "uninstall-service":
+        from marius.gateway.service import is_service_installed, uninstall_service
+        if not is_service_installed():
+            console.print("\n[dim]Service non installé.[/]\n")
+            return
+        uninstall_service()
+        console.print("\n[dim]Service systemd supprimé.[/]\n")
+        return
+
+    if gw_cmd == "enable":
+        name = _resolve_agent_name()
+        if not name:
+            console.print("\n[dim]Aucun agent configuré.[/]\n")
+            return
+        agent_cfg = config.get_agent(name) if config else None
+        if not _has_assistant_skill(agent_cfg):
+            _print_assistant_required(console, name)
+            return
+        from marius.gateway.service import enable_agent, is_service_installed, is_systemd_available
+        if not is_systemd_available():
+            console.print("\n[bold color(208)]systemd non disponible.[/]\n")
+            return
+        if not is_service_installed():
+            console.print(
+                "\n[bold color(208)]Service non installé.[/]\n"
+                "  Lancez d'abord : [bold]marius gateway install-service[/]\n"
+            )
+            return
+        ok, err = enable_agent(name)
+        if ok:
+            console.print(f"\n[dim]Gateway '{name}' activé (démarrera au login).[/]\n")
+        else:
+            console.print(f"\n[bold color(208)]Échec :[/] {err}\n")
+        return
+
+    if gw_cmd == "disable":
+        name = _resolve_agent_name()
+        if not name:
+            console.print("\n[dim]Aucun agent configuré.[/]\n")
+            return
+        from marius.gateway.service import disable_agent, is_systemd_available
+        if not is_systemd_available():
+            console.print("\n[bold color(208)]systemd non disponible.[/]\n")
+            return
+        ok, err = disable_agent(name)
+        if ok:
+            console.print(f"\n[dim]Gateway '{name}' désactivé.[/]\n")
+        else:
+            console.print(f"\n[bold color(208)]Échec :[/] {err}\n")
+        return
+
+    console.print("[dim]Usage : marius gateway [start|stop|status|install-service|uninstall-service|enable|disable][/]\n")
 
 
 def _cmd_logs(args) -> None:
@@ -437,3 +744,24 @@ def _cmd_skills(args) -> None:
         return
 
     console.print(f"[dim]Action inconnue. Usage : marius skills [list|activate|deactivate][/]\n")
+
+
+# ── helpers assistant skill ───────────────────────────────────────────────────
+
+
+def _has_assistant_skill(agent_cfg) -> bool:
+    """Vérifie que le skill assistant est activé pour cet agent."""
+    from marius.kernel.posture import ASSISTANT_SKILL
+    if agent_cfg is None:
+        return False
+    return ASSISTANT_SKILL in set(agent_cfg.skills or [])
+
+
+def _print_assistant_required(console, agent_name: str) -> None:
+    """Affiche le message d'erreur quand le skill assistant est requis."""
+    console.print(
+        f"\n[bold color(208)]Le gateway nécessite le skill assistant.[/]\n"
+        f"  Activez-le avec :\n"
+        f"    [bold]marius skills activate assistant --agent {agent_name}[/]\n"
+    )
+
