@@ -156,6 +156,11 @@ class GatewayServer:
 
     # ── Telegram channel ──────────────────────────────────────────────────────
 
+    def _start_web(self, port: int) -> None:
+        from marius.channels.web.server import WebServer
+        self._web_server = WebServer(self, port=port)
+        self._web_server.start()
+
     def _start_telegram(self) -> None:
         from marius.channels.telegram.config import load as load_tg_cfg
         from marius.channels.telegram.poller import TelegramPoller
@@ -235,8 +240,67 @@ class GatewayServer:
                 log_event("turn_error", {"session_id": self.agent_name, "channel": "telegram", "error": str(exc)})
                 return f"Erreur : {exc}"
 
+    def run_turn_for_web(
+        self,
+        text: str,
+        on_event: "Callable[[dict], None]",
+    ) -> None:
+        """Exécute un tour depuis le canal web. Bloquant, sérialisé via turn_lock.
+
+        on_event reçoit des dicts SSE pendant l'exécution :
+          {"type": "text_delta", "delta": "..."}
+          {"type": "tool_start", "tool": "...", "target": "..."}
+          {"type": "tool_result", "tool": "...", "ok": bool}
+        """
+        from marius.kernel.contracts import Message, Role
+        from marius.kernel.runtime import TurnInput
+        text = self.resolve_skill_command(text)
+
+        log_event("turn_start", {
+            "session_id": self.agent_name, "agent": self.agent_name,
+            "channel": "web", "provider": self.entry.name, "model": self.entry.model,
+            "user_preview": preview(text),
+        })
+
+        user_message = Message(role=Role.USER, content=text, created_at=datetime.now(timezone.utc))
+
+        def on_text_delta(delta: str) -> None:
+            on_event({"type": "text_delta", "delta": delta})
+
+        def on_tool_start(call: ToolCall) -> None:
+            from marius.kernel.posture import maybe_activate_dev_posture
+            maybe_activate_dev_posture(self.session.state.metadata, self.active_skills, call, self.workspace)
+            from .protocol import tool_target
+            on_event({"type": "tool_start", "tool": call.name, "target": tool_target(call.name, call.arguments)})
+            log_event("tool_start", {"session_id": self.agent_name, "channel": "web", "tool": call.name})
+
+        def on_tool_result(call: ToolCall, result: ToolResult) -> None:
+            observe_tool_result(self.session.state.metadata, call, result, project_root=self.workspace)
+            on_event({"type": "tool_result", "tool": call.name, "ok": result.ok})
+            log_event("tool_result", {"session_id": self.agent_name, "channel": "web", "tool": call.name, "ok": result.ok})
+
+        with self._turn_lock:
+            try:
+                output = self.orchestrator.run_turn(
+                    TurnInput(
+                        session=self.session,
+                        user_message=user_message,
+                        system_prompt=self._system_prompt_for_session(),
+                    ),
+                    on_text_delta=on_text_delta,
+                    on_tool_start=on_tool_start,
+                    on_tool_result=on_tool_result,
+                )
+                log_event("turn_done", {
+                    "session_id": self.agent_name, "channel": "web",
+                    "model": self.entry.model, "tool_results": len(output.tool_results),
+                })
+            except Exception as exc:
+                log_event("turn_error", {"session_id": self.agent_name, "channel": "web", "error": str(exc)})
+                on_event({"type": "error", "error": str(exc)})
+
     def new_conversation(self) -> None:
-        """Réinitialise la session (appelable depuis Telegram /new)."""
+        """Réinitialise la session (appelable depuis Telegram /new ou web)."""
         self.session.state.turns.clear()
         self.session.state.compaction_notices.clear()
 
@@ -356,7 +420,7 @@ class GatewayServer:
 
     # ── boucle principale ─────────────────────────────────────────────────────
 
-    def serve(self) -> None:
+    def serve(self, web_port: int = 0) -> None:
         sock_path = socket_path(self.agent_name)
         if sock_path.exists():
             sock_path.unlink()
@@ -366,6 +430,11 @@ class GatewayServer:
         # Telegram poller (thread daemon, si configuré pour cet agent)
         self._telegram_poller = None
         self._start_telegram()
+
+        # Canal web (thread daemon, si --web-port demandé)
+        self._web_server = None
+        if web_port > 0:
+            self._start_web(web_port)
 
         def _sigterm(sig, frame):
             if self._telegram_poller:

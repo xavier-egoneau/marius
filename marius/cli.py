@@ -77,11 +77,19 @@ def main() -> None:
     doctor_p = subs.add_parser("doctor", help="Diagnostic de l'installation")
     doctor_p.add_argument("--agent", metavar="NOM", default=None, help="Agent à diagnostiquer")
 
+    # marius web [--port N] — alias pour gateway start --web-port
+    web_p = subs.add_parser("web", help="Démarrer le gateway avec le canal web activé")
+    web_p.add_argument("--agent", metavar="NOM", default=None)
+    web_p.add_argument("--port", metavar="PORT", type=int, default=8765,
+                       help="Port HTTP (défaut : 8765)")
+
     # marius gateway [start | stop | status | install-service | enable | disable]
     gw_p = subs.add_parser("gateway", help="Gérer le gateway (processus persistant)")
     gw_sub = gw_p.add_subparsers(dest="gw_cmd", metavar="action")
     gw_start = gw_sub.add_parser("start", help="Démarrer le gateway manuellement")
     gw_start.add_argument("--agent", metavar="NOM", default=None)
+    gw_start.add_argument("--web-port", metavar="PORT", type=int, default=0,
+                          help="Activer le canal web sur le port donné (ex: 8765)")
     gw_stop = gw_sub.add_parser("stop", help="Arrêter le gateway")
     gw_stop.add_argument("--agent", metavar="NOM", default=None)
     gw_status = gw_sub.add_parser("status", help="Statut du gateway")
@@ -150,6 +158,10 @@ def main() -> None:
 
     if args.command == "gateway":
         _cmd_gateway(args)
+        return
+
+    if args.command == "web":
+        _cmd_web(args)
         return
 
     # ── lancement du REPL ─────────────────────────────────────────────────────
@@ -763,6 +775,38 @@ def _cmd_skills(args) -> None:
 
 
 # ── helpers assistant skill ───────────────────────────────────────────────────
+
+
+def _cmd_web(args) -> None:
+    """Démarre le gateway avec le canal web activé."""
+    from rich.console import Console
+    from marius.config.store import ConfigStore
+    from marius.gateway.launcher import is_running, start
+
+    console = Console(highlight=False)
+    config = ConfigStore().load()
+    name = getattr(args, "agent", None) or (config.main_agent if config else None)
+    port = getattr(args, "port", 8765)
+
+    if not name:
+        console.print("\n[dim]Aucun agent configuré. Lancez marius setup.[/]\n")
+        return
+
+    agent_cfg = config.get_agent(name) if config else None
+    if not _has_assistant_skill(agent_cfg):
+        _print_assistant_required(console, name)
+        return
+
+    if is_running(name):
+        console.print(f"\n[dim]Gateway '{name}' déjà actif — relancez avec --web-port pour activer le web.[/]\n")
+        return
+
+    console.print(f"\n[dim]Démarrage du gateway '{name}' avec canal web sur le port {port}…[/]")
+    ok = start(name, web_port=port)
+    if ok:
+        console.print(f"[green]✓[/] Interface web disponible sur [bold]http://localhost:{port}[/]\n")
+    else:
+        console.print(f"\n[bold color(208)]Échec du démarrage du gateway '{name}'.[/]\n")
 
 
 def _has_assistant_skill(agent_cfg) -> bool:

@@ -22,7 +22,7 @@ def is_running(agent_name: str) -> bool:
     return _ping(agent_name)
 
 
-def start(agent_name: str) -> bool:
+def start(agent_name: str, *, web_port: int = 0) -> bool:
     """Lance le gateway en arrière-plan. Retourne True si démarré ou déjà actif."""
     if is_running(agent_name):
         return True
@@ -32,8 +32,11 @@ def start(agent_name: str) -> bool:
     if sp.exists():
         sp.unlink()
 
+    cmd = [sys.executable, "-m", "marius.gateway", "--agent", agent_name]
+    if web_port > 0:
+        cmd += ["--web-port", str(web_port)]
     proc = subprocess.Popen(
-        [sys.executable, "-m", "marius.gateway", "--agent", agent_name],
+        cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,

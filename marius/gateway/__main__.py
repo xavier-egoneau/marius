@@ -12,6 +12,8 @@ import sys
 def main() -> None:
     parser = argparse.ArgumentParser(prog="marius.gateway")
     parser.add_argument("--agent", required=True, metavar="NOM")
+    parser.add_argument("--web-port", metavar="PORT", type=int, default=0,
+                        help="Activer le canal web sur ce port (0 = désactivé)")
     args = parser.parse_args()
 
     from marius.config.store import ConfigStore
@@ -48,7 +50,7 @@ def main() -> None:
         agent_config=agent_cfg,
         permission_mode=config.permission_mode,
     )
-    server.serve()
+    server.serve(web_port=args.web_port)
 
 
 if __name__ == "__main__":
