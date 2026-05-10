@@ -47,12 +47,9 @@ from .protocol import (
     ToolStartEvent, WelcomeEvent, decode, encode, tool_target,
 )
 from .workspace import (
-    daily_cache_path, ensure_workspace, jobs_path,
+    ensure_workspace,
     memory_db_path, pid_path, reminders_path, sessions_dir, socket_path,
 )
-
-_REMINDERS_POLL_SECONDS = 30.0
-
 
 class _LineReader:
     """Lecteur de lignes sur socket Unix."""
@@ -144,105 +141,18 @@ class GatewayServer:
             "tools": enabled_tools or "all",
         })
 
-        # Scheduler — démarré si activé dans la config agent
-        self._scheduler = None
-        if getattr(agent_config, "scheduler_enabled", False):
-            self._start_scheduler(agent_config)
-
-    # ── scheduler ─────────────────────────────────────────────────────────────
-
-    def _start_scheduler(self, agent_config: Any) -> None:
-        from marius.kernel.scheduler import JobStore, Scheduler, ensure_jobs
-
-        store = JobStore(jobs_path(self.agent_name))
-        ensure_jobs(
-            store,
-            dream_time=getattr(agent_config, "dream_time", ""),
-            daily_time=getattr(agent_config, "daily_time", ""),
-        )
-
-        handlers: dict[str, Any] = {}
-        if getattr(agent_config, "dream_time", ""):
-            handlers["dreaming"] = self._run_scheduled_dream
-        if getattr(agent_config, "daily_time", ""):
-            handlers["daily"] = self._run_scheduled_daily
-
-        if not handlers:
-            return
-
-        self._scheduler = Scheduler(store, handlers)
-        t = threading.Thread(target=self._scheduler.run_forever, daemon=True)
-        t.start()
-
-    def _run_scheduled_dream(self) -> None:
-        from marius.dreaming.engine import run_dreaming
-        run_dreaming(
+        # Scheduler + reminders — délégués à GatewayScheduler
+        from .scheduler_runner import GatewayScheduler
+        self._scheduler_runner = GatewayScheduler(
+            agent_name=agent_name,
+            workspace=ws,
             memory_store=self.memory_store,
-            entry=self.entry,
-            active_skills=self.active_skills or None,
-            project_root=self.workspace,
+            entry=entry,
+            active_skills=self.active_skills,
+            agent_config=agent_config,
+            reminders_store=self.reminders_store,
+            get_telegram_chat_id=lambda: self.telegram_chat_id,
         )
-
-    def _run_scheduled_daily(self) -> None:
-        from marius.dreaming.engine import run_daily
-        briefing = run_daily(
-            memory_store=self.memory_store,
-            entry=self.entry,
-            active_skills=self.active_skills or None,
-            project_root=self.workspace,
-        )
-        cache = daily_cache_path(self.agent_name)
-        try:
-            cache.write_text(briefing, encoding="utf-8")
-        except OSError:
-            pass
-        # Push Telegram si un chat_id est mémorisé
-        self._push_daily_telegram(briefing)
-
-    def _start_reminders_thread(self) -> None:
-        stop = threading.Event()
-        def _loop() -> None:
-            while not stop.wait(_REMINDERS_POLL_SECONDS):
-                try:
-                    self._fire_due_reminders()
-                except Exception:
-                    pass
-        t = threading.Thread(target=_loop, daemon=True, name="reminders-delivery")
-        t.start()
-
-    def _fire_due_reminders(self) -> None:
-        for reminder in self.reminders_store.due():
-            self.reminders_store.mark_fired(reminder.id)
-            text = f"🔔 {reminder.text}"
-            # Livraison Telegram — chat_id stocké dans le rappel ou chat actif
-            chat_id = reminder.chat_id or self.telegram_chat_id
-            if chat_id is not None:
-                try:
-                    from marius.channels.telegram.config import load as load_tg_cfg
-                    from marius.channels.telegram.api import send_message
-                    cfg = load_tg_cfg()
-                    if cfg and cfg.enabled:
-                        send_message(cfg.token, chat_id, text)
-                except Exception:
-                    pass
-            log_event("reminder_fired", {
-                "agent": self.agent_name,
-                "reminder_id": reminder.id,
-                "text": reminder.text,
-            })
-
-    def _push_daily_telegram(self, briefing: str) -> None:
-        chat_id = self.telegram_chat_id
-        if chat_id is None:
-            return
-        try:
-            from marius.channels.telegram.config import load as load_tg_cfg
-            from marius.channels.telegram.api import send_message
-            cfg = load_tg_cfg()
-            if cfg and cfg.enabled:
-                send_message(cfg.token, chat_id, briefing)
-        except Exception:
-            pass
 
     # ── Telegram channel ──────────────────────────────────────────────────────
 
@@ -456,9 +366,6 @@ class GatewayServer:
         # Telegram poller (thread daemon, si configuré pour cet agent)
         self._telegram_poller = None
         self._start_telegram()
-
-        # Reminders delivery thread
-        self._start_reminders_thread()
 
         def _sigterm(sig, frame):
             if self._telegram_poller:
