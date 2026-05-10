@@ -24,6 +24,7 @@ from typing import Any
 from marius.adapters.http_provider import make_adapter
 from marius.kernel.compaction import CompactionConfig
 from marius.kernel.context_factory import build_system_prompt
+from marius.kernel.skills import SkillCommand, SkillReader, collect_skill_commands
 from marius.kernel.context_window import FALLBACK_CONTEXT_WINDOW, resolve_context_window
 from marius.kernel.contracts import Message, Role, ToolCall, ToolResult
 from marius.kernel.memory_context import format_memory_block
@@ -52,7 +53,7 @@ from .protocol import (
 )
 from .workspace import (
     daily_cache_path, ensure_workspace, jobs_path,
-    memory_db_path, pid_path, sessions_dir, socket_path,
+    memory_db_path, pid_path, reminders_path, sessions_dir, socket_path,
 )
 
 _STATIC_TOOLS = {
@@ -65,6 +66,8 @@ _STATIC_TOOLS = {
     "vision":     VISION,
     "skill_view": SKILL_VIEW,
 }
+
+_REMINDERS_POLL_SECONDS = 30.0
 
 
 class _LineReader:
@@ -104,7 +107,13 @@ class GatewayServer:
         self.workspace = ws
         self.memory_store = MemoryStore(memory_db_path(agent_name))
 
+        from marius.storage.reminders_store import RemindersStore
+        self.reminders_store = RemindersStore(reminders_path(agent_name))
+
         self.active_skills = list(agent_config.skills) if agent_config else []
+        self.skill_commands: dict[str, SkillCommand] = collect_skill_commands(
+            SkillReader().load_all(self.active_skills)
+        ) if self.active_skills else {}
         self.system_prompt, self.loaded_context = build_system_prompt(
             ws,
             active_skills=self.active_skills or None,
@@ -206,6 +215,38 @@ class GatewayServer:
         # Push Telegram si un chat_id est mémorisé
         self._push_daily_telegram(briefing)
 
+    def _start_reminders_thread(self) -> None:
+        stop = threading.Event()
+        def _loop() -> None:
+            while not stop.wait(_REMINDERS_POLL_SECONDS):
+                try:
+                    self._fire_due_reminders()
+                except Exception:
+                    pass
+        t = threading.Thread(target=_loop, daemon=True, name="reminders-delivery")
+        t.start()
+
+    def _fire_due_reminders(self) -> None:
+        for reminder in self.reminders_store.due():
+            self.reminders_store.mark_fired(reminder.id)
+            text = f"🔔 {reminder.text}"
+            # Livraison Telegram — chat_id stocké dans le rappel ou chat actif
+            chat_id = reminder.chat_id or self.telegram_chat_id
+            if chat_id is not None:
+                try:
+                    from marius.channels.telegram.config import load as load_tg_cfg
+                    from marius.channels.telegram.api import send_message
+                    cfg = load_tg_cfg()
+                    if cfg and cfg.enabled:
+                        send_message(cfg.token, chat_id, text)
+                except Exception:
+                    pass
+            log_event("reminder_fired", {
+                "agent": self.agent_name,
+                "reminder_id": reminder.id,
+                "text": reminder.text,
+            })
+
     def _push_daily_telegram(self, briefing: str) -> None:
         chat_id = self.telegram_chat_id
         if chat_id is None:
@@ -240,13 +281,33 @@ class GatewayServer:
     def run_turn_for_telegram(self, text: str) -> str:
         """Exécute un tour depuis Telegram. Bloquant, sérialisé via turn_lock."""
         from marius.kernel.contracts import Message, Role
+        text = self.resolve_skill_command(text)
         cancel_event = threading.Event()
         response_parts: list[str] = []
+
+        log_event("turn_start", {
+            "session_id": self.agent_name,
+            "agent": self.agent_name,
+            "channel": "telegram",
+            "provider": self.entry.name,
+            "model": self.entry.model,
+            "user_preview": preview(text),
+        })
 
         def on_text_delta(delta: str) -> None:
             if cancel_event.is_set():
                 raise KeyboardInterrupt
             response_parts.append(delta)
+
+        def on_tool_start(call: ToolCall) -> None:
+            log_event("tool_start", {"session_id": self.agent_name, "channel": "telegram", "tool": call.name})
+
+        def on_tool_result(call: ToolCall, result: ToolResult) -> None:
+            observe_tool_result(self.session.state.metadata, call, result, project_root=self.workspace)
+            log_event("tool_result", {
+                "session_id": self.agent_name, "channel": "telegram",
+                "tool": call.name, "ok": result.ok,
+            })
 
         user_message = Message(
             role=Role.USER,
@@ -256,24 +317,84 @@ class GatewayServer:
         from marius.kernel.runtime import TurnInput
         with self._turn_lock:
             try:
-                self.orchestrator.run_turn(
+                output = self.orchestrator.run_turn(
                     TurnInput(
                         session=self.session,
                         user_message=user_message,
-                        system_prompt=self.system_prompt,
+                        system_prompt=self._system_prompt_for_session(),
                     ),
                     on_text_delta=on_text_delta,
+                    on_tool_start=on_tool_start,
+                    on_tool_result=on_tool_result,
                 )
+                response = "".join(response_parts)
+                log_event("turn_done", {
+                    "session_id": self.agent_name, "channel": "telegram",
+                    "model": self.entry.model,
+                    "tool_results": len(output.tool_results),
+                    "assistant_preview": preview(response),
+                })
+                return response
             except KeyboardInterrupt:
-                pass
+                return "".join(response_parts)
             except Exception as exc:
+                log_event("turn_error", {"session_id": self.agent_name, "channel": "telegram", "error": str(exc)})
                 return f"Erreur : {exc}"
-        return "".join(response_parts)
 
     def new_conversation(self) -> None:
         """Réinitialise la session (appelable depuis Telegram /new)."""
         self.session.state.turns.clear()
         self.session.state.compaction_notices.clear()
+
+    def resolve_skill_command(self, text: str) -> str:
+        """Si text est une commande skill connue, retourne le prompt injecté.
+
+        Ex: "/plan construire une API REST" → contenu de core/plan.md + args.
+        Sinon retourne text inchangé.
+        """
+        if not text.startswith("/"):
+            return text
+        parts = text.split(maxsplit=1)
+        cmd_name = parts[0].lstrip("/").lower()
+        skill_cmd = self.skill_commands.get(cmd_name)
+        if not skill_cmd:
+            return text
+        arg = parts[1] if len(parts) > 1 else ""
+        return f"{skill_cmd.prompt}\n\n{arg}".strip() if skill_cmd.prompt else arg
+
+    def list_models(self) -> list[str]:
+        """Retourne les modèles disponibles pour le provider actuel."""
+        from marius.provider_config.fetcher import ModelFetchError, fetch_models
+        try:
+            return fetch_models(self.entry)
+        except ModelFetchError:
+            return []
+
+    def set_model(self, model: str) -> bool:
+        """Change le modèle à chaud et persiste dans la config agent.
+
+        Retourne True si le changement a été appliqué.
+        """
+        from dataclasses import replace
+        from marius.config.store import ConfigStore
+
+        new_entry = replace(self.entry, model=model)
+        new_adapter = make_adapter(new_entry)
+        self.entry = new_entry
+        self.orchestrator.provider = new_adapter
+
+        # Persistance dans la config agent
+        cfg_store = ConfigStore()
+        cfg = cfg_store.load()
+        if cfg:
+            agent_cfg = cfg.get_agent(self.agent_name)
+            if agent_cfg is not None:
+                from dataclasses import asdict
+                agent_dict = asdict(agent_cfg) if hasattr(agent_cfg, "__dataclass_fields__") else vars(agent_cfg)
+                agent_dict["model"] = model
+                cfg.agents[self.agent_name] = type(agent_cfg)(**agent_dict)
+                cfg_store.save(cfg)
+        return True
 
     # ── permission interactive ────────────────────────────────────────────────
 
@@ -309,14 +430,21 @@ class GatewayServer:
     def _build_tool_router(
         self, enabled_tools: list[str] | None, guard: PermissionGuard, cwd: Path
     ) -> ToolRouter:
-        memory_tool = make_memory_tool(self.memory_store, cwd)
-        registry = {**_STATIC_TOOLS, "memory": memory_tool}
+        from marius.tools.reminders import make_reminders_tool
+        reminders_tool = make_reminders_tool(
+            self.reminders_store,
+            get_chat_id=lambda: self.telegram_chat_id,
+        )
+        mem_tool = make_memory_tool(self.memory_store, cwd)
+        registry = {**_STATIC_TOOLS, "memory": mem_tool, "reminders": reminders_tool}
         if enabled_tools is None:
             entries = list(registry.values())
         else:
             entries = [registry[n] for n in enabled_tools if n in registry]
-            if memory_tool not in entries:
-                entries.insert(0, memory_tool)
+            if mem_tool not in entries:
+                entries.insert(0, mem_tool)
+            if reminders_tool not in entries:
+                entries.insert(0, reminders_tool)
         return ToolRouter(entries, guard=guard)
 
     @staticmethod
@@ -351,6 +479,9 @@ class GatewayServer:
         # Telegram poller (thread daemon, si configuré pour cet agent)
         self._telegram_poller = None
         self._start_telegram()
+
+        # Reminders delivery thread
+        self._start_reminders_thread()
 
         def _sigterm(sig, frame):
             if self._telegram_poller:
@@ -443,6 +574,7 @@ class GatewayServer:
     def _run_turn(
         self, conn: socket.socket, text: str, stop_event: threading.Event
     ) -> None:
+        text = self.resolve_skill_command(text)
         user_message = Message(
             role=Role.USER,
             content=text,

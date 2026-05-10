@@ -45,18 +45,18 @@ _MEMORY_SCHEMA = {
 }
 
 _MEMORY_DESCRIPTION = """\
-Mémorise des informations durables qui seront utiles dans les prochaines sessions.
+Mémorise des informations durables sans échéance temporelle.
 
-QUAND UTILISER (de façon proactive, sans attendre qu'on le demande) :
-- L'utilisateur te corrige ou dit "souviens-toi" / "ne fais plus ça"
-- L'utilisateur partage une préférence, habitude ou info personnelle
-- Tu découvres un fait sur l'environnement (OS, outils installés, structure projet)
-- Tu apprends une convention, un quirk d'API ou un workflow propre à cet utilisateur
-- Tu identifies un fait stable qui sera utile dans les sessions futures
+QUAND UTILISER :
+- L'utilisateur partage une préférence, habitude, correction ("ne fais plus ça", "j'aime X")
+- L'utilisateur donne une info personnelle utile sur le long terme
+- Tu découvres un fait stable sur l'environnement ou le projet
+
+NE PAS UTILISER pour les rappels à heure précise — utilise l'outil `reminders` à la place.
 
 DEUX CIBLES :
-- 'agent' : tes notes personnelles — faits techniques, conventions, leçons apprises
-- 'user'  : profil utilisateur — prénom, rôle, préférences, corrections, ce qu'il déteste
+- 'user'  : préférences, corrections, infos personnelles
+- 'agent' : faits techniques, conventions projet, leçons apprises
 
 ACTIONS :
 - add     : nouvelle entrée

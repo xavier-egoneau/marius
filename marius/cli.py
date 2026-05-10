@@ -205,10 +205,15 @@ def _launch(agent_name: str | None = None) -> None:
     else:
         # Mode local : REPL classique dans le CWD
         from marius.host.repl import run_repl
+        from marius.storage.memory_store import MemoryStore
+        from marius.gateway.workspace import ensure_workspace, memory_db_path
+        ensure_workspace(name)
+        memory_store = MemoryStore(memory_db_path(name))
         run_repl(
             entry,
             agent_config=agent_cfg,
             permission_mode=config.permission_mode,
+            memory_store=memory_store,
         )
 
 

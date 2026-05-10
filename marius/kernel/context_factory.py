@@ -108,8 +108,9 @@ def build_system_prompt(
     elif assistant_enabled:
         preamble = (
             "## Capacités actives\n"
-            "- Skill assistant actif : tu peux utiliser IDENTITY.md, USER.md "
-            "et l'onboarding conditionnel quand ces fichiers manquent."
+            "- Skill assistant actif.\n"
+            "- Agis d'abord, explique après. Quand l'utilisateur te demande de faire quelque chose, "
+            "utilise les outils immédiatement — ne dis pas ce que tu vas faire, fais-le."
         )
     else:
         preamble = (

@@ -6,6 +6,7 @@ Offset persisté sur disque pour reprendre après redémarrage.
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -18,14 +19,33 @@ from .config import TelegramChannelConfig
 _POLL_INTERVAL = 1.0   # secondes entre deux polls
 _LONG_POLL_TIMEOUT = 10  # secondes de long polling
 
-# Commandes built-in (toujours enregistrées)
-_BUILTIN_COMMANDS = [
+# Commandes built-in (toujours enregistrées en premier)
+_BUILTIN_COMMANDS: list[dict[str, str]] = [
     {"command": "start",  "description": "Démarrer"},
     {"command": "help",   "description": "Aide"},
     {"command": "new",    "description": "Nouvelle conversation"},
     {"command": "daily",  "description": "Briefing du jour"},
+    {"command": "model",  "description": "Afficher ou changer le modèle"},
     {"command": "status", "description": "Statut du gateway"},
 ]
+
+# Noms built-in réservés — les skill commands ne peuvent pas les écraser
+_RESERVED = {c["command"] for c in _BUILTIN_COMMANDS}
+
+
+def _build_command_list(skill_commands: dict) -> list[dict[str, str]]:
+    """Fusionne built-ins + skill commands. Valide les noms (a-z0-9_)."""
+    commands = list(_BUILTIN_COMMANDS)
+    for name, sc in sorted(skill_commands.items()):
+        if name in _RESERVED:
+            continue
+        # Telegram: nom 1-32 chars a-z0-9_
+        safe_name = re.sub(r"[^a-z0-9_]", "_", name.lower())[:32]
+        if not safe_name:
+            continue
+        desc = (sc.description or sc.name)[:256]
+        commands.append({"command": safe_name, "description": desc})
+    return commands[:100]  # limite Telegram
 
 
 class TelegramPoller:
@@ -46,7 +66,8 @@ class TelegramPoller:
     # ── cycle de vie ──────────────────────────────────────────────────────────
 
     def start(self) -> None:
-        set_my_commands(self._cfg.token, _BUILTIN_COMMANDS)
+        skill_cmds = getattr(self._gw, "skill_commands", {})
+        set_my_commands(self._cfg.token, _build_command_list(skill_cmds))
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="telegram-poller",
         )
@@ -134,8 +155,53 @@ class TelegramPoller:
                 f"Gateway actif — {turns} tour(s) en session.")
             return
 
+        if cmd == "model":
+            self._handle_model(chat_id, text)
+            return
+
         # Commande inconnue → forwarder comme texte
         self._handle_message(chat_id, text)
+
+    def _handle_model(self, chat_id: int, text: str) -> None:
+        """Affiche les modèles disponibles ou en applique un directement."""
+        parts = text.split(maxsplit=1)
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        models = getattr(self._gw, "list_models", lambda: [])()
+        current = getattr(self._gw.entry, "model", "?")
+
+        if not arg:
+            if not models:
+                send_message(self._cfg.token, chat_id,
+                    f"Modèle actuel : `{current}`\n(liste indisponible)")
+                return
+            lines = [f"Modèle actuel : `{current}`\n"]
+            for i, m in enumerate(models, 1):
+                marker = "✓" if m == current else " "
+                lines.append(f"{marker} `{i}. {m}`")
+            lines.append("\n`/model <nom>` ou `/model <numéro>`")
+            send_message(self._cfg.token, chat_id, "\n".join(lines))
+            return
+
+        # Résolution par numéro
+        target = arg
+        if arg.isdigit() and models:
+            idx = int(arg) - 1
+            if 0 <= idx < len(models):
+                target = models[idx]
+            else:
+                send_message(self._cfg.token, chat_id, f"Numéro invalide : {arg}")
+                return
+
+        if target == current:
+            send_message(self._cfg.token, chat_id, f"Déjà sur `{current}`.")
+            return
+
+        ok = getattr(self._gw, "set_model", lambda m: False)(target)
+        if ok:
+            send_message(self._cfg.token, chat_id, f"Modèle → `{target}`")
+        else:
+            send_message(self._cfg.token, chat_id, "Échec du changement de modèle.")
 
     def _handle_message(self, chat_id: int, text: str) -> None:
         # Mémorise le chat_id pour les pushs non-sollicités (daily)

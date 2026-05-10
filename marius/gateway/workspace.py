@@ -37,6 +37,10 @@ def telegram_offset_path(agent_name: str) -> Path:
     return _RUN_DIR / f"telegram_{agent_name}.offset"
 
 
+def reminders_path(agent_name: str) -> Path:
+    return workspace_dir(agent_name) / "reminders.json"
+
+
 def daily_cache_path(agent_name: str) -> Path:
     return workspace_dir(agent_name) / "daily_latest.md"
 
