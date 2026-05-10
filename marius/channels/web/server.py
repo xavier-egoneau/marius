@@ -263,6 +263,11 @@ def _make_handler(ws: WebServer):
                 self._stream_sse(ws.open_sse(sid), sid)
                 return
 
+            if parsed.path == "/api/image":
+                query = parse_qs(parsed.query)
+                self._serve_image(query.get("path", [""])[0], ws.agent_name)
+                return
+
             self._json({"ok": False, "error": "not_found"}, 404)
 
         def do_POST(self) -> None:
@@ -363,6 +368,28 @@ def _make_handler(ws: WebServer):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _serve_image(self, path_str: str, agent_name: str) -> None:
+            import mimetypes as _mt
+            if not path_str:
+                self._json({"error": "missing path"}, 400)
+                return
+            path = Path(path_str).resolve()
+            uploads_dir = (Path.home() / ".marius" / "workspace" / agent_name / "uploads").resolve()
+            if not str(path).startswith(str(uploads_dir)):
+                self._json({"error": "forbidden"}, 403)
+                return
+            if not path.exists():
+                self._json({"error": "not found"}, 404)
+                return
+            mime = _mt.guess_type(path.name)[0] or "application/octet-stream"
+            body = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "private, max-age=3600")
             self.end_headers()
             self.wfile.write(body)
 

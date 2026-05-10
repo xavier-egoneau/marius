@@ -61,6 +61,13 @@ body {
               letter-spacing: .05em; margin-bottom: 4px; }
 .msg .body  { white-space: pre-wrap; word-break: break-word; color: var(--text); }
 .msg.assistant .body { color: var(--bright); }
+.chat-img {
+  max-width: min(420px, 85%); max-height: 280px;
+  border-radius: 8px; margin-top: 6px; display: block;
+  border: 1px solid var(--line); cursor: zoom-in;
+  object-fit: contain; background: #0f0d0b;
+}
+.chat-img:hover { border-color: var(--accent); }
 
 /* ── markdown rendu ──────────────────────────────────────────────── */
 .body.md { white-space: normal; }
@@ -640,11 +647,36 @@ function updateToolLine(tool, state) {
 function appendMsg(role, text) {
   const el = document.createElement('div');
   el.className = `msg ${role}`;
+  const bodyHtml = role === 'user' ? renderUserContent(text) : escHtml(text);
   el.innerHTML = `<div class="role">${role === 'user' ? 'Vous' : 'Marius'}</div>
-                  <div class="body">${escHtml(text)}</div>`;
+                  <div class="body">${bodyHtml}</div>`;
   document.getElementById('messages').appendChild(el);
   scrollBottom();
   return el;
+}
+
+function renderUserContent(text) {
+  // Remplace [fichier joint : /path/to/img.ext] par une image inline
+  const IMG_RE = /\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i;
+  const parts = [];
+  let last = 0;
+  const re = /\[fichier joint : ([^\]]+)\]/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    parts.push(escHtml(text.slice(last, m.index)));
+    const filePath = m[1];
+    if (IMG_RE.test(filePath)) {
+      const url = `/api/image?path=${encodeURIComponent(filePath)}`;
+      parts.push(`<a href="${url}" target="_blank" rel="noopener">` +
+        `<img src="${url}" class="chat-img" alt="${escHtml(filePath.split('/').pop())}">` +
+        `</a>`);
+    } else {
+      parts.push(escHtml(m[0]));
+    }
+    last = m.index + m[0].length;
+  }
+  parts.push(escHtml(text.slice(last)));
+  return parts.join('');
 }
 
 function setBusy(val) {
