@@ -3,14 +3,17 @@ from __future__ import annotations
 from datetime import datetime
 
 from marius.kernel.compaction import CompactionConfig, CompactionLevel
-from marius.kernel.contracts import ContextUsage, Message, Role, ToolResult
+from marius.kernel.contracts import ContextUsage, Message, Role, ToolCall, ToolResult
 from marius.kernel.provider import (
     InMemoryProviderAdapter,
     ProviderConfig,
     ProviderError,
+    ProviderRequest,
+    ProviderResponse,
 )
 from marius.kernel.runtime import RuntimeOrchestrator, TurnInput
 from marius.kernel.session import SessionRuntime
+from marius.kernel.tool_router import ToolDefinition, ToolEntry, ToolRouter
 
 
 def test_runtime_orchestrator_registers_turn_and_prepares_provider_context() -> None:
@@ -192,3 +195,69 @@ def test_runtime_orchestrator_preserves_existing_provider_usage_when_provider_re
     )
 
     assert output.usage.provider_input_tokens == 21
+
+
+def test_runtime_orchestrator_forces_final_response_when_tool_loop_limit_is_reached() -> None:
+    class LoopingToolProvider:
+        def __init__(self) -> None:
+            self.requests: list[ProviderRequest] = []
+
+        def generate(self, request: ProviderRequest) -> ProviderResponse:
+            self.requests.append(request)
+            if not request.tools:
+                return ProviderResponse(
+                    message=Message(
+                        role=Role.ASSISTANT,
+                        content="Récap final forcé.",
+                        created_at=datetime(2026, 5, 7, 16, 0, 0),
+                    ),
+                    finish_reason="stop",
+                    provider_name="test",
+                    model="stub-model",
+                )
+            call = ToolCall(id=f"tool-{len(self.requests)}", name="noop", arguments={})
+            return ProviderResponse(
+                message=Message(
+                    role=Role.ASSISTANT,
+                    content="",
+                    created_at=datetime(2026, 5, 7, 16, 0, 0),
+                    tool_calls=[call],
+                ),
+                tool_calls=[call],
+                finish_reason="tool_calls",
+                provider_name="test",
+                model="stub-model",
+            )
+
+    def noop(_arguments: dict) -> ToolResult:
+        return ToolResult(tool_call_id="", ok=True, summary="noop ok")
+
+    session = SessionRuntime(session_id="canon")
+    provider = LoopingToolProvider()
+    router = ToolRouter(
+        [
+            ToolEntry(
+                ToolDefinition(name="noop", description="No-op"),
+                noop,
+            )
+        ]
+    )
+    orchestrator = RuntimeOrchestrator(provider=provider, tool_router=router)
+
+    output = orchestrator.run_turn(
+        TurnInput(
+            session=session,
+            user_message=Message(
+                role=Role.USER,
+                content="Fais la tâche",
+                created_at=datetime(2026, 5, 7, 16, 0, 0),
+            ),
+        )
+    )
+
+    assert output.assistant_message is not None
+    assert output.assistant_message.content == "Récap final forcé."
+    assert output.metadata["tool_iteration_limit_reached"] is True
+    assert provider.requests[-1].tools == []
+    assert provider.requests[-1].metadata["forced_final_response"] is True
+    assert session.state.turns[-1].assistant_message == output.assistant_message

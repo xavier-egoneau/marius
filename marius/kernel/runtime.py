@@ -23,6 +23,12 @@ from .session import SessionRuntime
 from .tool_router import ToolRouter
 
 _MAX_TOOL_ITERATIONS = 20
+_FINAL_RESPONSE_INSTRUCTION = (
+    "La limite d'appels outils de ce tour est atteinte. "
+    "N'appelle plus aucun outil. Produis maintenant la réponse finale pour l'utilisateur : "
+    "résume ce qui a été fait, signale ce qui reste incertain ou non vérifié, "
+    "et propose une prochaine étape utile si elle existe."
+)
 
 
 @dataclass(slots=True)
@@ -189,6 +195,24 @@ class RuntimeOrchestrator:
                 final_message = provider_response.message
                 break
 
+            if final_message is None:
+                provider_response = self._request_final_response(
+                    provider_messages,
+                    turn_input=turn_input,
+                    turn_id=turn.id,
+                    on_text_delta=on_text_delta if use_streaming else None,
+                )
+                usage = self._merge_usage(usage, provider_response.usage)
+                final_message = provider_response.message
+                if not final_message.content.strip():
+                    final_message = Message(
+                        role=Role.ASSISTANT,
+                        content=self._fallback_final_response(all_tool_results),
+                        created_at=datetime.now(timezone.utc),
+                        metadata={"kind": "tool_iteration_limit_fallback"},
+                    )
+                turn.metadata["tool_iteration_limit_reached"] = True
+
         except ProviderError as error:
             turn.metadata.update(
                 {
@@ -214,6 +238,10 @@ class RuntimeOrchestrator:
             {
                 "status": "completed",
                 "tool_calls_count": len(all_tool_results),
+                "tool_iteration_limit_reached": turn.metadata.get(
+                    "tool_iteration_limit_reached",
+                    False,
+                ),
             }
         )
         if final_message is not None:
@@ -226,6 +254,55 @@ class RuntimeOrchestrator:
         return output
 
     # --- streaming ---
+
+    def _request_final_response(
+        self,
+        provider_messages: list[Message],
+        *,
+        turn_input: TurnInput,
+        turn_id: str,
+        on_text_delta: Callable[[str], None] | None,
+    ) -> ProviderResponse:
+        final_instruction = Message(
+            role=Role.SYSTEM,
+            content=_FINAL_RESPONSE_INSTRUCTION,
+            created_at=datetime.now(timezone.utc),
+            visible=False,
+            metadata={"kind": "final_response_instruction"},
+        )
+        request = ProviderRequest(
+            messages=[*provider_messages, final_instruction],
+            tools=[],
+            metadata={
+                **turn_input.metadata,
+                "session_id": turn_input.session.session_id,
+                "turn_id": turn_id,
+                "forced_final_response": True,
+            },
+        )
+        if on_text_delta is not None:
+            return self._run_streaming(request, on_text_delta=on_text_delta)
+        return self.provider.generate(request)  # type: ignore[union-attr]
+
+    def _fallback_final_response(self, tool_results: list[ToolResult]) -> str:
+        recent = [result for result in tool_results[-5:] if result.summary]
+        if not recent:
+            return (
+                "J'ai atteint la limite d'appels outils avant de pouvoir formuler "
+                "un récap complet. Je n'ai pas de résultat exploitable à résumer."
+            )
+        lines = [
+            "J'ai atteint la limite d'appels outils avant de pouvoir formuler un récap complet.",
+            "Derniers résultats observés :",
+        ]
+        for result in recent:
+            status = "ok" if result.ok else "échec"
+            summary = " ".join(result.summary.split())
+            if len(summary) > 220:
+                summary = f"{summary[:217]}..."
+            lines.append(f"- {status} : {summary}")
+        lines.append("Prochaine étape utile : relancer un tour court pour vérifier et finaliser proprement.")
+        return "\n".join(lines)
 
     def _run_streaming(
         self,

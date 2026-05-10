@@ -12,6 +12,7 @@ Threading :
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import socket
@@ -49,6 +50,7 @@ from .protocol import (
 from .workspace import (
     ensure_workspace,
     memory_db_path, pid_path, reminders_path, sessions_dir, socket_path,
+    web_history_path,
 )
 
 class _LineReader:
@@ -117,11 +119,15 @@ class GatewayServer:
             on_ask=self._on_ask,
         )
         enabled_tools = list(agent_config.tools) if agent_config else None
-        self.tool_router = self._build_tool_router(enabled_tools, guard, ws)
+        self.tool_router = self._build_tool_router(enabled_tools, guard, ws, entry, permission_mode)
 
         self.session = SessionRuntime(
             session_id=agent_name,
             metadata={"provider": entry.name, "model": entry.model},
+        )
+        restored_turns = _restore_session_from_web_history(
+            self.session,
+            web_history_path(agent_name),
         )
         adapter = make_adapter(entry)
         window = self._resolve_window(entry)
@@ -139,6 +145,7 @@ class GatewayServer:
             "model": entry.model,
             "permission_mode": permission_mode,
             "tools": enabled_tools or "all",
+            "restored_turns": restored_turns,
         })
 
         # Scheduler + reminders — délégués à GatewayScheduler
@@ -321,20 +328,37 @@ class GatewayServer:
                 pass
 
     def _build_tool_router(
-        self, enabled_tools: list[str] | None, guard: PermissionGuard, cwd: Path
+        self,
+        enabled_tools: list[str] | None,
+        guard: PermissionGuard,
+        cwd: Path,
+        entry: ProviderEntry | None = None,
+        permission_mode: str = "limited",
     ) -> ToolRouter:
         from marius.tools.reminders import make_reminders_tool
+        from marius.tools.spawn_agent import make_spawn_agent_tool
+
         reminders_tool = make_reminders_tool(
             self.reminders_store,
             get_chat_id=lambda: self.telegram_chat_id,
         )
-        entries = build_tool_entries(
+        base_entries = build_tool_entries(
             enabled_tools,
             self.memory_store,
             cwd,
             extras={"reminders": reminders_tool},
         )
-        return ToolRouter(entries, guard=guard)
+
+        if entry is not None and (enabled_tools is None or "spawn_agent" in enabled_tools):
+            spawn_tool = make_spawn_agent_tool(
+                entry,
+                base_entries,
+                permission_mode=permission_mode,
+                cwd=cwd,
+            )
+            base_entries = [*base_entries, spawn_tool]
+
+        return ToolRouter(base_entries, guard=guard)
 
     @staticmethod
     def _resolve_window(entry: ProviderEntry) -> int:
@@ -596,3 +620,71 @@ class GatewayServer:
             write_session_file(record, sessions_dir(self.agent_name))
         except Exception:
             pass
+
+
+def _restore_session_from_web_history(session: SessionRuntime, history_path: Path) -> int:
+    """Best-effort restore of recent visible turns after a gateway restart."""
+    try:
+        raw = json.loads(history_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(raw, list):
+        return 0
+    return _hydrate_session_from_visible_history(session, raw)
+
+
+def _hydrate_session_from_visible_history(
+    session: SessionRuntime,
+    history: list[dict[str, Any]],
+    *,
+    max_turns: int = 20,
+) -> int:
+    """Hydrate a fresh kernel session from persisted visible user/assistant pairs.
+
+    Web history is not a full runtime snapshot: it has no tool calls or artifacts.
+    Restoring the visible pairs is still enough to keep follow-up turns coherent
+    after a gateway restart instead of showing an old UI conversation backed by
+    an empty kernel session.
+    """
+    if session.state.turns:
+        return 0
+
+    pairs: list[tuple[str, str]] = []
+    pending_user: str | None = None
+    for item in history:
+        role = str(item.get("role") or "")
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "user":
+            pending_user = content
+        elif role == "assistant" and pending_user is not None:
+            pairs.append((pending_user, content))
+            pending_user = None
+
+    if max_turns >= 0:
+        pairs = pairs[-max_turns:]
+
+    now = datetime.now(timezone.utc)
+    for user_content, assistant_content in pairs:
+        turn = session.start_turn(
+            user_message=Message(
+                role=Role.USER,
+                content=user_content,
+                created_at=now,
+                metadata={"source": "web_history"},
+            ),
+            metadata={"status": "restored", "source": "web_history"},
+        )
+        session.finish_turn(
+            turn.id,
+            assistant_message=Message(
+                role=Role.ASSISTANT,
+                content=assistant_content,
+                created_at=now,
+                metadata={"source": "web_history"},
+            ),
+        )
+        turn.metadata["status"] = "restored"
+
+    return len(pairs)

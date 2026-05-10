@@ -14,6 +14,7 @@ ALL_TOOLS: list[str] = [
     "web_search",
     "vision",
     "skill_view",
+    "open_marius_web",
     "spawn_agent",
 ]
 

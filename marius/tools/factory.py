@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from marius.tools.filesystem import LIST_DIR, READ_FILE, WRITE_FILE
+from marius.tools.marius_web import OPEN_MARIUS_WEB
 from marius.tools.shell import RUN_BASH
 from marius.tools.skills import SKILL_VIEW
 from marius.tools.vision import VISION
@@ -29,6 +30,7 @@ STATIC_ENTRIES: dict[str, "ToolEntry"] = {
     "web_search": WEB_SEARCH,
     "vision":     VISION,
     "skill_view": SKILL_VIEW,
+    "open_marius_web": OPEN_MARIUS_WEB,
 }
 
 

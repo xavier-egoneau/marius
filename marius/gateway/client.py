@@ -52,6 +52,7 @@ _TOOL_VERBS: dict[str, str] = {
     "web_search": "Recherche web",
     "vision":     "Vision",
     "skill_view": "Skill",
+    "open_marius_web": "Web",
 }
 
 _GATEWAY_COMMANDS: dict[str, str] = {

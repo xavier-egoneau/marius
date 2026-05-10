@@ -34,6 +34,7 @@ from marius.gateway.protocol import (
     CommandEvent, InputEvent, PermissionResponseEvent,
     decode, encode,
 )
+from marius.gateway.workspace import web_history_path
 
 _SSE_KEEPALIVE = 25   # secondes entre deux keep-alive SSE
 
@@ -73,12 +74,28 @@ class WebServer:
         # Session active (tab qui a envoyé le dernier message)
         self._active_session: str | None = None
 
-        # Historique de la conversation (persiste pendant marius web)
-        self._history: list[dict] = []          # [{role, content}]
+        # Historique de la conversation (persisté sur disque)
+        self._history_path = web_history_path(agent_name)
+        self._history: list[dict] = self._load_history()
         self._current_assistant: str = ""       # accumule les deltas du tour en cours
 
         self._welcome: dict = {}   # données du WelcomeEvent
+        self._cwd = Path.cwd()     # répertoire de lancement — racine des diffs git
         self._httpd: ThreadingHTTPServer | None = None
+
+    # ── historique persisté ───────────────────────────────────────────────────
+
+    def _load_history(self) -> list[dict]:
+        try:
+            return json.loads(self._history_path.read_text()) if self._history_path.exists() else []
+        except Exception:
+            return []
+
+    def _save_history(self) -> None:
+        try:
+            self._history_path.write_text(json.dumps(self._history, ensure_ascii=False))
+        except Exception:
+            pass
 
     # ── connexion ─────────────────────────────────────────────────────────────
 
@@ -100,6 +117,7 @@ class WebServer:
     def send_input(self, text: str, session_id: str) -> None:
         self._active_session = session_id
         self._history.append({"role": "user", "content": text})
+        self._save_history()
         self._current_assistant = ""
         with self._send_lock:
             assert self._sock
@@ -109,6 +127,7 @@ class WebServer:
         if cmd == "/new":
             self._history.clear()
             self._current_assistant = ""
+            self._save_history()
         with self._send_lock:
             assert self._sock
             self._sock.sendall(encode(CommandEvent(cmd=cmd)))
@@ -198,6 +217,7 @@ class WebServer:
         elif etype == "done":
             if self._current_assistant.strip():
                 self._history.append({"role": "assistant", "content": self._current_assistant})
+                self._save_history()
             self._current_assistant = ""
             self._push(sid, {"type": "done_turn"})
             self._active_session = None
@@ -287,6 +307,18 @@ def _make_handler(ws: WebServer):
 
             if parsed.path == "/api/history":
                 self._json({"ok": True, "messages": ws._history})
+                return
+
+            if parsed.path == "/api/git/status":
+                from marius.channels.web.git_helpers import git_changes
+                self._json(git_changes(ws._cwd))
+                return
+
+            if parsed.path == "/api/git/diff":
+                from marius.channels.web.git_helpers import git_diff
+                query = parse_qs(parsed.query)
+                file_path = query.get("path", [""])[0]
+                self._json(git_diff(ws._cwd, file_path))
                 return
 
             if parsed.path == "/api/info":

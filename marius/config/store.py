@@ -19,6 +19,17 @@ _PRE_VISION_DEFAULT_TOOLS = [
     "web_search",
     "skill_view",
 ]
+_PRE_MARIUS_WEB_DEFAULT_TOOLS = [
+    "read_file",
+    "list_dir",
+    "write_file",
+    "run_bash",
+    "web_fetch",
+    "web_search",
+    "vision",
+    "skill_view",
+    "spawn_agent",
+]
 
 
 class ConfigStore:
@@ -90,6 +101,6 @@ def _normalize_tools(raw_tools: Any) -> list[str]:
     if not isinstance(raw_tools, list):
         return list(DEFAULT_TOOLS)
     tools = [str(tool) for tool in raw_tools]
-    if tools == _PRE_VISION_DEFAULT_TOOLS:
+    if tools in (_PRE_VISION_DEFAULT_TOOLS, _PRE_MARIUS_WEB_DEFAULT_TOOLS):
         return list(DEFAULT_TOOLS)
     return tools

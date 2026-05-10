@@ -83,6 +83,12 @@ def main() -> None:
     web_p.add_argument("--port", metavar="PORT", type=int, default=8765,
                        help="Port HTTP (défaut : 8765)")
 
+    # marius restart [--port N] — redémarre le gateway et relance le web
+    restart_p = subs.add_parser("restart", help="Redémarrer le gateway et relancer le canal web")
+    restart_p.add_argument("--agent", metavar="NOM", default=None)
+    restart_p.add_argument("--port", metavar="PORT", type=int, default=8765,
+                           help="Port HTTP (défaut : 8765)")
+
     # marius gateway [start | stop | status | install-service | enable | disable]
     gw_p = subs.add_parser("gateway", help="Gérer le gateway (processus persistant)")
     gw_sub = gw_p.add_subparsers(dest="gw_cmd", metavar="action")
@@ -160,6 +166,10 @@ def main() -> None:
 
     if args.command == "web":
         _cmd_web(args)
+        return
+
+    if args.command == "restart":
+        _cmd_restart(args)
         return
 
     # ── lancement du REPL ─────────────────────────────────────────────────────
@@ -773,6 +783,33 @@ def _cmd_skills(args) -> None:
 
 
 # ── helpers assistant skill ───────────────────────────────────────────────────
+
+
+def _cmd_restart(args) -> None:
+    """Arrête le gateway s'il tourne, le redémarre, puis relance le canal web."""
+    from rich.console import Console
+    from marius.config.store import ConfigStore
+    from marius.gateway.launcher import is_running, start, stop
+
+    console = Console(highlight=False)
+    config = ConfigStore().load()
+    name = getattr(args, "agent", None) or (config.main_agent if config else None)
+
+    if not name:
+        console.print("\n[dim]Aucun agent configuré. Lancez marius setup.[/]\n")
+        return
+
+    if is_running(name):
+        console.print(f"\n[dim]Arrêt du gateway '{name}'…[/]")
+        stop(name)
+
+    console.print(f"[dim]Démarrage du gateway '{name}'…[/]")
+    ok = start(name)
+    if not ok:
+        console.print(f"\n[bold color(208)]Impossible de démarrer le gateway '{name}'.[/]\n")
+        return
+
+    _cmd_web(args)
 
 
 def _cmd_web(args) -> None:

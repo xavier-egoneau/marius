@@ -111,6 +111,7 @@ _TOOL_TARGET_KEYS: dict[str, str] = {
     "web_search": "query",
     "vision":     "path",
     "skill_view": "name",
+    "open_marius_web": "port",
 }
 
 

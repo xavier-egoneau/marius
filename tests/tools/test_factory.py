@@ -25,6 +25,7 @@ def test_all_tools_when_none(memory_store: MemoryStore, tmp_path: Path) -> None:
     names = {e.definition.name for e in entries}
     assert names >= set(STATIC_ENTRIES.keys())
     assert "memory" in names
+    assert "open_marius_web" in names
 
 
 def test_memory_always_present_when_none(memory_store: MemoryStore, tmp_path: Path) -> None:
