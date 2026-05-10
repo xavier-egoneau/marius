@@ -73,6 +73,7 @@ class WebServer:
         # Session active (tab qui a envoyé le dernier message)
         self._active_session: str | None = None
 
+        self._welcome: dict = {}   # données du WelcomeEvent
         self._httpd: ThreadingHTTPServer | None = None
 
     # ── connexion ─────────────────────────────────────────────────────────────
@@ -81,7 +82,9 @@ class WebServer:
         """Ouvre la connexion persistante au gateway et démarre le reader."""
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.connect(str(self.socket_path))
-        self._read_line()   # WelcomeEvent — lu, stocké dans welcome si besoin
+        welcome_line = self._read_line()
+        if welcome_line:
+            self._welcome = decode(welcome_line)
         threading.Thread(
             target=self._reader_loop,
             daemon=True,
@@ -268,6 +271,20 @@ def _make_handler(ws: WebServer):
                 self._serve_image(query.get("path", [""])[0], ws.agent_name)
                 return
 
+            if parsed.path == "/api/info":
+                self._json({
+                    "ok": True,
+                    "agent": ws.agent_name,
+                    "model": ws._welcome.get("model", ""),
+                    "provider": ws._welcome.get("provider", ""),
+                    "skill_commands": _get_skill_commands(ws.agent_name),
+                })
+                return
+
+            if parsed.path == "/api/models":
+                self._json({"ok": True, "models": _get_models(ws)})
+                return
+
             self._json({"ok": False, "error": "not_found"}, 404)
 
         def do_POST(self) -> None:
@@ -322,6 +339,19 @@ def _make_handler(ws: WebServer):
                     self._json({"ok": False, "error": str(exc)}, 400)
                     return
                 self._json(result)
+                return
+
+            if parsed.path == "/api/model":
+                try:
+                    payload = self._read_json()
+                    model = str(payload.get("model") or "").strip()
+                    if not model:
+                        self._json({"ok": False, "error": "model manquant"}, 400)
+                        return
+                    ok = _set_model(ws, model)
+                    self._json({"ok": ok})
+                except Exception as exc:
+                    self._json({"ok": False, "error": str(exc)}, 400)
                 return
 
             self._json({"ok": False, "error": "not_found"}, 404)
@@ -400,6 +430,64 @@ def _make_handler(ws: WebServer):
 
 
 # ── upload ────────────────────────────────────────────────────────────────────
+
+
+def _get_skill_commands(agent_name: str) -> list[dict]:
+    """Retourne les skill commands actives pour cet agent."""
+    try:
+        from marius.config.store import ConfigStore
+        from marius.kernel.skills import SkillReader, collect_skill_commands
+        cfg = ConfigStore().load()
+        if not cfg:
+            return []
+        agent = cfg.get_agent(agent_name)
+        if not agent:
+            return []
+        cmds = collect_skill_commands(SkillReader().load_all(agent.skills or []))
+        return [{"name": f"/{n}", "desc": sc.description or sc.name} for n, sc in cmds.items()]
+    except Exception:
+        return []
+
+
+def _get_models(ws: WebServer) -> list[str]:
+    try:
+        from marius.provider_config.fetcher import ModelFetchError, fetch_models
+        from marius.provider_config.store import ProviderStore
+        from marius.config.store import ConfigStore
+        from dataclasses import replace as dc_replace
+        cfg = ConfigStore().load()
+        if not cfg:
+            return []
+        agent = cfg.get_agent(ws.agent_name)
+        if not agent:
+            return []
+        providers = ProviderStore().load()
+        entry = next((p for p in providers if p.id == agent.provider_id), None)
+        if not entry:
+            return []
+        if agent.model and agent.model != entry.model:
+            entry = dc_replace(entry, model=agent.model)
+        return fetch_models(entry)
+    except Exception:
+        return []
+
+
+def _set_model(ws: WebServer, model: str) -> bool:
+    try:
+        from marius.config.store import ConfigStore
+        from marius.provider_config.store import ProviderStore
+        from dataclasses import replace as dc_replace
+        cfg = ConfigStore().load()
+        if not cfg:
+            return False
+        agent = cfg.get_agent(ws.agent_name)
+        if not agent:
+            return False
+        cfg.agents[ws.agent_name] = dc_replace(agent, model=model)
+        ConfigStore().save(cfg)
+        return True
+    except Exception:
+        return False
 
 
 _MIME_EXT: dict[str, str] = {

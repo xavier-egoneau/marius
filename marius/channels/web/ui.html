@@ -247,11 +247,20 @@ let es = null;
 // ── init ──────────────────────────────────────────────────────────
 async function init() {
   try {
-    const r = await fetch('/health');
+    const r = await fetch('/api/info');
     const d = await r.json();
     if (d.ok) {
       document.getElementById('status').className = 'on';
       document.getElementById('agent-label').textContent = d.agent || 'Marius';
+      if (d.model) document.getElementById('model-label').textContent = d.model;
+      // Ajoute les skill commands dynamiquement
+      if (Array.isArray(d.skill_commands)) {
+        for (const sc of d.skill_commands) {
+          if (!COMMANDS.find(c => c.name === sc.name)) {
+            COMMANDS.push({name: sc.name, desc: sc.desc, gateway: false});
+          }
+        }
+      }
     }
   } catch { /* gateway not reachable */ }
   openSSE();
@@ -376,10 +385,11 @@ async function send() {
   if (!text && pendingUploads.length === 0) return;
   if (busy) return;
 
-  // Gateway commands (/new, /stop) → CommandEvent, pas de tour LLM
   const cmdName = text.split(/\s+/)[0].toLowerCase();
-  const cmdDef = COMMANDS.find(c => c.name === cmdName && c.gateway);
-  if (cmdDef && !pendingUploads.length) {
+  const cmdDef = COMMANDS.find(c => c.name === cmdName);
+
+  // Gateway commands (/new /stop) → CommandEvent, pas de tour LLM
+  if (cmdDef?.gateway && !pendingUploads.length) {
     inp.value = ''; autoResize(inp);
     await fetch('/api/command', {
       method: 'POST',
@@ -390,6 +400,14 @@ async function send() {
       document.getElementById('messages').innerHTML = '';
       _rawText = ''; _activeMsg = null; _cursorEl = null;
     }
+    return;
+  }
+
+  // /model → affiche liste + permet de changer
+  if (cmdDef?.model && !pendingUploads.length) {
+    inp.value = ''; autoResize(inp);
+    const arg = text.slice(cmdName.length).trim();
+    await handleModelCmd(arg);
     return;
   }
 
@@ -483,6 +501,57 @@ async function newConv() {
   _cursorEl = null;
 }
 
+// ── /model ────────────────────────────────────────────────────────
+async function handleModelCmd(arg) {
+  const info = await fetch('/api/info').then(r => r.json()).catch(() => ({}));
+  const current = info.model || '?';
+
+  if (arg) {
+    // Changer de modèle
+    const r = await fetch('/api/model', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: arg}),
+    });
+    const d = await r.json();
+    const msg = appendMsg('assistant', '');
+    const body = msg.querySelector('.body');
+    body.textContent = d.ok ? `Modèle → ${arg}` : `Erreur : ${d.error}`;
+    if (d.ok) document.getElementById('model-label').textContent = arg;
+    scrollBottom();
+    return;
+  }
+
+  // Afficher la liste
+  const models = await fetch('/api/models').then(r => r.json()).then(d => d.models || []).catch(() => []);
+  const msg = appendMsg('assistant', '');
+  const body = msg.querySelector('.body');
+  if (!models.length) {
+    body.textContent = `Modèle actuel : ${current}\n(liste indisponible)`;
+  } else {
+    body.innerHTML = `<strong>Modèle actuel : ${escHtml(current)}</strong><br><br>` +
+      models.map((m, i) => {
+        const active = m === current ? ' ✓' : '';
+        return `<span style="cursor:pointer;color:var(--accent)" onclick="switchModel('${escHtml(m)}')">${i+1}. ${escHtml(m)}${active}</span>`;
+      }).join('<br>');
+  }
+  scrollBottom();
+}
+
+async function switchModel(model) {
+  const r = await fetch('/api/model', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({model}),
+  });
+  const d = await r.json();
+  if (d.ok) {
+    document.getElementById('model-label').textContent = model;
+    appendMsg('assistant', `Modèle → ${model}`);
+    scrollBottom();
+  }
+}
+
 // ── permissions ───────────────────────────────────────────────────
 function showPermission(ev) {
   pendingPermId = ev.request_id;
@@ -558,15 +627,22 @@ function toBase64(file) {
 }
 
 // ── autocomplete commandes ────────────────────────────────────────
-// gateway: true → CommandEvent (/new, /stop)
-// gateway: false → InputEvent (skill commands résolus par le gateway)
+// gateway: true  → CommandEvent (/new /stop)
+// model: true    → traitement spécial modèle
+// gateway: false → InputEvent (gateway résout via resolve_skill_command)
 const COMMANDS = [
-  {name: '/new',     desc: 'Nouvelle conversation',       gateway: true},
-  {name: '/stop',    desc: 'Interrompre le tour en cours',gateway: true},
-  {name: '/doctor',  desc: 'Diagnostic de l\'installation',gateway: false},
-  {name: '/dream',   desc: 'Consolider la mémoire',       gateway: false},
-  {name: '/daily',   desc: 'Briefing du jour',             gateway: false},
-  {name: '/compact', desc: 'Forcer la compaction',         gateway: false},
+  {name: '/new',       desc: 'Nouvelle conversation',              gateway: true},
+  {name: '/stop',      desc: 'Interrompre le tour en cours',       gateway: true},
+  {name: '/remember',  desc: 'Mémoriser un fait  (/remember texte)',gateway: false},
+  {name: '/memories',  desc: 'Lister les souvenirs enregistrés',   gateway: false},
+  {name: '/forget',    desc: 'Supprimer un souvenir  (/forget id)', gateway: false},
+  {name: '/model',     desc: 'Afficher ou changer le modèle actif', model: true},
+  {name: '/doctor',    desc: 'Diagnostic de l\'installation',       gateway: false},
+  {name: '/dream',     desc: 'Consolider la mémoire (dreaming LLM)',gateway: false},
+  {name: '/daily',     desc: 'Briefing du jour',                    gateway: false},
+  {name: '/compact',   desc: 'Forcer la compaction du contexte',    gateway: false},
+  {name: '/context',   desc: 'Afficher l\'état du contexte',        gateway: false},
+  // skill commands ajoutés dynamiquement dans init()
 ];
 let _cmdIdx = -1;
 
