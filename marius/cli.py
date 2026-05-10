@@ -88,8 +88,6 @@ def main() -> None:
     gw_sub = gw_p.add_subparsers(dest="gw_cmd", metavar="action")
     gw_start = gw_sub.add_parser("start", help="Démarrer le gateway manuellement")
     gw_start.add_argument("--agent", metavar="NOM", default=None)
-    gw_start.add_argument("--web-port", metavar="PORT", type=int, default=0,
-                          help="Activer le canal web sur le port donné (ex: 8765)")
     gw_stop = gw_sub.add_parser("stop", help="Arrêter le gateway")
     gw_stop.add_argument("--agent", metavar="NOM", default=None)
     gw_status = gw_sub.add_parser("status", help="Statut du gateway")
@@ -778,10 +776,12 @@ def _cmd_skills(args) -> None:
 
 
 def _cmd_web(args) -> None:
-    """Démarre le gateway avec le canal web activé."""
+    """Proxy HTTP ↔ socket gateway. Lance le gateway si nécessaire, puis sert en foreground."""
     from rich.console import Console
     from marius.config.store import ConfigStore
     from marius.gateway.launcher import is_running, start
+    from marius.gateway.workspace import socket_path
+    from marius.channels.web.server import WebServer
 
     console = Console(highlight=False)
     config = ConfigStore().load()
@@ -792,21 +792,28 @@ def _cmd_web(args) -> None:
         console.print("\n[dim]Aucun agent configuré. Lancez marius setup.[/]\n")
         return
 
-    agent_cfg = config.get_agent(name) if config else None
-    if not _has_assistant_skill(agent_cfg):
-        _print_assistant_required(console, name)
+    if not is_running(name):
+        console.print(f"\n[dim]Démarrage du gateway '{name}'…[/]")
+        ok = start(name)
+        if not ok:
+            console.print(f"\n[bold color(208)]Impossible de démarrer le gateway '{name}'.[/]\n")
+            return
+
+    server = WebServer(agent_name=name, socket_path=socket_path(name), port=port)
+    try:
+        server.connect()
+    except OSError as exc:
+        console.print(f"\n[bold color(208)]Connexion au gateway impossible : {exc}[/]\n")
         return
 
-    if is_running(name):
-        console.print(f"\n[dim]Gateway '{name}' déjà actif — relancez avec --web-port pour activer le web.[/]\n")
-        return
-
-    console.print(f"\n[dim]Démarrage du gateway '{name}' avec canal web sur le port {port}…[/]")
-    ok = start(name, web_port=port)
-    if ok:
-        console.print(f"[green]✓[/] Interface web disponible sur [bold]http://localhost:{port}[/]\n")
-    else:
-        console.print(f"\n[bold color(208)]Échec du démarrage du gateway '{name}'.[/]\n")
+    console.print(f"\n[green]✓[/] Interface web sur [bold]http://localhost:{port}[/]")
+    console.print("[dim]Ctrl+C pour arrêter le web (le gateway continue).[/]\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
 
 
 def _has_assistant_skill(agent_cfg) -> bool:
