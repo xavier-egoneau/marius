@@ -73,6 +73,10 @@ class WebServer:
         # Session active (tab qui a envoyé le dernier message)
         self._active_session: str | None = None
 
+        # Historique de la conversation (persiste pendant marius web)
+        self._history: list[dict] = []          # [{role, content}]
+        self._current_assistant: str = ""       # accumule les deltas du tour en cours
+
         self._welcome: dict = {}   # données du WelcomeEvent
         self._httpd: ThreadingHTTPServer | None = None
 
@@ -95,11 +99,16 @@ class WebServer:
 
     def send_input(self, text: str, session_id: str) -> None:
         self._active_session = session_id
+        self._history.append({"role": "user", "content": text})
+        self._current_assistant = ""
         with self._send_lock:
             assert self._sock
             self._sock.sendall(encode(InputEvent(text=text)))
 
     def send_command(self, cmd: str) -> None:
+        if cmd == "/new":
+            self._history.clear()
+            self._current_assistant = ""
         with self._send_lock:
             assert self._sock
             self._sock.sendall(encode(CommandEvent(cmd=cmd)))
@@ -141,7 +150,9 @@ class WebServer:
         sid = self._active_session or "default"
 
         if etype == "delta":
-            self._push(sid, {"type": "text_delta", "delta": event.get("text", "")})
+            delta = event.get("text", "")
+            self._current_assistant += delta
+            self._push(sid, {"type": "text_delta", "delta": delta})
 
         elif etype == "tool_start":
             self._push(sid, {
@@ -185,6 +196,9 @@ class WebServer:
             self._push(sid, {"type": "status", "message": event.get("message", "")})
 
         elif etype == "done":
+            if self._current_assistant.strip():
+                self._history.append({"role": "assistant", "content": self._current_assistant})
+            self._current_assistant = ""
             self._push(sid, {"type": "done_turn"})
             self._active_session = None
 
@@ -269,6 +283,10 @@ def _make_handler(ws: WebServer):
             if parsed.path == "/api/image":
                 query = parse_qs(parsed.query)
                 self._serve_image(query.get("path", [""])[0], ws.agent_name)
+                return
+
+            if parsed.path == "/api/history":
+                self._json({"ok": True, "messages": ws._history})
                 return
 
             if parsed.path == "/api/info":

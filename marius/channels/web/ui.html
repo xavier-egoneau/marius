@@ -246,23 +246,33 @@ let es = null;
 
 // ── init ──────────────────────────────────────────────────────────
 async function init() {
+  // Info agent + skill commands
   try {
-    const r = await fetch('/api/info');
-    const d = await r.json();
+    const d = await fetch('/api/info').then(r => r.json());
     if (d.ok) {
       document.getElementById('status').className = 'on';
       document.getElementById('agent-label').textContent = d.agent || 'Marius';
       if (d.model) document.getElementById('model-label').textContent = d.model;
-      // Ajoute les skill commands dynamiquement
       if (Array.isArray(d.skill_commands)) {
         for (const sc of d.skill_commands) {
-          if (!COMMANDS.find(c => c.name === sc.name)) {
+          if (!COMMANDS.find(c => c.name === sc.name))
             COMMANDS.push({name: sc.name, desc: sc.desc, gateway: false});
-          }
         }
       }
     }
-  } catch { /* gateway not reachable */ }
+  } catch {}
+
+  // Historique de la conversation
+  try {
+    const h = await fetch('/api/history').then(r => r.json());
+    if (h.ok && h.messages.length > 0) {
+      for (const msg of h.messages) {
+        appendMsg(msg.role, msg.content, msg.role === 'assistant');
+      }
+      scrollBottom();
+    }
+  } catch {}
+
   openSSE();
 }
 
@@ -722,12 +732,20 @@ function updateToolLine(tool, state) {
 }
 
 // ── helpers ───────────────────────────────────────────────────────
-function appendMsg(role, text) {
+function appendMsg(role, text, renderMd = false) {
   const el = document.createElement('div');
   el.className = `msg ${role}`;
-  const bodyHtml = role === 'user' ? renderUserContent(text) : escHtml(text);
+  let bodyHtml, mdClass = '';
+  if (role === 'user') {
+    bodyHtml = renderUserContent(text);
+  } else if (renderMd) {
+    bodyHtml = renderMarkdown(text);
+    mdClass = ' md';
+  } else {
+    bodyHtml = escHtml(text);
+  }
   el.innerHTML = `<div class="role">${role === 'user' ? 'Vous' : 'Marius'}</div>
-                  <div class="body">${bodyHtml}</div>`;
+                  <div class="body${mdClass}">${bodyHtml}</div>`;
   document.getElementById('messages').appendChild(el);
   scrollBottom();
   return el;
