@@ -389,10 +389,7 @@ class GatewayServer:
         if cfg:
             agent_cfg = cfg.get_agent(self.agent_name)
             if agent_cfg is not None:
-                from dataclasses import asdict
-                agent_dict = asdict(agent_cfg) if hasattr(agent_cfg, "__dataclass_fields__") else vars(agent_cfg)
-                agent_dict["model"] = model
-                cfg.agents[self.agent_name] = type(agent_cfg)(**agent_dict)
+                cfg.agents[self.agent_name] = replace(agent_cfg, model=model)
                 cfg_store.save(cfg)
         return True
 

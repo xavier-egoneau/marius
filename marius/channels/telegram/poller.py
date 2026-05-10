@@ -85,8 +85,9 @@ class TelegramPoller:
         while not self._stop.wait(_POLL_INTERVAL):
             try:
                 self._poll_once()
-            except Exception:
-                pass
+            except Exception as exc:
+                from marius.storage.log_store import log_event
+                log_event("telegram_poll_error", {"error": str(exc)})
 
     def _poll_once(self) -> None:
         offset = self._read_offset()

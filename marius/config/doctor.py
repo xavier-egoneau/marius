@@ -215,20 +215,13 @@ def _check_gateway(agent_name: str | None) -> Section:
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _command_exists(cmd: str) -> bool:
-    try:
-        subprocess.run([cmd, "--version"], capture_output=True, timeout=5)
-        return True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+    from marius.config.checks import command_exists
+    return command_exists(cmd)
 
 
 def _check_url(url: str) -> bool:
-    try:
-        from urllib.request import urlopen
-        with urlopen(url, timeout=3):
-            return True
-    except Exception:
-        return False
+    from marius.config.checks import check_url
+    return check_url(url)
 
 
 def _pid_alive(pid: int) -> bool:

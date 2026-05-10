@@ -83,10 +83,8 @@ class RemindersStore:
 
 
 def _parse_dt(iso: str) -> datetime:
-    dt = datetime.fromisoformat(iso)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+    from marius.kernel.time_utils import parse_stored_dt
+    return parse_stored_dt(iso)
 
 
 def parse_remind_at(value: str) -> datetime:
