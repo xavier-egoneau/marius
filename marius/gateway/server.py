@@ -303,6 +303,8 @@ class GatewayServer:
         """Réinitialise la session (appelable depuis Telegram /new ou web)."""
         self.session.state.turns.clear()
         self.session.state.compaction_notices.clear()
+        self.session.state.derived_context_summary = ""
+        self.session.state.derived_context_summary_message = None
 
     def resolve_skill_command(self, text: str) -> str:
         """Si text est une commande skill connue, retourne le prompt injecté.
