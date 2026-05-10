@@ -40,13 +40,8 @@ from marius.storage.log_store import log_event, preview
 from marius.storage.project_store import ProjectStore
 from marius.storage.session_corpus import SessionRecord, build_transcript, write_session_file
 from marius.storage.ui_history import InMemoryVisibleHistoryStore, VisibleHistoryEntry
-from marius.tools.filesystem import LIST_DIR, READ_FILE, WRITE_FILE
-from marius.tools.memory import make_memory_tool
-from marius.tools.shell import RUN_BASH
-from marius.tools.skills import SKILL_VIEW
+from marius.tools.factory import build_tool_entries
 from marius.tools.spawn_agent import make_spawn_agent_tool
-from marius.tools.vision import VISION
-from marius.tools.web import WEB_FETCH, WEB_SEARCH
 
 
 _THEME = Theme({
@@ -497,18 +492,6 @@ def _dispatch_command(
 # ── boucle principale ─────────────────────────────────────────────────────────
 
 
-_STATIC_TOOL_REGISTRY = {
-    "read_file":  READ_FILE,
-    "list_dir":   LIST_DIR,
-    "write_file": WRITE_FILE,
-    "run_bash":   RUN_BASH,
-    "web_fetch":  WEB_FETCH,
-    "web_search": WEB_SEARCH,
-    "vision":     VISION,
-    "skill_view": SKILL_VIEW,
-}
-
-
 def _make_ask_callback():
     """Retourne un callback interactif pour les décisions de permission."""
     def on_ask(tool_name: str, arguments: dict, reason: str) -> bool:
@@ -536,20 +519,10 @@ def _build_tool_router(
 ) -> ToolRouter:
     """Construit le router depuis la liste des tools actifs de l'agent.
 
-    Les outils dynamiques (memory, spawn_agent) sont créés avec le contexte
-    de la session injecté. Si enabled_tools est None, tous les tools sont actifs.
+    spawn_agent est construit en deux passes : d'abord les entries de base,
+    puis spawn_agent y est ajouté avec cette liste comme contexte workers.
     """
-    memory_tool = make_memory_tool(memory_store, cwd)
-    registry = {**_STATIC_TOOL_REGISTRY, "memory": memory_tool}
-
-    # spawn_agent est construit en deux passes : d'abord la registry sans lui,
-    # puis on l'ajoute avec la liste finale des entries comme context.
-    if enabled_tools is None:
-        base_entries = list(registry.values())
-    else:
-        base_entries = [registry[name] for name in enabled_tools if name in registry]
-        if memory_tool not in base_entries:
-            base_entries.insert(0, memory_tool)
+    base_entries = build_tool_entries(enabled_tools, memory_store, cwd)
 
     if entry is not None and (enabled_tools is None or "spawn_agent" in enabled_tools):
         spawn_tool = make_spawn_agent_tool(

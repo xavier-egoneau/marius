@@ -39,12 +39,7 @@ from marius.provider_config.registry import PROVIDER_REGISTRY
 from marius.storage.memory_store import MemoryStore
 from marius.storage.log_store import log_event, preview
 from marius.storage.session_corpus import SessionRecord, write_session_file
-from marius.tools.filesystem import LIST_DIR, READ_FILE, WRITE_FILE
-from marius.tools.memory import make_memory_tool
-from marius.tools.shell import RUN_BASH
-from marius.tools.skills import SKILL_VIEW
-from marius.tools.vision import VISION
-from marius.tools.web import WEB_FETCH, WEB_SEARCH
+from marius.tools.factory import build_tool_entries
 
 from .protocol import (
     CommandEvent, DeltaEvent, DoneEvent, ErrorEvent, InputEvent,
@@ -55,17 +50,6 @@ from .workspace import (
     daily_cache_path, ensure_workspace, jobs_path,
     memory_db_path, pid_path, reminders_path, sessions_dir, socket_path,
 )
-
-_STATIC_TOOLS = {
-    "read_file":  READ_FILE,
-    "list_dir":   LIST_DIR,
-    "write_file": WRITE_FILE,
-    "run_bash":   RUN_BASH,
-    "web_fetch":  WEB_FETCH,
-    "web_search": WEB_SEARCH,
-    "vision":     VISION,
-    "skill_view": SKILL_VIEW,
-}
 
 _REMINDERS_POLL_SECONDS = 30.0
 
@@ -432,16 +416,12 @@ class GatewayServer:
             self.reminders_store,
             get_chat_id=lambda: self.telegram_chat_id,
         )
-        mem_tool = make_memory_tool(self.memory_store, cwd)
-        registry = {**_STATIC_TOOLS, "memory": mem_tool, "reminders": reminders_tool}
-        if enabled_tools is None:
-            entries = list(registry.values())
-        else:
-            entries = [registry[n] for n in enabled_tools if n in registry]
-            if mem_tool not in entries:
-                entries.insert(0, mem_tool)
-            if reminders_tool not in entries:
-                entries.insert(0, reminders_tool)
+        entries = build_tool_entries(
+            enabled_tools,
+            self.memory_store,
+            cwd,
+            extras={"reminders": reminders_tool},
+        )
         return ToolRouter(entries, guard=guard)
 
     @staticmethod
