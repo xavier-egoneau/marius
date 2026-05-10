@@ -428,7 +428,7 @@ async function send() {
   _activeMsg = appendMsg('assistant', '');
   _cursorEl = document.createElement('span');
   _cursorEl.className = 'cursor';
-  _activeMsg.querySelector('.body').appendChild(_cursorEl);
+  _activeMsg.appendChild(_cursorEl);  // toujours en dernier enfant du message
 
   await fetch('/api/message', {
     method: 'POST',
@@ -442,9 +442,9 @@ function appendDelta(delta) {
   if (!_activeMsg) return;
   _rawText += delta;
   const body = _activeMsg.querySelector('.body');
-  if (_cursorEl) _cursorEl.remove();
-  body.textContent = _rawText;   // texte brut pendant le streaming
-  body.appendChild(_cursorEl);
+  body.textContent = _rawText;
+  // Curseur toujours en dernière position dans le message
+  if (_cursorEl) _activeMsg.appendChild(_cursorEl);
   scrollBottom();
 }
 
@@ -711,6 +711,8 @@ function addToolLine(tool, target, state) {
   line.innerHTML = `<span class="tdot"></span><span>${escHtml(label)}</span>`;
   _toolLines[tool] = line;
   _activeMsg.appendChild(line);
+  // Curseur toujours après les traces d'outils
+  if (_cursorEl) _activeMsg.appendChild(_cursorEl);
   scrollBottom();
 }
 
