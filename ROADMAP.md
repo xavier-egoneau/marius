@@ -114,7 +114,7 @@ Le subagent tourne en isolation, rend son résultat au parent, puis s'arrête.
 
 ### 7. Outillage CLI
 
-- [ ] **`marius doctor`** — diagnostic de l'installation : provider joignable ?
+- [x] **`marius doctor`** — diagnostic de l'installation : provider joignable ?
       SearxNG actif ? config valide ? permissions cohérentes ? SOUL.md présent ?
       Affiche un rapport clair avec les correctifs suggérés.
 - [ ] **`marius dashboard`** — vue synthétique de l'état courant : agents configurés,

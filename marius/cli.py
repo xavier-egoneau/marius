@@ -73,6 +73,10 @@ def main() -> None:
     tg_sub.add_parser("setup",  help="Wizard de configuration du bot Telegram")
     tg_sub.add_parser("status", help="Statut du canal Telegram")
 
+    # marius doctor
+    doctor_p = subs.add_parser("doctor", help="Diagnostic de l'installation")
+    doctor_p.add_argument("--agent", metavar="NOM", default=None, help="Agent à diagnostiquer")
+
     # marius gateway [start | stop | status | install-service | enable | disable]
     gw_p = subs.add_parser("gateway", help="Gérer le gateway (processus persistant)")
     gw_sub = gw_p.add_subparsers(dest="gw_cmd", metavar="action")
@@ -92,6 +96,13 @@ def main() -> None:
     args = parser.parse_args()
 
     # ── commandes ─────────────────────────────────────────────────────────────
+
+    if args.command == "doctor":
+        from marius.config.doctor import print_report, run_doctor
+        agent_arg = getattr(args, "agent", None)
+        sections = run_doctor(agent_arg)
+        errors = print_report(sections)
+        sys.exit(1 if errors else 0)
 
     if args.command == "setup":
         from marius.config.wizard import run_setup
