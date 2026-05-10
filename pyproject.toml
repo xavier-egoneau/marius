@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "marius"
 version = "0.0.0"
 description = "Socle agentique modulaire pour Marius v2"
-readme = "ARCHITECTURE.md"
+readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Egza Gonal" }]
 license = { text = "MIT" }
