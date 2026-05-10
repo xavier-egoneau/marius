@@ -139,11 +139,28 @@ body {
   background: #211d19; border: 1px solid #3a3530; border-radius: 5px;
   padding: 4px 8px; display: flex; align-items: center; gap: 6px;
 }
+.upload-chip img { height: 36px; width: 36px; object-fit: cover; border-radius: 3px; flex-shrink: 0; }
 .upload-chip button {
   background: none; border: none; color: var(--soft); cursor: pointer;
   font-size: 14px; line-height: 1; padding: 0 2px;
 }
 .upload-chip button:hover { color: var(--err); }
+
+/* ── autocomplete commandes ──────────────────────────────────────── */
+#footer { position: relative; }
+#cmd-suggestions {
+  display: none; position: absolute; bottom: calc(100% + 4px); left: 18px;
+  background: var(--panel); border: 1px solid #3a3530; border-radius: 8px;
+  padding: 4px; z-index: 20; min-width: 260px; box-shadow: 0 4px 16px #0006;
+}
+#cmd-suggestions.show { display: block; }
+.cmd-row {
+  display: flex; align-items: baseline; gap: 10px; padding: 7px 12px;
+  border-radius: 5px; cursor: pointer;
+}
+.cmd-row:hover, .cmd-row.active { background: #2a2520; }
+.cmd-name { color: var(--accent); font-family: ui-monospace, monospace; font-size: 13px; }
+.cmd-desc { color: var(--soft); font-size: 12px; }
 
 /* ── footer ──────────────────────────────────────────────────────── */
 #footer {
@@ -204,10 +221,11 @@ body {
 <div id="messages"></div>
 
 <div id="footer">
+  <div id="cmd-suggestions"></div>
   <input type="file" id="file-input" multiple accept="image/*,.pdf,.txt,.md,.py,.js,.ts,.json,.csv" style="display:none" onchange="onFiles(this)">
   <button id="btn-upload" title="Joindre un fichier" onclick="document.getElementById('file-input').click()">📎</button>
   <textarea id="input" placeholder="Envoie un message…" rows="1"
-    onkeydown="onKey(event)" oninput="autoResize(this)"></textarea>
+    onkeydown="onKey(event)" oninput="autoResize(this); onInputChange()"></textarea>
   <button id="btn-stop" onclick="sendStop()">⏹ Stop</button>
   <button id="btn-send" onclick="send()">Envoyer</button>
 </div>
@@ -346,8 +364,27 @@ let _rawText = '';   // buffer pendant le streaming
 async function send() {
   const inp = document.getElementById('input');
   let text = inp.value.trim();
+  document.getElementById('cmd-suggestions').className = '';
+
   if (!text && pendingUploads.length === 0) return;
   if (busy) return;
+
+  // Gateway commands (/new, /stop) → CommandEvent, pas de tour LLM
+  const cmdName = text.split(/\s+/)[0].toLowerCase();
+  const cmdDef = COMMANDS.find(c => c.name === cmdName && c.gateway);
+  if (cmdDef && !pendingUploads.length) {
+    inp.value = ''; autoResize(inp);
+    await fetch('/api/command', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({cmd: cmdName}),
+    });
+    if (cmdName === '/new') {
+      document.getElementById('messages').innerHTML = '';
+      _rawText = ''; _activeMsg = null; _cursorEl = null;
+    }
+    return;
+  }
 
   // Inject upload paths
   if (pendingUploads.length > 0) {
@@ -461,18 +498,22 @@ async function answerPerm(approved) {
 // ── uploads ───────────────────────────────────────────────────────
 async function onFiles(input) {
   for (const file of Array.from(input.files)) {
+    const isImg = file.type.startsWith('image/');
+    const preview = isImg ? URL.createObjectURL(file) : null;
     const data = await toBase64(file);
     try {
       const r = await fetch('/api/upload', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({filename: file.name, data}),
+        body: JSON.stringify({filename: file.name, data, mime_type: file.type}),
       });
       const d = await r.json();
       if (d.ok) {
-        pendingUploads.push({name: d.name, path: d.path});
+        pendingUploads.push({name: d.name, path: d.path, preview});
+      } else if (preview) {
+        URL.revokeObjectURL(preview);
       }
-    } catch { /* ignore upload errors */ }
+    } catch { if (preview) URL.revokeObjectURL(preview); }
   }
   input.value = '';
   updateUploadPreview();
@@ -486,13 +527,16 @@ function updateUploadPreview() {
   pendingUploads.forEach((u, i) => {
     const chip = document.createElement('div');
     chip.className = 'upload-chip';
-    chip.innerHTML = `<span>${escHtml(u.name)}</span>
+    const img = u.preview ? `<img src="${u.preview}" alt="">` : '';
+    chip.innerHTML = `${img}<span>${escHtml(u.name)}</span>
       <button onclick="removeUpload(${i})">×</button>`;
     el.appendChild(chip);
   });
 }
 
 function removeUpload(i) {
+  const u = pendingUploads[i];
+  if (u.preview) URL.revokeObjectURL(u.preview);
   pendingUploads.splice(i, 1);
   updateUploadPreview();
 }
@@ -504,6 +548,73 @@ function toBase64(file) {
     r.onerror = reject;
     r.readAsDataURL(file);
   });
+}
+
+// ── autocomplete commandes ────────────────────────────────────────
+// gateway: true → CommandEvent (/new, /stop)
+// gateway: false → InputEvent (skill commands résolus par le gateway)
+const COMMANDS = [
+  {name: '/new',     desc: 'Nouvelle conversation',       gateway: true},
+  {name: '/stop',    desc: 'Interrompre le tour en cours',gateway: true},
+  {name: '/doctor',  desc: 'Diagnostic de l\'installation',gateway: false},
+  {name: '/dream',   desc: 'Consolider la mémoire',       gateway: false},
+  {name: '/daily',   desc: 'Briefing du jour',             gateway: false},
+  {name: '/compact', desc: 'Forcer la compaction',         gateway: false},
+];
+let _cmdIdx = -1;
+
+function onInputChange() {
+  const val = document.getElementById('input').value;
+  const box = document.getElementById('cmd-suggestions');
+  _cmdIdx = -1;
+
+  // Montre l'autocomplete seulement si on tape une commande non encore complétée
+  if (!val.startsWith('/') || val.includes(' ') || val.includes('\n')) {
+    box.className = '';
+    return;
+  }
+  const q = val.toLowerCase();
+  const matches = COMMANDS.filter(c => c.name.startsWith(q));
+  if (!matches.length) { box.className = ''; return; }
+
+  box.innerHTML = matches.map((c, i) =>
+    `<div class="cmd-row" data-i="${i}" onclick="selectCmd('${c.name}')">
+      <span class="cmd-name">${c.name}</span>
+      <span class="cmd-desc">${c.desc}</span>
+    </div>`
+  ).join('');
+  box.className = 'show';
+}
+
+function selectCmd(name) {
+  const inp = document.getElementById('input');
+  inp.value = name + ' ';
+  inp.focus();
+  autoResize(inp);
+  document.getElementById('cmd-suggestions').className = '';
+  _cmdIdx = -1;
+}
+
+function _cmdNavKey(e) {
+  const box = document.getElementById('cmd-suggestions');
+  if (!box.classList.contains('show')) return false;
+  const rows = box.querySelectorAll('.cmd-row');
+  if (!rows.length) return false;
+  if (e.key === 'ArrowDown') {
+    _cmdIdx = Math.min(_cmdIdx + 1, rows.length - 1);
+  } else if (e.key === 'ArrowUp') {
+    _cmdIdx = Math.max(_cmdIdx - 1, 0);
+  } else if (e.key === 'Tab' || (e.key === 'Enter' && _cmdIdx >= 0)) {
+    if (_cmdIdx >= 0) rows[_cmdIdx].click();
+    return true;
+  } else if (e.key === 'Escape') {
+    box.className = ''; _cmdIdx = -1;
+    return true;
+  } else {
+    return false;
+  }
+  rows.forEach((r, i) => r.className = 'cmd-row' + (i === _cmdIdx ? ' active' : ''));
+  return true;
 }
 
 // ── tool activity ─────────────────────────────────────────────────
@@ -561,6 +672,7 @@ function autoResize(el) {
 }
 
 function onKey(e) {
+  if (_cmdNavKey(e)) { e.preventDefault(); return; }
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 }
 

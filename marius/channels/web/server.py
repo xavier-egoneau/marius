@@ -375,14 +375,28 @@ def _make_handler(ws: WebServer):
 # ── upload ────────────────────────────────────────────────────────────────────
 
 
+_MIME_EXT: dict[str, str] = {
+    "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png",
+    "image/gif": ".gif",  "image/webp": ".webp", "image/bmp": ".bmp",
+    "image/svg+xml": ".svg", "application/pdf": ".pdf",
+    "text/plain": ".txt", "text/markdown": ".md",
+}
+
+
 def _save_upload(agent_name: str, payload: dict) -> dict:
-    filename = str(payload.get("filename") or "upload.bin")
-    data_b64 = str(payload.get("data") or "")
+    filename  = str(payload.get("filename") or "upload.bin")
+    data_b64  = str(payload.get("data") or "")
+    mime_type = str(payload.get("mime_type") or "")
 
     uploads_dir = Path.home() / ".marius" / "workspace" / agent_name / "uploads"
     uploads_dir.mkdir(parents=True, exist_ok=True)
 
     safe = "".join(c for c in filename if c.isalnum() or c in "._-")[:64] or "upload"
+
+    # Ajoute l'extension si absente et que le MIME type est connu
+    if "." not in safe and mime_type in _MIME_EXT:
+        safe += _MIME_EXT[mime_type]
+
     path = uploads_dir / f"{uuid.uuid4().hex[:8]}_{safe}"
     path.write_bytes(base64.b64decode(data_b64))
     return {"ok": True, "path": str(path), "name": safe}
