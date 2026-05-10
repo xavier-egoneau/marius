@@ -241,6 +241,41 @@ def _pid_alive(pid: int) -> bool:
 
 # ── affichage ─────────────────────────────────────────────────────────────────
 
+def format_report_text(sections: list[Section]) -> tuple[str, int]:
+    """Retourne (texte brut, nb_erreurs) — pour les canaux sans Rich."""
+    lines: list[str] = ["🩺 marius doctor\n"]
+    errors = 0
+    warnings = 0
+    for sec in sections:
+        lines.append(f"{sec.title}")
+        for chk in sec.checks:
+            if chk.ok:
+                mark = "✓"
+            elif chk.warning:
+                mark = "!"
+                warnings += 1
+            else:
+                mark = "✗"
+                errors += 1
+            line = f"  {mark} {chk.label}"
+            if not chk.ok and chk.hint:
+                line += f"\n    → {chk.hint}"
+            lines.append(line)
+        lines.append("")
+
+    if errors == 0 and warnings == 0:
+        lines.append("Tout est en ordre.")
+    else:
+        parts = []
+        if errors:
+            parts.append(f"{errors} erreur(s) bloquante(s)")
+        if warnings:
+            parts.append(f"{warnings} avertissement(s)")
+        lines.append(", ".join(parts) + ".")
+
+    return "\n".join(lines), errors
+
+
 def print_report(sections: list[Section]) -> int:
     """Affiche le rapport avec Rich. Retourne le nombre d'erreurs bloquantes."""
     from rich.console import Console

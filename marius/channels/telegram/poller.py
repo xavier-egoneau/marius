@@ -26,6 +26,7 @@ _BUILTIN_COMMANDS: list[dict[str, str]] = [
     {"command": "new",    "description": "Nouvelle conversation"},
     {"command": "daily",  "description": "Briefing du jour"},
     {"command": "model",  "description": "Afficher ou changer le modèle"},
+    {"command": "doctor", "description": "Diagnostic de l'installation"},
     {"command": "status", "description": "Statut du gateway"},
 ]
 
@@ -157,6 +158,14 @@ class TelegramPoller:
 
         if cmd == "model":
             self._handle_model(chat_id, text)
+            return
+
+        if cmd == "doctor":
+            from marius.config.doctor import format_report_text, run_doctor
+            agent = getattr(self._gw, "agent_name", None)
+            sections = run_doctor(agent)
+            report, _ = format_report_text(sections)
+            send_message(self._cfg.token, chat_id, report)
             return
 
         # Commande inconnue → forwarder comme texte

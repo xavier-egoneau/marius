@@ -98,6 +98,7 @@ _COMMANDS: dict[str, str] = {
     "/remember":  "mémoriser un fait  (/remember <texte>)",
     "/memories":  "lister les souvenirs enregistrés",
     "/forget":    "supprimer un souvenir  (/forget <id>)",
+    "/doctor":    "diagnostic de l'installation (provider, SearxNG, gateway…)",
     "/dream":     "consolider la mémoire (dreaming LLM)",
     "/daily":     "générer le briefing du jour",
     "/stop":      "interrompre l'inférence en cours",
@@ -471,6 +472,12 @@ def _dispatch_command(
 
     if cmd == "/forget":
         _cmd_forget(arg, memory_store)
+        return True, session, None
+
+    if cmd == "/doctor":
+        from marius.config.doctor import print_report, run_doctor
+        sections = run_doctor()
+        print_report(sections)
         return True, session, None
 
     # Commandes dynamiques issues des skills
