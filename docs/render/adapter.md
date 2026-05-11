@@ -2,7 +2,7 @@
 
 ## Rôle
 
-Transforme les objets du kernel (messages, artefacts, notices de compaction) en Markdown portable. Point de départ pour tout rendu visible — CLI, web, Telegram partagent la même sortie tant qu'aucune divergence produit ne l'impose.
+Transforme les objets du kernel (messages, résultats outils, artefacts, notices de compaction) en Markdown portable. Point de départ pour tout rendu visible — CLI, web, Telegram partagent la même sortie tant qu'aucune divergence produit ne l'impose.
 
 ## Couche
 
@@ -14,7 +14,7 @@ Oui. Dépend uniquement des contrats kernel.
 
 ## Dépendances
 
-- `marius.kernel.contracts` — `Message`, `Artifact`, `ArtifactType`, `CompactionNotice`
+- `marius.kernel.contracts` — `Message`, `ToolResult`, `Artifact`, `ArtifactType`, `CompactionNotice`
 
 ## Interface publique
 
@@ -23,13 +23,26 @@ def render_message(message: Message) -> str
     # Retourne le contenu texte du message, prêt à afficher.
     # Messages non visibles (visible=False) → chaîne vide.
 
+def render_turn_output(
+    assistant_message: Message | None,
+    *,
+    tool_results: list[ToolResult] | None = None,
+    compaction_notice: CompactionNotice | None = None,
+) -> str
+    # Retourne la sortie visible de fin de tour :
+    # réponse assistant + artefacts outils + notice kernel éventuelle.
+
 def render_compaction_notice(notice: CompactionNotice) -> str
     # Retourne une notice lisible sur le niveau de compaction atteint.
     # Ex : "[ contexte compacté — niveau : trim ]"
 
 def render_artifact(artifact: Artifact) -> str
     # DIFF    → rendu détaillé avec blocs de code
+    # REPORT avec data.content → rendu Markdown détaillé
     # Autres  → fallback portable (type + path)
+
+def render_artifacts(artifacts: list[Artifact]) -> str
+    # Retourne une suite d'artefacts dédupliqués.
 ```
 
 ## Usage
@@ -54,10 +67,18 @@ print(render_artifact(diff))
 
 ## Surfaces futures
 
-Quand un besoin produit impose une divergence, des variantes `render_message_cli()`, `render_message_telegram()`, etc. peuvent coexister. La sortie `portable` reste la base commune.
+Le paramètre `surface` accepte déjà `portable`, `cli`, `web` et `telegram`. La première version garde volontairement la même sortie Markdown partout. Quand un besoin produit impose une divergence, des variantes de rendu peuvent coexister, mais la sortie `portable` reste la base commune.
+
+Les canaux gardent leurs adaptations finales :
+- CLI : rendu via `rich.markdown.Markdown`.
+- Web : renderer Markdown inline sans dépendance externe, appliqué en fin de streaming.
+- Telegram : conversion Markdown basique vers HTML Telegram, avec découpe qui garde les blocs de code équilibrés.
 
 ## Invariants
 
 - Un message `visible=False` retourne une chaîne vide — il n'est jamais affiché à l'utilisateur.
-- Les artefacts `DIFF` ont un rendu détaillé ; les autres ont toujours un fallback lisible.
+- Les outils ne répondent pas à la place du LLM : leurs artefacts sont ajoutés comme pièces visibles de fin de tour.
+- Les artefacts `DIFF` ont un rendu détaillé.
+- Les artefacts `REPORT` avec contenu Markdown (`data.content`) sont rendus en détail ; sans contenu, ils gardent un fallback lisible.
+- Les artefacts identiques sont dédupliqués avant affichage.
 - Cette brique ne connaît ni sécurité, ni persistance, ni sélection de projet.

@@ -126,3 +126,46 @@ def test_runtime_tool_results_are_stored_in_session():
     turn = session.state.turns[0]
     assert len(turn.tool_results) == 1
     assert turn.tool_results[0].ok is True
+
+
+def test_runtime_injects_structured_tool_data_into_next_provider_request():
+    def handler(_args: dict) -> ToolResult:
+        return ToolResult(
+            tool_call_id="",
+            ok=True,
+            summary="2 résultat(s)",
+            data={
+                "results": [
+                    {
+                        "title": "Marius web search",
+                        "url": "https://example.test/marius",
+                        "content": "Snippet utile.",
+                    }
+                ]
+            },
+        )
+
+    tool_call = ToolCall(id="c1", name="search", arguments={"query": "marius"})
+    provider = InMemoryProviderAdapter(
+        config=ProviderConfig("test", "stub"),
+        completion_text="Synthèse sourcée.",
+        tool_call_sequence=[[tool_call]],
+    )
+    router = ToolRouter(
+        [
+            ToolEntry(
+                definition=ToolDefinition(name="search", description="Search"),
+                handler=handler,
+            )
+        ]
+    )
+    orchestrator = RuntimeOrchestrator(provider=provider, tool_router=router)
+
+    orchestrator.run_turn(TurnInput(session=_session(), user_message=_user()))
+
+    second_request = provider.calls[1]
+    tool_messages = [message for message in second_request.messages if message.role is Role.TOOL]
+    assert len(tool_messages) == 1
+    assert "2 résultat(s)" in tool_messages[0].content
+    assert "Marius web search" in tool_messages[0].content
+    assert "https://example.test/marius" in tool_messages[0].content

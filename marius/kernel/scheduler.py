@@ -89,13 +89,17 @@ class Scheduler:
         self,
         store: JobStore,
         handlers: dict[str, Callable[[], None]],
+        before_tick: Callable[[], None] | None = None,
     ) -> None:
         self._store = store
         self._handlers = handlers
+        self._before_tick = before_tick
         self._stop = threading.Event()
 
     def tick(self, now: datetime | None = None) -> list[str]:
         """Exécute les jobs dus. Retourne les noms des jobs lancés."""
+        if self._before_tick is not None:
+            self._before_tick()
         fired: list[str] = []
         for job in self._store.due(now):
             handler = self._handlers.get(job.name)
@@ -171,6 +175,65 @@ def ensure_jobs(
             interval_seconds=86400,
         ))
 
+
+def ensure_watch_jobs(store: JobStore, topics: list[Any]) -> None:
+    """Synchronise les jobs watch à partir de topics avec cadence.
+
+    Un topic avec cadence `manual` ou disabled n'est pas planifié. Les jobs
+    obsolètes `watch:<id>` sont retirés pour éviter les runs fantômes.
+    """
+    jobs = store.list_all()
+    next_jobs = [job for job in jobs if not job.id.startswith("watch:")]
+    existing = {job.id: job for job in jobs if job.id.startswith("watch:")}
+
+    for topic in topics:
+        topic_id = str(getattr(topic, "id", "") or "")
+        if not topic_id or not bool(getattr(topic, "enabled", True)):
+            continue
+        cadence = str(getattr(topic, "cadence", "") or "manual")
+        interval = cadence_to_seconds(cadence)
+        if interval is None:
+            continue
+        job_id = f"watch:{topic_id}"
+        previous = existing.get(job_id)
+        if previous and previous.interval_seconds == interval:
+            next_jobs.append(previous)
+            continue
+        next_jobs.append(ScheduledJob(
+            id=job_id,
+            name=job_id,
+            run_at=(datetime.now(timezone.utc) + timedelta(seconds=interval)).isoformat(),
+            interval_seconds=interval,
+        ))
+
+    store.save(next_jobs)
+
+
+def cadence_to_seconds(cadence: str) -> int | None:
+    """Convertit une cadence watch en secondes, None = manuel/non planifié."""
+    raw = (cadence or "manual").strip().lower().replace(" ", "")
+    aliases = {
+        "manual": None,
+        "off": None,
+        "disabled": None,
+        "hourly": 3600,
+        "daily": 86400,
+        "weekly": 7 * 86400,
+    }
+    if raw in aliases:
+        return aliases[raw]
+    unit = raw[-1:] if raw else ""
+    number = raw[:-1]
+    if unit in ("m", "h", "d") and number.isdigit():
+        value = int(number)
+        if value <= 0:
+            return None
+        if unit == "m":
+            return max(60, value * 60)
+        if unit == "h":
+            return value * 3600
+        return value * 86400
+    return None
 
 # ── helpers privés ────────────────────────────────────────────────────────────
 

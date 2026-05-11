@@ -444,7 +444,12 @@ function _il(t) {   // inline: escape puis formatage
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 }
 function _e(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
 }
 
 // ── send ──────────────────────────────────────────────────────────
@@ -720,8 +725,9 @@ function toBase64(file) {
 // ── autocomplete commandes ────────────────────────────────────────
 // gateway: true  → CommandEvent (/new /stop)
 // model: true    → traitement spécial modèle
-// gateway: false → InputEvent (gateway résout via resolve_skill_command)
+// gateway: false → InputEvent (gateway résout les commandes builtin + skills)
 const COMMANDS = [
+  {name: '/help',      desc: 'Afficher les commandes',              gateway: false},
   {name: '/new',       desc: 'Nouvelle conversation',              gateway: true},
   {name: '/stop',      desc: 'Interrompre le tour en cours',       gateway: true},
   {name: '/remember',  desc: 'Mémoriser un fait  (/remember texte)',gateway: false},

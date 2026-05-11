@@ -89,7 +89,7 @@ marius
 Le dossier de lancement devient le projet de travail. Marius charge le contexte
 utile, les skills actifs, la mémoire projet et les outils configurés.
 
-Commandes fréquentes dans le REPL :
+Commandes fréquentes dans le REPL et dans les surfaces gateway/web/Telegram :
 
 ```text
 /help       afficher les commandes
@@ -98,6 +98,8 @@ Commandes fréquentes dans le REPL :
 /compact    compacter le contexte court
 /remember   mémoriser un fait
 /memories   lister les souvenirs
+/forget     supprimer un souvenir
+/doctor     diagnostiquer l'installation
 /dream      consolider la mémoire
 /daily      générer le briefing du jour
 /stop       interrompre l'inférence en cours
@@ -250,14 +252,59 @@ Les outils configurables incluent notamment :
 - `read_file` : lire un fichier texte ;
 - `list_dir` : lister un dossier ;
 - `write_file` : écrire un fichier ;
+- `make_dir` : créer un dossier ;
+- `move_path` : déplacer ou renommer un fichier ou dossier ;
+- `explore_tree` : résumer l'arborescence d'un projet ;
+- `explore_grep` : chercher du texte dans les fichiers avec chemins et lignes ;
+- `explore_summary` : détecter les fichiers clés et métadonnées d'un projet ;
 - `run_bash` : exécuter une commande shell ;
 - `web_fetch` : récupérer une URL ;
 - `web_search` : chercher via SearxNG ;
 - `vision` : analyser une image locale via Ollama ;
 - `skill_view` : lire le contenu d'un skill ;
+- `skill_create` : créer un skill Markdown portable ;
+- `skill_list` : lister les skills installés ;
+- `skill_reload` : relire les skills depuis le disque et retourner un snapshot ;
+- `host_agent_list` : lister les agents configurés sans exposer de secret provider ;
+- `host_agent_save` : créer ou modifier un agent Marius ;
+- `host_agent_delete` : supprimer un agent non principal avec confirmation explicite ;
+- `host_telegram_configure` : configurer Telegram via référence de secret ;
+- `host_status` : inspecter la config agents et l'état gateway/systemd ;
+- `host_doctor` : lancer le diagnostic Marius et retourner le rapport structuré ;
+- `host_logs` : lire les logs récents avec filtres optionnels ;
+- `host_gateway_restart` : planifier un redémarrage gateway après confirmation ;
+- `project_list` : lister les projets connus et le projet actif explicite ;
+- `project_set_active` : définir le projet actif par chemin ou nom connu ;
+- `approval_list` : lister les demandes de permissions récentes ;
+- `approval_decide` : mémoriser une approbation ou un refus pour une demande ;
+- `approval_forget` : oublier une décision mémorisée ;
+- `secret_ref_list` : lister les références de secrets sans résoudre les valeurs ;
+- `secret_ref_save` : enregistrer une référence `env:` ou `file:` nommée ;
+- `secret_ref_delete` : supprimer une référence de secret ;
+- `secret_ref_prepare_file` : créer un fichier secret local `0600` et l'enregistrer comme référence ;
+- `provider_list` : lister les providers LLM sans exposer les clés ;
+- `provider_save` : créer ou modifier un provider avec `api_key_ref` ;
+- `provider_delete` : supprimer un provider après confirmation ;
+- `provider_models` : récupérer les modèles disponibles d'un provider ;
+- `dreaming_run` : consolider la mémoire via le moteur dreaming ;
+- `daily_digest` : générer un briefing quotidien Markdown ;
+- `self_update_propose` : enregistrer une proposition de mise à jour sans l'appliquer ;
+- `self_update_report_bug` : enregistrer un bug exploitable pour une future mise à jour ;
+- `self_update_list` : lister les propositions et bugs self-update ;
+- `self_update_show` : relire une proposition ou un bug par identifiant ;
+- `self_update_apply` : appliquer une proposition patchée après confirmation ;
+- `self_update_rollback` : inverser une application self-update enregistrée ;
+- `watch_add` : créer ou modifier un topic de veille persistant ;
+- `watch_list` : lister les topics de veille ;
+- `watch_remove` : supprimer un topic avec confirmation explicite ;
+- `watch_run` : exécuter une veille via recherche web et persister un rapport ;
 - `open_marius_web` : lancer l'interface web locale ;
+- `rag_*` : gérer et interroger des sources Markdown locales ;
+- `caldav_*` : diagnostiquer et lire un calendrier local `vdirsyncer`/`khal` ;
+- `sentinelle_scan` : auditer localement services, ports, autostart et exposition Docker ;
 - `spawn_agent` : déléguer une tâche à des subagents ;
-- `memory` : gérer la mémoire durable.
+- `memory` : gérer la mémoire durable ;
+- `reminders` : créer, lister ou annuler des rappels via le gateway.
 
 Activer ou désactiver un outil :
 
@@ -284,14 +331,25 @@ Le mode se choisit dans `marius setup`.
 
 Les actions sensibles passent par un gardien de permissions. Les outils ne sont
 pas censés remplacer la réponse du LLM : ils fournissent des observations, puis
-le modèle reformule et décide de la suite.
+le modèle reformule et décide de la suite. Le résumé affiché dans les traces
+peut rester court ; le runtime réinjecte aussi les données structurées utiles au
+modèle, avec masquage des clés sensibles évidentes.
 
 ## Recherche web avec SearxNG
 
-Le tool `web_search` utilise SearxNG localement. Démarrer le service fourni :
+Le tool `web_search` utilise SearxNG localement. Quand `web_search` est actif,
+Marius tente de démarrer le service fourni au lancement du REPL ou du gateway :
 
 ```bash
 docker compose -f docker-compose.searxng.yml up -d
+```
+
+Ce démarrage est best-effort : si Docker ou le compose file ne sont pas
+disponibles, Marius continue à fonctionner et `web_search` retourne une erreur
+claire. Pour désactiver cet auto-start :
+
+```bash
+export MARIUS_SEARCH_AUTO_START=0
 ```
 
 URL par défaut :
@@ -316,6 +374,12 @@ Chemins utiles :
 ~/.marius/config.json                 config agents/outils/permissions
 ~/.marius/marius_providers.json       providers LLM
 ~/.marius/skills/                     skills installés
+~/.marius/projects.json               projets connus
+~/.marius/active_project.json         projet actif explicite
+~/.marius/approvals.json              audit et décisions de permissions
+~/.marius/secret_refs.json            références de secrets nommées
+~/.marius/self_updates/               propositions et bugs self-update
+~/.marius/watch/                      topics et rapports de veille
 ~/.marius/workspace/<agent>/memory.db mémoire SQLite
 ~/.marius/workspace/<agent>/sessions/ corpus de sessions
 ~/.marius/logs/marius.jsonl           logs de diagnostic
@@ -345,6 +409,78 @@ Le doctor vérifie :
 - SearxNG ;
 - fichiers système ;
 - gateway.
+
+L'agent peut aussi consulter ces informations via les outils `host_status`,
+`host_doctor` et `host_logs`, quand ils sont actifs dans sa configuration. Ces
+outils sont read-only : ils donnent des observations au modèle, qui garde la
+réponse finale.
+
+Les actions host disponibles côté agent sont atomiques et passent par le
+gardien de permissions : `host_agent_save`, `host_agent_delete` et
+`host_telegram_configure`. Pour Telegram, le modèle ne doit jamais recevoir le
+token brut ; l'outil accepte uniquement `token_ref` au format `env:NOM`,
+`file:/chemin/token` ou `secret:NOM`.
+
+## Sécurité administrable
+
+Les demandes de permission peuvent être auditées via `approval_list`. Une
+décision peut être mémorisée avec `approval_decide`, puis oubliée avec
+`approval_forget`. Les arguments sensibles sont redacted dans le store.
+
+Les secrets passent par des références nommées : `secret_ref_save` accepte
+uniquement `env:NOM` ou `file:/chemin/token`, jamais une valeur brute. Les outils
+ne retournent pas les valeurs résolues. Les actions comme Telegram peuvent
+ensuite utiliser `token_ref: secret:<nom>`.
+
+Pour créer une référence sans exposer la valeur dans le chat,
+`secret_ref_prepare_file` prépare un fichier privé sous `~/.marius/secrets/`.
+L'utilisateur y place ensuite la valeur localement ; Marius ne garde que la
+référence `file:`.
+
+Les providers configurés par l'agent suivent la même règle : `provider_save`
+refuse les clés brutes et accepte `api_key_ref` (`env:`, `file:` ou `secret:`).
+Les anciennes clés déjà présentes dans `~/.marius/marius_providers.json` restent
+compatibles, mais elles sont masquées dans les sorties des tools.
+
+## Self-update
+
+Marius peut documenter ses propres évolutions sans les appliquer directement.
+Les outils `self_update_propose` et `self_update_report_bug` créent des fichiers
+Markdown dans `~/.marius/self_updates/`. Une proposition peut joindre un diff
+comme artefact, mais l'application d'un patch reste une action séparée qui doit
+être demandée explicitement par l'utilisateur.
+
+`self_update_apply` exige une proposition existante, `confirm: true`, un patch
+valide, un dépôt git contrôlé et un état de travail propre sauf exception
+documentée (`allow_dirty`). Il applique le patch, lance des commandes de test
+bornées (`pytest`, `python -m pytest`, `git diff --check`) et écrit un rapport.
+`self_update_rollback` inverse le patch enregistré par `self_update_apply`.
+
+## Veille
+
+La veille persistante repose sur des topics explicites stockés dans
+`~/.marius/watch/`. `watch_run` lance une recherche web pour un topic ou tous les
+topics actifs, puis enregistre un rapport. Le dreaming et le daily lisent les
+rapports existants ; ils ne lancent pas de recherche web cachée.
+
+Les cadences non manuelles (`hourly`, `daily`, `weekly`, `15m`, `2h`, `3d`, etc.)
+sont reprises par le scheduler du gateway. Chaque résultat reçoit un score de
+nouveauté (`novelty_score`) et des raisons simples (`new_url`, `new_domain`,
+`query_match`, etc.). Les résultats déjà vus par URL sont dédupliqués par défaut.
+Pour un backfill ou un audit contrôlé, `watch_run` accepte `dedupe: false`.
+
+Quand un provider LLM est disponible, `watch_run` peut attacher un résumé par
+topic au rapport. Ce résumé reste une observation d'outil : le modèle principal
+garde la responsabilité de répondre à l'utilisateur dans le fil de conversation.
+
+Les notifications sont configurables par topic via `watch_add` :
+
+- `notify: "off"` ne pousse rien ;
+- `notify: "tagged"` conserve le comportement historique avec les tags `notify`
+  ou `telegram` ;
+- `notify: "new"` pousse seulement si le run contient de nouveaux résultats ;
+- `notify: "always"` pousse à chaque run réussi ;
+- `notify_min_score` fixe un seuil minimal sur le score de nouveauté maximal.
 
 ## Développement
 

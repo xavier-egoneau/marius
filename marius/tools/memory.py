@@ -17,7 +17,7 @@ _MEMORY_SCHEMA = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["add", "replace", "remove"],
+            "enum": ["add", "replace", "remove", "search", "list", "get"],
             "description": "Action à effectuer.",
         },
         "target": {
@@ -40,8 +40,20 @@ _MEMORY_SCHEMA = {
                 "Requis pour 'replace' et 'remove'."
             ),
         },
+        "query": {
+            "type": "string",
+            "description": "Recherche plein texte. Requis pour 'search'.",
+        },
+        "memory_id": {
+            "type": "integer",
+            "description": "Identifiant du souvenir. Requis pour 'get'.",
+        },
+        "limit": {
+            "type": "integer",
+            "description": "Nombre maximum de souvenirs à retourner pour 'search' ou 'list'.",
+        },
     },
-    "required": ["action", "target"],
+    "required": ["action"],
 }
 
 _MEMORY_DESCRIPTION = """\
@@ -62,6 +74,9 @@ ACTIONS :
 - add     : nouvelle entrée
 - replace : mettre à jour (old_text identifie l'entrée par sous-chaîne)
 - remove  : supprimer (old_text identifie l'entrée par sous-chaîne)
+- search  : rechercher dans la mémoire durable
+- list    : lister les souvenirs récents
+- get     : lire un souvenir par identifiant
 
 NE PAS MÉMORISER : état en cours, tâches temporaires, résultats de session.\
 """
@@ -80,17 +95,21 @@ def make_memory_tool(store: MemoryStore, cwd: Path) -> ToolEntry:
         target = arguments.get("target", "")
         content = (arguments.get("content") or "").strip()
         old_text = (arguments.get("old_text") or "").strip()
+        query = (arguments.get("query") or "").strip()
+        limit = _bounded_limit(arguments.get("limit"))
 
-        if target not in ("agent", "user"):
+        if target and target not in ("agent", "user"):
             return ToolResult(tool_call_id="", ok=False, summary=f"Cible invalide : {target!r}. Utiliser 'agent' ou 'user'.")
 
-        category = _CATEGORY_MAP[target]
+        category = _CATEGORY_MAP.get(target)
 
         if action == "add":
+            if target not in ("agent", "user"):
+                return ToolResult(tool_call_id="", ok=False, summary="'target' requis pour 'add' : agent ou user.")
             if not content:
                 return ToolResult(tool_call_id="", ok=False, summary="'content' requis pour 'add'.")
             try:
-                memory_id = store.add(content, scope="global", category=category)
+                memory_id = store.add(content, scope="global", category=category or "")
                 return ToolResult(
                     tool_call_id="",
                     ok=True,
@@ -101,6 +120,8 @@ def make_memory_tool(store: MemoryStore, cwd: Path) -> ToolEntry:
                 return ToolResult(tool_call_id="", ok=False, summary=str(exc))
 
         if action == "replace":
+            if target not in ("agent", "user"):
+                return ToolResult(tool_call_id="", ok=False, summary="'target' requis pour 'replace' : agent ou user.")
             if not old_text or not content:
                 return ToolResult(tool_call_id="", ok=False, summary="'old_text' et 'content' requis pour 'replace'.")
             if store.replace(old_text, content):
@@ -108,13 +129,34 @@ def make_memory_tool(store: MemoryStore, cwd: Path) -> ToolEntry:
             return ToolResult(tool_call_id="", ok=False, summary=f"Aucune entrée trouvée contenant : {old_text!r}")
 
         if action == "remove":
+            if target not in ("agent", "user"):
+                return ToolResult(tool_call_id="", ok=False, summary="'target' requis pour 'remove' : agent ou user.")
             if not old_text:
                 return ToolResult(tool_call_id="", ok=False, summary="'old_text' requis pour 'remove'.")
             if store.remove_by_text(old_text):
                 return ToolResult(tool_call_id="", ok=True, summary=f"Entrée supprimée de {target}.")
             return ToolResult(tool_call_id="", ok=False, summary=f"Aucune entrée trouvée contenant : {old_text!r}")
 
-        return ToolResult(tool_call_id="", ok=False, summary=f"Action inconnue : {action!r}. Utiliser add, replace ou remove.")
+        if action == "search":
+            if not query:
+                return ToolResult(tool_call_id="", ok=False, summary="'query' requis pour 'search'.")
+            entries = store.search(query, category=category, limit=limit)
+            return _entries_result(entries, "Recherche mémoire")
+
+        if action == "list":
+            entries = store.list(category=category, limit=limit)
+            return _entries_result(entries, "Souvenirs récents")
+
+        if action == "get":
+            memory_id = arguments.get("memory_id")
+            if not isinstance(memory_id, int):
+                return ToolResult(tool_call_id="", ok=False, summary="'memory_id' entier requis pour 'get'.")
+            entry = store.get(memory_id)
+            if entry is None:
+                return ToolResult(tool_call_id="", ok=False, summary=f"Souvenir introuvable : #{memory_id}", error="memory_not_found")
+            return _entries_result([entry], "Souvenir")
+
+        return ToolResult(tool_call_id="", ok=False, summary=f"Action inconnue : {action!r}.")
 
     return ToolEntry(
         definition=ToolDefinition(
@@ -124,3 +166,31 @@ def make_memory_tool(store: MemoryStore, cwd: Path) -> ToolEntry:
         ),
         handler=handler,
     )
+
+
+def _bounded_limit(value: object, default: int = 10, maximum: int = 50) -> int:
+    if not isinstance(value, int):
+        return default
+    return max(1, min(value, maximum))
+
+
+def _entries_result(entries: list, title: str) -> ToolResult:
+    if not entries:
+        return ToolResult(tool_call_id="", ok=True, summary=f"{title} : aucun résultat.", data={"memories": []})
+
+    lines = [f"{title} :"]
+    data = []
+    for entry in entries:
+        lines.append(f"- #{entry.id} [{entry.scope}/{entry.category}] {entry.content}")
+        data.append(
+            {
+                "memory_id": entry.id,
+                "content": entry.content,
+                "scope": entry.scope,
+                "project_path": entry.project_path,
+                "category": entry.category,
+                "tags": entry.tags,
+                "created_at": entry.created_at,
+            }
+        )
+    return ToolResult(tool_call_id="", ok=True, summary="\n".join(lines), data={"memories": data})

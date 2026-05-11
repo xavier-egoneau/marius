@@ -281,3 +281,118 @@ def test_scheduler_runner_daily_writes_cache(
     cache = tmp_path / "daily.md"
     assert cache.exists()
     assert "Briefing" in cache.read_text()
+
+
+def test_scheduler_runner_watch_runs_topic(memory_store: MemoryStore, entry, tmp_path: Path) -> None:
+    from marius.gateway.scheduler_runner import GatewayScheduler
+    from marius.storage.reminders_store import RemindersStore
+    from marius.storage.watch_store import WatchStore
+
+    watch_store = WatchStore(tmp_path / "watch")
+    topic = watch_store.add(title="Marius", query="Marius updates", cadence="hourly")
+
+    def fake_search(args):
+        from marius.kernel.contracts import ToolResult
+        return ToolResult(
+            tool_call_id="",
+            ok=True,
+            summary="ok",
+            data={"results": [{"title": "A", "url": "https://example.com"}]},
+        )
+
+    runner = GatewayScheduler(
+        agent_name="test",
+        workspace=tmp_path,
+        memory_store=memory_store,
+        entry=entry,
+        active_skills=[],
+        agent_config=SimpleNamespace(scheduler_enabled=False, dream_time="", daily_time=""),
+        reminders_store=RemindersStore(tmp_path / "reminders.json"),
+        get_telegram_chat_id=lambda: None,
+        watch_store=watch_store,
+        watch_search_handler=fake_search,
+    )
+
+    runner._run_scheduled_watch(topic.id)
+
+    assert watch_store.list_reports()[0].topic_id == topic.id
+
+
+def test_scheduler_runner_watch_notifies_only_when_tagged(memory_store: MemoryStore, entry, tmp_path: Path) -> None:
+    from marius.gateway.scheduler_runner import GatewayScheduler
+    from marius.storage.reminders_store import RemindersStore
+    from marius.storage.watch_store import WatchStore
+
+    watch_store = WatchStore(tmp_path / "watch")
+    topic = watch_store.add(title="Marius", query="Marius updates", cadence="hourly", tags=["notify"])
+    sent = []
+
+    def fake_search(args):
+        from marius.kernel.contracts import ToolResult
+        return ToolResult(
+            tool_call_id="",
+            ok=True,
+            summary="ok",
+            data={"results": [{"title": "A", "url": "https://example.com"}]},
+        )
+
+    runner = GatewayScheduler(
+        agent_name="test",
+        workspace=tmp_path,
+        memory_store=memory_store,
+        entry=entry,
+        active_skills=[],
+        agent_config=SimpleNamespace(scheduler_enabled=False, dream_time="", daily_time=""),
+        reminders_store=RemindersStore(tmp_path / "reminders.json"),
+        get_telegram_chat_id=lambda: 123,
+        watch_store=watch_store,
+        watch_search_handler=fake_search,
+    )
+    runner._send_telegram = lambda chat_id, text: sent.append((chat_id, text))
+
+    runner._run_scheduled_watch(topic.id)
+
+    assert sent and sent[0][0] == 123
+
+
+def test_scheduler_runner_watch_honors_notification_settings(memory_store: MemoryStore, entry, tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from marius.gateway.scheduler_runner import GatewayScheduler
+    from marius.storage.reminders_store import RemindersStore
+    from marius.storage.watch_store import WatchStore
+
+    watch_store = WatchStore(tmp_path / "watch")
+    topic = watch_store.add(
+        title="Marius",
+        query="Marius updates",
+        cadence="hourly",
+        settings={"notify": "new", "notify_min_score": 0.99, "summary_enabled": False},
+    )
+    sent = []
+
+    def fake_search(args):
+        from marius.kernel.contracts import ToolResult
+        return ToolResult(
+            tool_call_id="",
+            ok=True,
+            summary="ok",
+            data={"results": [{"title": "A", "url": "https://example.com"}]},
+        )
+
+    runner = GatewayScheduler(
+        agent_name="test",
+        workspace=tmp_path,
+        memory_store=memory_store,
+        entry=entry,
+        active_skills=[],
+        agent_config=SimpleNamespace(scheduler_enabled=False, dream_time="", daily_time=""),
+        reminders_store=RemindersStore(tmp_path / "reminders.json"),
+        get_telegram_chat_id=lambda: 123,
+        watch_store=watch_store,
+        watch_search_handler=fake_search,
+    )
+    runner._send_telegram = lambda chat_id, text: sent.append((chat_id, text))
+
+    runner._run_scheduled_watch(topic.id)
+
+    assert sent == []

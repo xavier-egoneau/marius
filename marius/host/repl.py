@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,9 @@ from marius.provider_config.contracts import ProviderEntry
 from marius.provider_config.registry import PROVIDER_REGISTRY
 from marius.provider_config.store import ProviderStore
 from marius.provider_config.wizard import run_add_provider, run_set_model
+from marius.render.adapter import RenderSurface, render_turn_output
 from marius.storage.memory_store import MemoryStore
+from marius.storage.approval_store import ApprovalStore
 from marius.storage.log_store import log_event, preview
 from marius.storage.project_store import ProjectStore
 from marius.storage.session_corpus import SessionRecord, build_transcript, write_session_file
@@ -508,6 +511,20 @@ def _make_ask_callback():
     return on_ask
 
 
+def _make_approval_recorder(store: ApprovalStore):
+    def recorder(event: dict[str, Any]) -> None:
+        store.record(
+            fingerprint=str(event.get("fingerprint") or ""),
+            tool_name=str(event.get("tool_name") or ""),
+            arguments=dict(event.get("arguments") or {}),
+            reason=str(event.get("reason") or ""),
+            mode=str(event.get("mode") or ""),
+            cwd=str(event.get("cwd") or ""),
+            approved=bool(event.get("approved", False)),
+        )
+    return recorder
+
+
 def _build_tool_router(
     enabled_tools: list[str] | None,
     memory_store: MemoryStore,
@@ -515,6 +532,8 @@ def _build_tool_router(
     *,
     guard: "Any | None" = None,
     entry: "Any | None" = None,
+    active_skills: list[str] | None = None,
+    agent_name: str | None = None,
     permission_mode: str = "limited",
 ) -> ToolRouter:
     """Construit le router depuis la liste des tools actifs de l'agent.
@@ -522,7 +541,14 @@ def _build_tool_router(
     spawn_agent est construit en deux passes : d'abord les entries de base,
     puis spawn_agent y est ajouté avec cette liste comme contexte workers.
     """
-    base_entries = build_tool_entries(enabled_tools, memory_store, cwd)
+    base_entries = build_tool_entries(
+        enabled_tools,
+        memory_store,
+        cwd,
+        entry=entry,
+        active_skills=active_skills,
+        agent_name=agent_name,
+    )
 
     if entry is not None and (enabled_tools is None or "spawn_agent" in enabled_tools):
         spawn_tool = make_spawn_agent_tool(
@@ -542,11 +568,63 @@ _TOOL_VERBS: dict[str, str] = {
     "read_file":   "Lecture",
     "list_dir":    "Exploration",
     "write_file":  "Écriture",
+    "make_dir":    "Dossier",
+    "move_path":   "Déplacement",
+    "explore_tree": "Exploration",
+    "explore_grep": "Recherche",
+    "explore_summary": "Synthèse",
     "run_bash":    "Exécution",
     "web_fetch":   "Fetch",
     "web_search":  "Recherche web",
     "vision":      "Vision",
     "skill_view":  "Skill",
+    "skill_create": "Skill",
+    "skill_list":  "Skills",
+    "skill_reload": "Skills",
+    "host_agent_list": "Agents",
+    "host_agent_save": "Agent",
+    "host_agent_delete": "Agent",
+    "host_telegram_configure": "Telegram",
+    "host_status": "Status",
+    "host_doctor": "Doctor",
+    "host_logs":   "Logs",
+    "host_gateway_restart": "Gateway",
+    "project_list": "Projets",
+    "project_set_active": "Projet",
+    "approval_list": "Approvals",
+    "approval_decide": "Approval",
+    "approval_forget": "Approval",
+    "secret_ref_list": "Secrets",
+    "secret_ref_save": "Secret",
+    "secret_ref_delete": "Secret",
+    "secret_ref_prepare_file": "Secret",
+    "provider_list": "Providers",
+    "provider_save": "Provider",
+    "provider_delete": "Provider",
+    "provider_models": "Models",
+    "dreaming_run": "Dreaming",
+    "daily_digest": "Daily",
+    "self_update_propose": "Update",
+    "self_update_report_bug": "Bug",
+    "self_update_list": "Updates",
+    "self_update_show": "Update",
+    "self_update_apply": "Update",
+    "self_update_rollback": "Rollback",
+    "watch_add": "Veille",
+    "watch_list": "Veille",
+    "watch_remove": "Veille",
+    "watch_run": "Veille",
+    "rag_source_add": "RAG",
+    "rag_source_list": "RAG",
+    "rag_source_sync": "RAG",
+    "rag_search": "RAG",
+    "rag_get": "RAG",
+    "rag_promote_to_memory": "RAG",
+    "rag_checklist_add": "Liste",
+    "caldav_doctor": "Calendar",
+    "caldav_agenda": "Calendar",
+    "caldav_maintenance": "Calendar",
+    "sentinelle_scan": "Sentinelle",
     "spawn_agent": "Workers",
 }
 
@@ -554,11 +632,58 @@ _TOOL_TARGET_KEYS: dict[str, str] = {
     "read_file":  "path",
     "list_dir":   "path",
     "write_file": "path",
+    "make_dir":   "path",
+    "move_path":  "destination",
+    "explore_tree": "path",
+    "explore_grep": "pattern",
+    "explore_summary": "path",
     "run_bash":   "command",
     "web_fetch":  "url",
     "web_search": "query",
     "vision":     "path",
     "skill_view": "name",
+    "skill_create": "name",
+    "host_agent_list": "agent",
+    "host_agent_save": "name",
+    "host_agent_delete": "name",
+    "host_telegram_configure": "agent",
+    "host_status": "agent",
+    "host_doctor": "agent",
+    "host_logs": "event",
+    "host_gateway_restart": "agent",
+    "project_list": "limit",
+    "project_set_active": "path",
+    "approval_list": "limit",
+    "approval_decide": "id",
+    "approval_forget": "id",
+    "secret_ref_list": "name",
+    "secret_ref_save": "name",
+    "secret_ref_delete": "name",
+    "secret_ref_prepare_file": "name",
+    "provider_list": "name",
+    "provider_save": "name",
+    "provider_delete": "id",
+    "provider_models": "name",
+    "dreaming_run": "archive_sessions",
+    "daily_digest": "project_root",
+    "self_update_propose": "title",
+    "self_update_report_bug": "title",
+    "self_update_list": "kind",
+    "self_update_show": "id",
+    "self_update_apply": "id",
+    "self_update_rollback": "id",
+    "watch_add": "title",
+    "watch_list": "include_disabled",
+    "watch_remove": "id",
+    "watch_run": "id",
+    "rag_source_add": "name",
+    "rag_source_sync": "source_id",
+    "rag_search": "query",
+    "rag_get": "chunk_id",
+    "rag_promote_to_memory": "chunk_id",
+    "rag_checklist_add": "list_name",
+    "caldav_agenda": "days",
+    "caldav_maintenance": "operation",
 }
 
 
@@ -569,6 +694,21 @@ def _tool_verb(call: ToolCall) -> str:
 def _tool_target(call: ToolCall) -> str:
     key = _TOOL_TARGET_KEYS.get(call.name, "")
     return str(call.arguments.get(key, "")) if key else ""
+
+
+def _ensure_search_backend(enabled_tools: list[str] | None) -> None:
+    if enabled_tools is not None and "web_search" not in enabled_tools:
+        return
+    from marius.services.searxng import ensure_searxng_started
+    result = ensure_searxng_started()
+    log_event("searxng_startup", {
+        "agent": "repl",
+        "ok": result.ok,
+        "status": result.status,
+        "url": result.url,
+        "compose_file": result.compose_file,
+        "detail": result.detail,
+    })
 
 
 def run_repl(
@@ -587,19 +727,26 @@ def run_repl(
     store = store or ProviderStore()
     memory_store = memory_store if memory_store is not None else MemoryStore()
     project_store = project_store if project_store is not None else ProjectStore()
+    approval_store = ApprovalStore()
     cwd = Path.cwd()
     window = _resolve_window(entry)
     adapter = make_adapter(entry)
     enabled_tools = agent_config.tools if agent_config is not None else None
+    active_skills = list(agent_config.skills) if agent_config is not None else None
+    _ensure_search_backend(enabled_tools)
     guard = PermissionGuard(
         mode=permission_mode,
         cwd=cwd,
         on_ask=_make_ask_callback(),
+        approval_lookup=approval_store.lookup,
+        approval_recorder=_make_approval_recorder(approval_store),
     )
     tool_router = _build_tool_router(
         enabled_tools, memory_store, cwd,
         guard=guard,
         entry=entry,
+        active_skills=active_skills,
+        agent_name=agent_config.name if agent_config is not None else None,
         permission_mode=permission_mode,
     )
     history = history if history is not None else InMemoryVisibleHistoryStore()
@@ -624,8 +771,6 @@ def run_repl(
     active_memories = memory_store.get_active_context(cwd)
     memory_block = format_memory_block(active_memories)
 
-    active_skills = list(agent_config.skills) if agent_config is not None else None
-
     # Commandes REPL déclarées par les skills actifs
     skill_commands: dict[str, SkillCommand] = {}
     if active_skills:
@@ -645,8 +790,8 @@ def run_repl(
         compaction_config=CompactionConfig(context_window_tokens=window),
     )
 
-    # Enregistre le projet actif
-    project_store.record_open(cwd)
+    # Enregistre le projet local comme projet actif explicite pour cette session.
+    project_store.set_active(cwd)
     opened_at = datetime.now(timezone.utc).isoformat()
 
     _welcome(entry, loaded_context=loaded_context)
@@ -961,6 +1106,12 @@ def _run_turn(
 
     if turn_output.assistant_message:
         assistant_content = turn_output.assistant_message.content
+        rendered_output = render_turn_output(
+            replace(turn_output.assistant_message, content="") if streaming_started["v"] else turn_output.assistant_message,
+            tool_results=turn_output.tool_results,
+            compaction_notice=turn_output.compaction_notice,
+            surface=RenderSurface.CLI,
+        )
         event_name = "turn_empty_response" if not assistant_content.strip() else "turn_done"
         log_event(event_name, {
             "session_id": session_id,
@@ -976,17 +1127,25 @@ def _run_turn(
         if streaming_started["v"]:
             # Les tokens ont déjà été affichés en streaming — juste un saut de ligne
             _console.print("\n")
+            if rendered_output:
+                _console.print(Markdown(rendered_output))
+                _console.print()
         else:
             # Pas de streaming (pas de on_text_delta ou provider sans stream())
             _console.print()
-            _console.print(Markdown(turn_output.assistant_message.content))
+            _console.print(Markdown(rendered_output))
             _console.print()
         if history is not None:
+            visible_content = rendered_output
+            if streaming_started["v"]:
+                visible_content = assistant_content
+                if rendered_output:
+                    visible_content = f"{assistant_content}\n\n{rendered_output}".strip()
             history.append(
                 session_id,
                 VisibleHistoryEntry(
                     role="assistant",
-                    content=assistant_content,
+                    content=visible_content,
                 ),
             )
 

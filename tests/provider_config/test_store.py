@@ -71,6 +71,23 @@ def test_update_unknown_id_returns_false(tmp_path):
     assert len(store.load()) == 1
 
 
+def test_delete_existing_provider(tmp_path):
+    store = ProviderStore(path=tmp_path / "providers.json")
+    entry = _entry("openai-1")
+    store.add(entry)
+
+    assert store.delete(entry.id) is True
+    assert store.load() == []
+
+
+def test_delete_unknown_provider_returns_false(tmp_path):
+    store = ProviderStore(path=tmp_path / "providers.json")
+    store.add(_entry("openai-1"))
+
+    assert store.delete("missing") is False
+    assert len(store.load()) == 1
+
+
 def test_roundtrip_all_fields(tmp_path):
     store = ProviderStore(path=tmp_path / "providers.json")
     e = ProviderEntry(

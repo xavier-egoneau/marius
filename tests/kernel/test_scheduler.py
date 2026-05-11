@@ -11,7 +11,7 @@ import pytest
 
 from marius.kernel.scheduler import (
     JobStore, Scheduler, ScheduledJob,
-    ensure_jobs, next_run_for_time, validate_hhmm, _advance_daily,
+    cadence_to_seconds, ensure_jobs, ensure_watch_jobs, next_run_for_time, validate_hhmm, _advance_daily,
 )
 
 
@@ -134,6 +134,16 @@ def test_scheduler_ignores_unknown_handler(store: JobStore) -> None:
     sched.tick()  # ne doit pas lever
 
 
+def test_scheduler_calls_before_tick(store: JobStore) -> None:
+    calls = []
+    store.upsert(ScheduledJob(id="j1", name="dreaming", run_at=_past(), interval_seconds=86400))
+    sched = Scheduler(store, {"dreaming": lambda: None}, before_tick=lambda: calls.append(1))
+
+    sched.tick()
+
+    assert calls == [1]
+
+
 # ── ensure_jobs ───────────────────────────────────────────────────────────────
 
 
@@ -155,6 +165,30 @@ def test_ensure_jobs_skips_empty_time(store: JobStore) -> None:
     names = {j.name for j in store.list_all()}
     assert "dreaming" not in names
     assert "daily" in names
+
+
+def test_cadence_to_seconds() -> None:
+    assert cadence_to_seconds("manual") is None
+    assert cadence_to_seconds("hourly") == 3600
+    assert cadence_to_seconds("daily") == 86400
+    assert cadence_to_seconds("15m") == 900
+    assert cadence_to_seconds("2h") == 7200
+    assert cadence_to_seconds("3d") == 259200
+
+
+def test_ensure_watch_jobs_creates_and_removes(store: JobStore) -> None:
+    from types import SimpleNamespace
+
+    ensure_watch_jobs(store, [
+        SimpleNamespace(id="topic-a", cadence="hourly", enabled=True),
+        SimpleNamespace(id="topic-b", cadence="manual", enabled=True),
+    ])
+    jobs = store.list_all()
+    assert {job.id for job in jobs} == {"watch:topic-a"}
+    assert jobs[0].interval_seconds == 3600
+
+    ensure_watch_jobs(store, [SimpleNamespace(id="topic-a", cadence="manual", enabled=True)])
+    assert store.list_all() == []
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

@@ -47,17 +47,77 @@ _TOOL_VERBS: dict[str, str] = {
     "read_file":  "Lecture",
     "list_dir":   "Exploration",
     "write_file": "Écriture",
+    "make_dir":   "Dossier",
+    "move_path":  "Déplacement",
+    "explore_tree": "Exploration",
+    "explore_grep": "Recherche",
+    "explore_summary": "Synthèse",
     "run_bash":   "Exécution",
     "web_fetch":  "Fetch",
     "web_search": "Recherche web",
     "vision":     "Vision",
     "skill_view": "Skill",
+    "skill_create": "Skill",
+    "skill_list": "Skills",
+    "skill_reload": "Skills",
+    "host_agent_list": "Agents",
+    "host_agent_save": "Agent",
+    "host_agent_delete": "Agent",
+    "host_telegram_configure": "Telegram",
+    "host_status": "Status",
+    "host_doctor": "Doctor",
+    "host_logs": "Logs",
+    "host_gateway_restart": "Gateway",
+    "project_list": "Projets",
+    "project_set_active": "Projet",
+    "approval_list": "Approvals",
+    "approval_decide": "Approval",
+    "approval_forget": "Approval",
+    "secret_ref_list": "Secrets",
+    "secret_ref_save": "Secret",
+    "secret_ref_delete": "Secret",
+    "secret_ref_prepare_file": "Secret",
+    "provider_list": "Providers",
+    "provider_save": "Provider",
+    "provider_delete": "Provider",
+    "provider_models": "Models",
+    "dreaming_run": "Dreaming",
+    "daily_digest": "Daily",
+    "self_update_propose": "Update",
+    "self_update_report_bug": "Bug",
+    "self_update_list": "Updates",
+    "self_update_show": "Update",
+    "self_update_apply": "Update",
+    "self_update_rollback": "Rollback",
+    "watch_add": "Veille",
+    "watch_list": "Veille",
+    "watch_remove": "Veille",
+    "watch_run": "Veille",
     "open_marius_web": "Web",
+    "rag_source_add": "RAG",
+    "rag_source_list": "RAG",
+    "rag_source_sync": "RAG",
+    "rag_search": "RAG",
+    "rag_get": "RAG",
+    "rag_promote_to_memory": "RAG",
+    "rag_checklist_add": "Liste",
+    "caldav_doctor": "Calendar",
+    "caldav_agenda": "Calendar",
+    "caldav_maintenance": "Calendar",
+    "sentinelle_scan": "Sentinelle",
 }
 
 _GATEWAY_COMMANDS: dict[str, str] = {
     "/stop":     "interrompre le tour en cours",
     "/new":      "nouvelle conversation",
+    "/remember": "mémoriser un fait",
+    "/memories": "lister les souvenirs",
+    "/forget":   "supprimer un souvenir",
+    "/doctor":   "diagnostic de l'installation",
+    "/dream":    "consolider la mémoire",
+    "/daily":    "briefing du jour",
+    "/context":  "afficher l'état du contexte",
+    "/compact":  "compacter le contexte",
     "/shutdown": "arrêter le gateway",
     "/help":     "afficher les commandes",
     "/exit":     "se déconnecter (gateway reste actif)",
@@ -248,7 +308,12 @@ def connect_and_run(agent_name: str) -> None:
                     # Status response will be received in next recv_turn
                     _recv_turn(reader, conn)
                     continue
-                _console.print(f"[dim]Commande inconnue : {cmd}. /help pour la liste.[/]\n")
+                _send(conn, InputEvent(text=message))
+                try:
+                    _recv_turn(reader, conn)
+                except KeyboardInterrupt:
+                    _send(conn, CommandEvent(cmd="/stop"))
+                    _recv_turn(reader, conn)
                 continue
 
             _send(conn, InputEvent(text=message))

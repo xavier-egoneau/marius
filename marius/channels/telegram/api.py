@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+from html import escape
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlencode
@@ -96,8 +97,9 @@ def set_my_commands(token: str, commands: list[dict[str, str]]) -> bool:
 
 def _md_to_html(text: str) -> tuple[str, str]:
     """Convertit Markdown basique en HTML Telegram. Retourne (texte, parse_mode)."""
-    # Code blocks avant le reste (évite les conversions internes)
+    # Code inline/blocs avant le reste pour éviter les conversions internes.
     blocks: list[str] = []
+    inlines: list[str] = []
 
     def _save_block(m: re.Match) -> str:
         blocks.append(m.group(1))
@@ -105,19 +107,14 @@ def _md_to_html(text: str) -> tuple[str, str]:
 
     text = re.sub(r"```[^\n]*\n(.*?)```", _save_block, text, flags=re.DOTALL)
 
-    # Escape HTML
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    def _save_inline(m: re.Match) -> str:
+        inlines.append(m.group(1))
+        return f"\x00INLINE{len(inlines) - 1}\x00"
 
-    # Restaure les blocs de code (avec escape interne)
-    def _restore_block(m: re.Match) -> str:
-        idx = int(m.group(1))
-        code = blocks[idx].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return f"<pre>{code}</pre>"
+    text = re.sub(r"`([^`\n]+)`", _save_inline, text)
 
-    text = re.sub(r"\x00CODE(\d+)\x00", _restore_block, text)
-
-    # Inline code
-    text = re.sub(r"`([^`\n]+)`", lambda m: f"<code>{m.group(1)}</code>", text)
+    # Escape HTML hors code.
+    text = _html_escape(text)
 
     # Headers → bold
     text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
@@ -128,27 +125,86 @@ def _md_to_html(text: str) -> tuple[str, str]:
     # Italic (seul)
     text = re.sub(r"\*([^*\n]+)\*", r"<i>\1</i>", text)
 
+    # Restaure les blocs de code (avec escape interne)
+    def _restore_block(m: re.Match) -> str:
+        idx = int(m.group(1))
+        code = _html_escape(blocks[idx])
+        return f"<pre>{code}</pre>"
+
+    text = re.sub(r"\x00CODE(\d+)\x00", _restore_block, text)
+
+    def _restore_inline(m: re.Match) -> str:
+        idx = int(m.group(1))
+        return f"<code>{_html_escape(inlines[idx])}</code>"
+
+    text = re.sub(r"\x00INLINE(\d+)\x00", _restore_inline, text)
     return text, "HTML"
 
 
 def _split_message(text: str, limit: int = 4000) -> list[str]:
-    """Découpe un texte en chunks ≤ limit caractères, sur des lignes entières si possible."""
+    """Découpe un texte en chunks ≤ limit caractères, sans casser les fences Markdown."""
     if len(text) <= limit:
         return [text]
     chunks: list[str] = []
     current: list[str] = []
     length = 0
+    in_code = False
+    code_lang = ""
+
+    def _open_fence() -> str:
+        return f"```{code_lang}\n" if code_lang else "```\n"
+
+    def _flush_preserving_code() -> None:
+        nonlocal current, length
+        if not current:
+            return
+        if in_code:
+            current.append("```\n")
+        chunks.append("".join(current))
+        if in_code:
+            current = [_open_fence()]
+            length = len(current[0])
+        else:
+            current = []
+            length = 0
+
+    def _add_line(line: str) -> None:
+        nonlocal current, length
+        rest = line
+        while rest:
+            reserve = len("```\n") if in_code else 0
+            if length + len(rest) + reserve <= limit:
+                current.append(rest)
+                length += len(rest)
+                return
+            if current:
+                room = limit - length - reserve
+                if room > 0:
+                    current.append(rest[:room])
+                    length += room
+                    rest = rest[room:]
+                _flush_preserving_code()
+                continue
+            max_len = max(1, limit - reserve)
+            chunks.append(rest[:max_len])
+            rest = rest[max_len:]
+
     for line in text.splitlines(keepends=True):
-        # Ligne seule trop longue : forcer la coupure en sous-chunks
-        if not current and len(line) > limit:
-            for i in range(0, len(line), limit):
-                chunks.append(line[i:i + limit])
-            continue
-        if length + len(line) > limit and current:
-            chunks.append("".join(current))
-            current, length = [], 0
-        current.append(line)
-        length += len(line)
+        fence = re.match(r"^\s*```([^\n`]*)\s*$", line.rstrip("\r\n"))
+        _add_line(line)
+        if fence:
+            if in_code:
+                in_code = False
+                code_lang = ""
+            else:
+                in_code = True
+                code_lang = fence.group(1).strip()
     if current:
+        if in_code:
+            current.append("```\n")
         chunks.append("".join(current))
     return chunks
+
+
+def _html_escape(text: str) -> str:
+    return escape(text, quote=True)

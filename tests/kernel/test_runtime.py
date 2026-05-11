@@ -110,7 +110,7 @@ def test_runtime_orchestrator_reinjects_previous_tool_results_into_context() -> 
         )
     )
 
-    assert "pytest: 15 passed" in [message.content for message in output.context_messages]
+    assert any("pytest: 15 passed" in message.content for message in output.context_messages)
 
 
 def test_runtime_orchestrator_calls_provider_and_finishes_turn() -> None:

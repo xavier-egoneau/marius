@@ -23,6 +23,13 @@ class ProjectEntry:
     session_count: int
 
 
+@dataclass
+class ActiveProject:
+    path: str
+    name: str
+    set_at: str
+
+
 class ProjectStore:
     """Registre JSON thread-safe des projets récemment ouverts.
 
@@ -30,8 +37,9 @@ class ProjectStore:
     Source de vérité pour le dreaming : quels projets inspecter.
     """
 
-    def __init__(self, store_path: Path | None = None) -> None:
+    def __init__(self, store_path: Path | None = None, active_path: Path | None = None) -> None:
         self._path = Path(store_path) if store_path else _MARIUS_HOME / "projects.json"
+        self._active_path = Path(active_path) if active_path else _MARIUS_HOME / "active_project.json"
         self._lock = threading.Lock()
 
     def record_open(self, cwd: Path) -> ProjectEntry:
@@ -98,6 +106,41 @@ class ProjectStore:
                     session_count=e.get("session_count", 0),
                 )
         return None
+
+    def set_active(self, project_path: Path) -> ActiveProject:
+        """Définit le projet actif explicite et l'ajoute aux projets connus."""
+        resolved = project_path.expanduser().resolve()
+        entry = self.record_open(resolved)
+        active = ActiveProject(
+            path=entry.path,
+            name=entry.name,
+            set_at=datetime.now(timezone.utc).isoformat(),
+        )
+        with self._lock:
+            self._active_path.parent.mkdir(parents=True, exist_ok=True)
+            self._active_path.write_text(
+                json.dumps(asdict(active), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        return active
+
+    def get_active(self) -> ActiveProject | None:
+        """Retourne le projet actif explicite, ou None s'il n'est pas défini."""
+        with self._lock:
+            if not self._active_path.exists():
+                return None
+            try:
+                raw = json.loads(self._active_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return None
+        path = str(raw.get("path") or "").strip()
+        if not path:
+            return None
+        return ActiveProject(
+            path=path,
+            name=str(raw.get("name") or Path(path).name),
+            set_at=str(raw.get("set_at") or ""),
+        )
 
     def _load_raw(self) -> list[dict]:
         if not self._path.exists():

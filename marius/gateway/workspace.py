@@ -29,6 +29,10 @@ def pid_path(agent_name: str) -> Path:
     return _RUN_DIR / f"{agent_name}.pid"
 
 
+def web_pid_path(agent_name: str, port: int) -> Path:
+    return _RUN_DIR / f"web_{agent_name}_{int(port)}.pid"
+
+
 def jobs_path(agent_name: str) -> Path:
     return workspace_dir(agent_name) / "jobs.json"
 

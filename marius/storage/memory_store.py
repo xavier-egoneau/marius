@@ -244,6 +244,19 @@ class MemoryStore:
                 return []
             return [_to_entry(r) for r in rows]
 
+    def get(self, memory_id: int) -> MemoryEntry | None:
+        """Retourne un souvenir par identifiant, ou None."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT memory_id, content, scope, project_path, category, tags, created_at
+                FROM memories
+                WHERE memory_id = ?
+                """,
+                (memory_id,),
+            ).fetchone()
+        return _to_entry(row) if row is not None else None
+
     def list(
         self,
         *,

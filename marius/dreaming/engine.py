@@ -27,6 +27,7 @@ def run_dreaming(
     sessions_dir: Path | None = None,
     dreams_dir: Path | None = None,
     skills_dir: Path | None = None,
+    watch_dir: Path | None = None,
     archive_sessions: bool = True,
 ) -> DreamingResult:
     """Cycle complet de dreaming.
@@ -43,6 +44,7 @@ def run_dreaming(
         project_root=project_root,
         sessions_dir=sessions_dir,
         skills_dir=skills_dir,
+        watch_dir=watch_dir,
     )
 
     if ctx.is_empty:
@@ -94,6 +96,7 @@ def run_daily(
     project_root: Path | None = None,
     dreams_dir: Path | None = None,
     skills_dir: Path | None = None,
+    watch_dir: Path | None = None,
 ) -> str:
     """Génère le briefing quotidien en Markdown.
 
@@ -106,6 +109,7 @@ def run_daily(
         active_skills=active_skills,
         project_root=project_root,
         skills_dir=skills_dir,
+        watch_dir=watch_dir,
     )
 
     if not ctx.memories and not ctx.daily_contracts:

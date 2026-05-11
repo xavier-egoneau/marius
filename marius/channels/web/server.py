@@ -69,6 +69,7 @@ class WebServer:
         # Socket gateway
         self._sock: socket.socket | None = None
         self._send_lock = threading.Lock()
+        self._connect_lock = threading.Lock()
         self._buf = bytearray()
 
         # Session active (tab qui a envoyé le dernier message)
@@ -101,16 +102,22 @@ class WebServer:
 
     def connect(self) -> None:
         """Ouvre la connexion persistante au gateway et démarre le reader."""
-        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._sock.connect(str(self.socket_path))
-        welcome_line = self._read_line()
-        if welcome_line:
-            self._welcome = decode(welcome_line)
-        threading.Thread(
-            target=self._reader_loop,
-            daemon=True,
-            name="web-socket-reader",
-        ).start()
+        with self._connect_lock:
+            if self._sock is not None:
+                return
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(str(self.socket_path))
+            self._sock = sock
+            self._buf.clear()
+            welcome_line = self._read_line(sock)
+            if welcome_line:
+                self._welcome = decode(welcome_line)
+            threading.Thread(
+                target=self._reader_loop,
+                args=(sock,),
+                daemon=True,
+                name="web-socket-reader",
+            ).start()
 
     # ── envoi vers gateway ────────────────────────────────────────────────────
 
@@ -120,7 +127,8 @@ class WebServer:
         self._save_history()
         self._current_assistant = ""
         with self._send_lock:
-            assert self._sock
+            self._ensure_connected()
+            assert self._sock is not None
             self._sock.sendall(encode(InputEvent(text=text)))
 
     def send_command(self, cmd: str) -> None:
@@ -129,7 +137,8 @@ class WebServer:
             self._current_assistant = ""
             self._save_history()
         with self._send_lock:
-            assert self._sock
+            self._ensure_connected()
+            assert self._sock is not None
             self._sock.sendall(encode(CommandEvent(cmd=cmd)))
 
     def approve_permission(self, request_id: str, approved: bool) -> None:
@@ -154,11 +163,15 @@ class WebServer:
 
     # ── reader loop ───────────────────────────────────────────────────────────
 
-    def _reader_loop(self) -> None:
+    def _reader_loop(self, sock: socket.socket) -> None:
         """Thread daemon — lit les events gateway et les route vers les queues SSE."""
         while True:
-            line = self._read_line()
+            line = self._read_line(sock)
             if line is None:
+                with self._connect_lock:
+                    if self._sock is sock:
+                        self._sock = None
+                        self._buf.clear()
                 self._broadcast({"type": "disconnected", "reason": "gateway_closed"})
                 break
             self._dispatch(line)
@@ -203,7 +216,8 @@ class WebServer:
             with self._perms_lock:
                 self._pending_perms.pop(req_id, None)
             with self._send_lock:
-                assert self._sock
+                self._ensure_connected()
+                assert self._sock is not None
                 self._sock.sendall(encode(
                     PermissionResponseEvent(request_id=req_id, approved=result[0])
                 ))
@@ -240,11 +254,10 @@ class WebServer:
             except queue.Full:
                 pass
 
-    def _read_line(self) -> str | None:
-        assert self._sock
+    def _read_line(self, sock: socket.socket) -> str | None:
         while b"\n" not in self._buf:
             try:
-                chunk = self._sock.recv(4096)
+                chunk = sock.recv(4096)
             except OSError:
                 return None
             if not chunk:
@@ -255,11 +268,20 @@ class WebServer:
         del self._buf[:idx + 1]
         return line
 
+    def _ensure_connected(self) -> None:
+        if self._sock is None:
+            self.connect()
+
     # ── HTTP server ───────────────────────────────────────────────────────────
 
+    def bind(self) -> None:
+        if self._httpd is None:
+            handler = _make_handler(self)
+            self._httpd = ThreadingHTTPServer((self.host, self.port), handler)
+
     def serve_forever(self) -> None:
-        handler = _make_handler(self)
-        self._httpd = ThreadingHTTPServer((self.host, self.port), handler)
+        self.bind()
+        assert self._httpd is not None
         self._httpd.serve_forever()
 
     def shutdown(self) -> None:

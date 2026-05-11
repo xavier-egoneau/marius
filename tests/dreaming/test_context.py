@@ -8,6 +8,7 @@ import pytest
 
 from marius.dreaming.context import DreamingContext, build_dreaming_context
 from marius.storage.memory_store import MemoryStore
+from marius.storage.watch_store import WatchStore
 
 
 @pytest.fixture()
@@ -71,3 +72,16 @@ def test_skill_contracts(store: MemoryStore, tmp_path: Path) -> None:
     assert "dreaming" in ctx.dream_contracts[0][1]
     assert len(ctx.daily_contracts) == 1
     assert "daily" in ctx.daily_contracts[0][1]
+
+
+def test_watch_reports_included(store: MemoryStore, tmp_path: Path) -> None:
+    watch_dir = tmp_path / "watch"
+    watch_store = WatchStore(watch_dir)
+    topic = watch_store.add(title="Marius", query="Marius updates")
+    watch_store.save_report(topic, [{"title": "Release", "url": "https://example.com"}])
+
+    ctx = build_dreaming_context(store, watch_dir=watch_dir)
+
+    assert not ctx.is_empty
+    assert len(ctx.watch_reports) == 1
+    assert ctx.watch_reports[0].title == "Marius"

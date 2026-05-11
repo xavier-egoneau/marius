@@ -18,6 +18,7 @@ import signal
 import socket
 import sys
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,9 @@ from marius.kernel.session_observations import format_session_observations, obse
 from marius.kernel.tool_router import ToolRouter
 from marius.provider_config.contracts import ProviderEntry
 from marius.provider_config.registry import PROVIDER_REGISTRY
+from marius.render.adapter import RenderSurface, render_turn_output
 from marius.storage.memory_store import MemoryStore
+from marius.storage.approval_store import ApprovalStore
 from marius.storage.log_store import log_event, preview
 from marius.storage.session_corpus import SessionRecord, write_session_file
 from marius.tools.factory import build_tool_entries
@@ -89,6 +92,7 @@ class GatewayServer:
         ws = ensure_workspace(agent_name)
         self.workspace = ws
         self.memory_store = MemoryStore(memory_db_path(agent_name))
+        self.approval_store = ApprovalStore()
 
         from marius.storage.reminders_store import RemindersStore
         self.reminders_store = RemindersStore(reminders_path(agent_name))
@@ -117,8 +121,11 @@ class GatewayServer:
             mode=permission_mode,
             cwd=ws,
             on_ask=self._on_ask,
+            approval_lookup=self.approval_store.lookup,
+            approval_recorder=self._record_approval,
         )
         enabled_tools = list(agent_config.tools) if agent_config else None
+        self._ensure_search_backend(enabled_tools)
         self.tool_router = self._build_tool_router(enabled_tools, guard, ws, entry, permission_mode)
 
         self.session = SessionRuntime(
@@ -150,6 +157,7 @@ class GatewayServer:
 
         # Scheduler + reminders — délégués à GatewayScheduler
         from .scheduler_runner import GatewayScheduler
+        from marius.tools.watch import make_provider_watch_summarizer
         self._scheduler_runner = GatewayScheduler(
             agent_name=agent_name,
             workspace=ws,
@@ -159,6 +167,7 @@ class GatewayServer:
             agent_config=agent_config,
             reminders_store=self.reminders_store,
             get_telegram_chat_id=lambda: self.telegram_chat_id,
+            watch_summarizer=make_provider_watch_summarizer(entry),
         )
 
     # ── Telegram channel ──────────────────────────────────────────────────────
@@ -182,7 +191,7 @@ class GatewayServer:
     def run_turn_for_telegram(self, text: str) -> str:
         """Exécute un tour depuis Telegram. Bloquant, sérialisé via turn_lock."""
         from marius.kernel.contracts import Message, Role
-        text = self.resolve_skill_command(text)
+        text = text.strip()
         cancel_event = threading.Event()
         response_parts: list[str] = []
 
@@ -218,6 +227,19 @@ class GatewayServer:
         from marius.kernel.runtime import TurnInput
         with self._turn_lock:
             try:
+                command_response = self._handle_builtin_command(text)
+                if command_response is not None:
+                    log_event("turn_done", {
+                        "session_id": self.agent_name, "channel": "telegram",
+                        "model": self.entry.model,
+                        "tool_results": 0,
+                        "assistant_preview": preview(command_response),
+                        "command": text.split(maxsplit=1)[0].lower() if text else "",
+                    })
+                    return command_response
+
+                text = self.resolve_skill_command(text)
+                user_message.content = text
                 output = self.orchestrator.run_turn(
                     TurnInput(
                         session=self.session,
@@ -229,6 +251,17 @@ class GatewayServer:
                     on_tool_result=on_tool_result,
                 )
                 response = "".join(response_parts)
+                if output.assistant_message is not None:
+                    rendered = render_turn_output(
+                        _without_content(output.assistant_message) if response else output.assistant_message,
+                        tool_results=output.tool_results,
+                        compaction_notice=output.compaction_notice,
+                        surface=RenderSurface.TELEGRAM,
+                    )
+                    if response and rendered:
+                        response = f"{response}\n\n{rendered}"
+                    elif rendered:
+                        response = rendered
                 log_event("turn_done", {
                     "session_id": self.agent_name, "channel": "telegram",
                     "model": self.entry.model,
@@ -264,6 +297,143 @@ class GatewayServer:
             return text
         arg = parts[1] if len(parts) > 1 else ""
         return f"{skill_cmd.prompt}\n\n{arg}".strip() if skill_cmd.prompt else arg
+
+    def _handle_builtin_command(self, text: str) -> str | None:
+        if not text.startswith("/"):
+            return None
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd in {"/new", "/stop"}:
+            return None
+        if cmd == "/help":
+            return self._command_help()
+        if cmd == "/remember":
+            return self._command_remember(arg)
+        if cmd == "/memories":
+            return self._command_memories()
+        if cmd == "/forget":
+            return self._command_forget(arg)
+        if cmd == "/doctor":
+            return self._command_doctor()
+        if cmd == "/dream":
+            return self._command_dream()
+        if cmd == "/daily":
+            return self._command_daily()
+        if cmd == "/context":
+            return self._command_context()
+        if cmd == "/compact":
+            return self._command_compact()
+        if cmd.lstrip("/") in self.skill_commands:
+            return None
+        return f"Je n’ai pas de commande `{cmd}` ici."
+
+    def _command_help(self) -> str:
+        rows = [
+            ("/help", "Afficher les commandes"),
+            ("/new", "Nouvelle conversation"),
+            ("/stop", "Interrompre le tour en cours"),
+            ("/remember <texte>", "Mémoriser un fait"),
+            ("/memories", "Lister les souvenirs"),
+            ("/forget <id>", "Supprimer un souvenir"),
+            ("/doctor", "Diagnostic de l'installation"),
+            ("/dream", "Consolider la mémoire"),
+            ("/daily", "Générer le briefing du jour"),
+            ("/context", "Afficher l'état du contexte"),
+            ("/compact", "Compacter le contexte court"),
+        ]
+        lines = ["# Commandes disponibles", ""]
+        lines.extend(f"- `{name}` — {desc}" for name, desc in rows)
+        if self.skill_commands:
+            lines.extend(["", "## Commandes skills", ""])
+            for command in self.skill_commands.values():
+                lines.append(f"- `/{command.name}` — {command.description} [{command.skill_name}]")
+        return "\n".join(lines)
+
+    def _command_remember(self, text: str) -> str:
+        if not text:
+            return "Usage : `/remember <texte>`"
+        memory_id = self.memory_store.add(text)
+        return f"Souvenir #{memory_id} enregistré."
+
+    def _command_memories(self) -> str:
+        entries = self.memory_store.list(limit=30)
+        if not entries:
+            return "Aucun souvenir enregistré."
+        lines = [f"# Souvenirs ({len(entries)})", ""]
+        for entry in entries:
+            tags = f" `{entry.tags}`" if entry.tags else ""
+            scope = f" ({entry.scope})" if entry.scope != "global" else ""
+            lines.append(f"- #{entry.id}{scope}{tags} — {entry.content}")
+        return "\n".join(lines)
+
+    def _command_forget(self, raw_id: str) -> str:
+        if not raw_id.lstrip("#").isdigit():
+            return "Usage : `/forget <id>`"
+        memory_id = int(raw_id.lstrip("#"))
+        if self.memory_store.remove(memory_id):
+            return f"Souvenir #{memory_id} supprimé."
+        return f"Souvenir #{memory_id} introuvable."
+
+    def _command_doctor(self) -> str:
+        from marius.config.doctor import format_report_text, run_doctor
+        report, _errors = format_report_text(run_doctor(self.agent_name))
+        return f"```text\n{report.strip()}\n```"
+
+    def _command_dream(self) -> str:
+        from marius.tools.dreaming import make_dreaming_tools
+        tools = make_dreaming_tools(
+            memory_store=self.memory_store,
+            entry=self.entry,
+            active_skills=self.active_skills or None,
+            project_root=self.workspace,
+            watch_dir=self._watch_dir_for_commands(),
+        )
+        result = tools["dreaming_run"].handler({})
+        return result.summary if result.ok else f"Dreaming échoué : {result.summary}"
+
+    def _command_daily(self) -> str:
+        from marius.tools.dreaming import make_dreaming_tools
+        tools = make_dreaming_tools(
+            memory_store=self.memory_store,
+            entry=self.entry,
+            active_skills=self.active_skills or None,
+            project_root=self.workspace,
+            watch_dir=self._watch_dir_for_commands(),
+        )
+        result = tools["daily_digest"].handler({})
+        markdown = str(result.data.get("markdown") or result.summary)
+        return markdown if result.ok else f"Daily échoué :\n\n{markdown}"
+
+    def _command_context(self) -> str:
+        from marius.kernel.compaction import compaction_level, estimate_tokens_from_messages
+        messages = self.session.internal_messages(include_summary=True, include_tool_results=True)
+        tokens = estimate_tokens_from_messages(messages)
+        window = resolve_context_window(self.entry.model, "static")
+        level = compaction_level(tokens, CompactionConfig(context_window_tokens=window))
+        pct = (tokens / window * 100) if window else 0
+        return (
+            "# Contexte\n\n"
+            f"- tours : {len(self.session.state.turns)}\n"
+            f"- messages : {len(messages)}\n"
+            f"- tokens estimés : {tokens:,} / {window:,} ({pct:.1f}%)\n"
+            f"- niveau : `{level.value}`"
+        )
+
+    def _command_compact(self) -> str:
+        kept = self.orchestrator.compaction_config.keep_recent_turns
+        before = len(self.session.state.turns)
+        if before > kept:
+            self.session.state.turns = self.session.state.turns[-kept:]
+        after = len(self.session.state.turns)
+        return f"Compaction effectuée : {before - after} tour(s) supprimé(s), {after} conservé(s)."
+
+    def _watch_dir_for_commands(self) -> Path | None:
+        runner = getattr(self, "_scheduler_runner", None)
+        store = getattr(runner, "watch_store", None)
+        root = getattr(store, "root", None)
+        return Path(root) if root else None
 
     def list_models(self) -> list[str]:
         """Retourne les modèles disponibles pour le provider actuel."""
@@ -318,6 +488,17 @@ class GatewayServer:
             self._pending_perms.pop(req_id, None)
         return result[0]
 
+    def _record_approval(self, event: dict[str, Any]) -> None:
+        self.approval_store.record(
+            fingerprint=str(event.get("fingerprint") or ""),
+            tool_name=str(event.get("tool_name") or ""),
+            arguments=dict(event.get("arguments") or {}),
+            reason=str(event.get("reason") or ""),
+            mode=str(event.get("mode") or ""),
+            cwd=str(event.get("cwd") or ""),
+            approved=bool(event.get("approved", False)),
+        )
+
     # ── helpers ───────────────────────────────────────────────────────────────
 
     def _send(self, conn: socket.socket, event: Any) -> None:
@@ -346,6 +527,9 @@ class GatewayServer:
             enabled_tools,
             self.memory_store,
             cwd,
+            entry=entry,
+            active_skills=self.active_skills or None,
+            agent_name=self.agent_name,
             extras={"reminders": reminders_tool},
         )
 
@@ -359,6 +543,20 @@ class GatewayServer:
             base_entries = [*base_entries, spawn_tool]
 
         return ToolRouter(base_entries, guard=guard)
+
+    def _ensure_search_backend(self, enabled_tools: list[str] | None) -> None:
+        if enabled_tools is not None and "web_search" not in enabled_tools:
+            return
+        from marius.services.searxng import ensure_searxng_started
+        result = ensure_searxng_started()
+        log_event("searxng_startup", {
+            "agent": self.agent_name,
+            "ok": result.ok,
+            "status": result.status,
+            "url": result.url,
+            "compose_file": result.compose_file,
+            "detail": result.detail,
+        })
 
     @staticmethod
     def _resolve_window(entry: ProviderEntry) -> int:
@@ -484,7 +682,7 @@ class GatewayServer:
     def _run_turn(
         self, conn: socket.socket, text: str, stop_event: threading.Event
     ) -> None:
-        text = self.resolve_skill_command(text)
+        text = text.strip()
         user_message = Message(
             role=Role.USER,
             content=text,
@@ -499,10 +697,13 @@ class GatewayServer:
             "model": self.entry.model,
             "user_preview": preview(text),
         })
+        sent_text_delta = False
 
         def on_text_delta(delta: str) -> None:
+            nonlocal sent_text_delta
             if stop_event.is_set():
                 raise KeyboardInterrupt
+            sent_text_delta = True
             self._send(conn, DeltaEvent(text=delta))
 
         def on_tool_start(call: ToolCall) -> None:
@@ -542,6 +743,23 @@ class GatewayServer:
             self._send(conn, ToolResultEvent(name=call.name, ok=result.ok))
 
         try:
+            command_response = self._handle_builtin_command(text)
+            if command_response is not None:
+                self._send(conn, DeltaEvent(text=command_response))
+                log_event("turn_done", {
+                    "session_id": self.agent_name,
+                    "agent": self.agent_name,
+                    "provider": self.entry.name,
+                    "provider_kind": self.entry.provider,
+                    "model": self.entry.model,
+                    "tool_results": 0,
+                    "assistant_preview": preview(command_response),
+                    "command": text.split(maxsplit=1)[0].lower() if text else "",
+                })
+                return
+
+            text = self.resolve_skill_command(text)
+            user_message.content = text
             system_prompt = self._system_prompt_for_session()
             with self._turn_lock:
                 output = self.orchestrator.run_turn(
@@ -556,6 +774,15 @@ class GatewayServer:
                 )
             if output.assistant_message is not None:
                 content = output.assistant_message.content
+                rendered = render_turn_output(
+                    _without_content(output.assistant_message) if sent_text_delta else output.assistant_message,
+                    tool_results=output.tool_results,
+                    compaction_notice=output.compaction_notice,
+                    surface=RenderSurface.WEB,
+                )
+                if rendered:
+                    prefix = "\n\n" if sent_text_delta else ""
+                    self._send(conn, DeltaEvent(text=f"{prefix}{rendered}"))
                 event_name = "turn_empty_response" if not content.strip() else "turn_done"
                 log_event(event_name, {
                     "session_id": self.agent_name,
@@ -688,3 +915,7 @@ def _hydrate_session_from_visible_history(
         turn.metadata["status"] = "restored"
 
     return len(pairs)
+
+
+def _without_content(message: Message) -> Message:
+    return replace(message, content="")

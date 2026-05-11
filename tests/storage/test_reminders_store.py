@@ -109,6 +109,21 @@ def test_list_pending_excludes_fired(store: RemindersStore) -> None:
     assert pending[0].id == r1.id
 
 
+def test_cancel_removes_pending_reminder(store: RemindersStore) -> None:
+    reminder = store.add("À annuler", _now() + timedelta(hours=1))
+
+    assert store.cancel(reminder.id) is True
+    assert store.list_pending() == []
+
+
+def test_cancel_keeps_fired_reminder(store: RemindersStore) -> None:
+    reminder = store.add("Déjà livré", _now() - timedelta(seconds=1))
+    store.mark_fired(reminder.id)
+
+    assert store.cancel(reminder.id) is False
+    assert store.load()[0].id == reminder.id
+
+
 # ── parse_remind_at ───────────────────────────────────────────────────────────
 
 

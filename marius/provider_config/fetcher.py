@@ -10,6 +10,7 @@ from typing import Any
 
 from .contracts import AuthType, ProviderEntry, ProviderKind
 from .registry import PROVIDER_REGISTRY
+from .secrets import resolve_provider_secret
 
 _CODEX_MODELS_CACHE = Path.home() / ".codex" / "models_cache.json"
 
@@ -56,8 +57,9 @@ def fetch_models(entry: ProviderEntry, *, timeout: int = 10) -> list[str]:
 
     url = entry.base_url.rstrip("/") + definition.models_endpoint
     req = urllib.request.Request(url)
-    if entry.api_key:
-        req.add_header("Authorization", f"Bearer {entry.api_key}")
+    api_key = resolve_provider_secret(entry.api_key)
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
     req.add_header("Content-Type", "application/json")
 
     try:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from email.message import Message
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urljoin, urlparse, urlunparse
@@ -26,6 +27,8 @@ _DEFAULT_SEARCH_URL = "http://localhost:19080"
 _DEFAULT_MAX_BYTES = 1_000_000
 _DEFAULT_MAX_CHARS = 20_000
 _DEFAULT_TIMEOUT = 20
+_SEARCH_RETRY_ATTEMPTS = 3
+_SEARCH_RETRY_DELAY_SECONDS = 1.0
 
 
 # ── web_fetch ──────────────────────────────────────────────────────────────────
@@ -118,8 +121,7 @@ def _handle_web_search(arguments: dict) -> ToolResult:
         headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
     )
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            raw = resp.read(_DEFAULT_MAX_BYTES + 1)
+        raw = _read_search_response(req, timeout=timeout)
     except HTTPError as exc:
         if exc.code in (404, 502, 503):
             return _error(
@@ -200,5 +202,23 @@ def _decode(raw: bytes, content_type: str) -> str:
     return raw.decode(charset, errors="replace")
 
 
+def _read_search_response(req: Request, *, timeout: int) -> bytes:
+    last_error: URLError | OSError | None = None
+    for attempt in range(_SEARCH_RETRY_ATTEMPTS):
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                return resp.read(_DEFAULT_MAX_BYTES + 1)
+        except HTTPError:
+            raise
+        except (URLError, OSError) as exc:
+            last_error = exc
+            if attempt < _SEARCH_RETRY_ATTEMPTS - 1:
+                time.sleep(_SEARCH_RETRY_DELAY_SECONDS)
+    if last_error is not None:
+        raise last_error
+    raise URLError("search backend unavailable")
+
+
 def _error(message: str, *, retryable: bool = False) -> ToolResult:
-    return ToolResult(tool_call_id="", ok=False, summary=message)
+    error = "retryable_web_error" if retryable else "web_error"
+    return ToolResult(tool_call_id="", ok=False, summary=message, error=error)

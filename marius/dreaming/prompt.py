@@ -35,6 +35,9 @@ def build_dreaming_prompt(ctx: DreamingContext) -> str:
             + "\n".join(ctx.session_summaries)
         )
 
+    if ctx.watch_reports:
+        parts.append(_format_watch_reports_section(ctx.watch_reports))
+
     # Contrats de rêverie
     if ctx.dream_contracts:
         contracts_text = "\n\n".join(
@@ -82,6 +85,9 @@ def build_daily_prompt(ctx: DreamingContext, last_dream_report: "Any | None" = N
     if ctx.memories:
         parts.append(_format_memories_section(ctx.memories))
 
+    if ctx.watch_reports:
+        parts.append(_format_watch_reports_section(ctx.watch_reports))
+
     if ctx.daily_contracts:
         contracts_text = "\n\n".join(
             f"### Contrat [{name}]\n{content}"
@@ -109,6 +115,28 @@ def _format_memories_section(memories: list[MemoryEntry]) -> str:
             scope_label = f"[project: {m.project_path}]"
         tag_label = f" [{m.tags}]" if m.tags else ""
         lines.append(f"#{m.id} {scope_label}{tag_label} : {m.content}")
+    return "\n".join(lines)
+
+
+def _format_watch_reports_section(reports: list["Any"]) -> str:
+    lines: list[str] = [f"## Veille persistante ({len(reports)} rapport(s))"]
+    for report in reports:
+        generated = (getattr(report, "generated_at", "") or "")[:16]
+        title = getattr(report, "title", "") or getattr(report, "topic_id", "")
+        query = getattr(report, "query", "")
+        lines.append(f"### {title} ({generated})")
+        if query:
+            lines.append(f"Query: {query}")
+        summary = getattr(report, "summary", "")
+        if summary:
+            lines.append(f"Summary: {summary}")
+        for result in getattr(report, "results", [])[:5]:
+            if not isinstance(result, dict):
+                continue
+            result_title = result.get("title") or result.get("url") or "result"
+            url = result.get("url") or ""
+            content = result.get("content") or ""
+            lines.append(f"- {result_title} — {url} — {content}".strip())
     return "\n".join(lines)
 
 

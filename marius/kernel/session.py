@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .contracts import Artifact, CompactionNotice, Message, Role, ToolResult
+from .tool_result_context import format_tool_result_for_context
 
 
 @dataclass(slots=True)
@@ -125,11 +126,11 @@ class SessionRuntime:
             messages.extend(turn.input_messages)
             if include_tool_results:
                 for result in turn.tool_results:
-                    if result.summary:
+                    if result.summary or result.data or result.artifacts or result.error:
                         messages.append(
                             Message(
                                 role=Role.TOOL,
-                                content=result.summary,
+                                content=format_tool_result_for_context(result),
                                 created_at=turn.started_at,
                                 correlation_id=result.tool_call_id,
                                 visible=False,

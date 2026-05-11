@@ -73,6 +73,53 @@ def stop(agent_name: str) -> bool:
         return False
 
 
+def restart(
+    agent_name: str,
+    *,
+    delay_seconds: float = 1.0,
+    mode: str = "auto",
+) -> tuple[bool, str, dict[str, str | float]]:
+    """Planifie un redémarrage sans couper le tour courant.
+
+    Le redémarrage est délégué à un processus détaché qui attend quelques
+    instants, laissant au gateway le temps de renvoyer le ToolResult et au
+    modèle de formuler sa réponse finale.
+    """
+    selected_mode = mode if mode in ("auto", "direct", "systemd") else "auto"
+    script = (
+        "import sys,time\n"
+        f"time.sleep({float(delay_seconds)!r})\n"
+        f"agent={agent_name!r}\n"
+        f"mode={selected_mode!r}\n"
+        "ok=False\n"
+        "if mode in ('auto','systemd'):\n"
+        "    try:\n"
+        "        from marius.gateway.service import agent_active_state, agent_enabled_state, is_service_installed, is_systemd_available, restart_agent\n"
+        "        if is_systemd_available() and is_service_installed() and (mode == 'systemd' or agent_active_state(agent) == 'active' or agent_enabled_state(agent) == 'enabled'):\n"
+        "            ok, _err = restart_agent(agent)\n"
+        "    except Exception:\n"
+        "        ok=False\n"
+        "if not ok and mode != 'systemd':\n"
+        "    try:\n"
+        "        from marius.gateway.launcher import start, stop\n"
+        "        stop(agent)\n"
+        "        ok=start(agent)\n"
+        "    except Exception:\n"
+        "        ok=False\n"
+        "sys.exit(0 if ok else 1)\n"
+    )
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return False, str(exc), {"agent": agent_name, "mode": selected_mode, "delay_seconds": delay_seconds}
+    return True, "", {"agent": agent_name, "mode": selected_mode, "delay_seconds": delay_seconds}
+
+
 def _ping(agent_name: str) -> bool:
     """Envoie un ping au gateway. Retourne True si pong reçu."""
     sp = socket_path(agent_name)

@@ -20,6 +20,7 @@ from .compaction import (
 from .contracts import CompactionNotice, ContextUsage, Message, Role, ToolCall, ToolResult
 from .provider import ProviderAdapter, ProviderError, ProviderRequest, ProviderResponse
 from .session import SessionRuntime
+from .tool_result_context import format_tool_result_for_context
 from .tool_router import ToolRouter
 
 _MAX_TOOL_ITERATIONS = 20
@@ -182,7 +183,7 @@ class RuntimeOrchestrator:
                         # Ajouter le résultat comme message tool dans le contexte
                         tool_msg = Message(
                             role=Role.TOOL,
-                            content=result.summary if result.ok else (result.error or result.summary),
+                            content=format_tool_result_for_context(result),
                             created_at=datetime.now(timezone.utc),
                             correlation_id=tool_call.id,
                             visible=False,

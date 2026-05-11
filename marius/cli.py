@@ -789,7 +789,6 @@ def _cmd_restart(args) -> None:
     """Arrête le gateway s'il tourne, le redémarre, puis relance le canal web."""
     from rich.console import Console
     from marius.config.store import ConfigStore
-    from marius.gateway.launcher import is_running, start, stop
 
     console = Console(highlight=False)
     config = ConfigStore().load()
@@ -799,12 +798,16 @@ def _cmd_restart(args) -> None:
         console.print("\n[dim]Aucun agent configuré. Lancez marius setup.[/]\n")
         return
 
-    if is_running(name):
-        console.print(f"\n[dim]Arrêt du gateway '{name}'…[/]")
-        stop(name)
+    port = getattr(args, "port", 8765)
+    web_was_available = _marius_web_available(port, expected_agent=name)
+    if web_was_available:
+        console.print(f"\n[dim]Arrêt de l'interface web sur le port {port}…[/]")
+    stopped_web = _stop_web_sync(name, port)
+    if stopped_web and not web_was_available:
+        console.print(f"\n[dim]Arrêt de l'interface web sur le port {port}…[/]")
 
-    console.print(f"[dim]Démarrage du gateway '{name}'…[/]")
-    ok = start(name)
+    console.print(f"\n[dim]Redémarrage du gateway '{name}'…[/]")
+    ok = _restart_gateway_sync(name)
     if not ok:
         console.print(f"\n[bold color(208)]Impossible de démarrer le gateway '{name}'.[/]\n")
         return
@@ -812,13 +815,53 @@ def _cmd_restart(args) -> None:
     _cmd_web(args)
 
 
+def _restart_gateway_sync(agent_name: str) -> bool:
+    """Restart one gateway, preferring the managed systemd instance when active."""
+    import time
+
+    from marius.gateway.launcher import is_running, start, stop
+
+    try:
+        from marius.gateway.service import (
+            agent_active_state,
+            agent_enabled_state,
+            is_service_installed,
+            is_systemd_available,
+            restart_agent,
+        )
+        if (
+            is_systemd_available()
+            and is_service_installed()
+            and (
+                agent_active_state(agent_name) == "active"
+                or agent_enabled_state(agent_name) == "enabled"
+            )
+        ):
+            ok, _err = restart_agent(agent_name)
+            if not ok:
+                return False
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline:
+                if is_running(agent_name):
+                    return True
+                time.sleep(0.1)
+            return False
+    except Exception:
+        pass
+
+    if is_running(agent_name):
+        stop(agent_name)
+    return start(agent_name)
+
+
 def _cmd_web(args) -> None:
     """Proxy HTTP ↔ socket gateway. Lance le gateway si nécessaire, puis sert en foreground."""
     from rich.console import Console
     from marius.config.store import ConfigStore
     from marius.gateway.launcher import is_running, start
-    from marius.gateway.workspace import socket_path
+    from marius.gateway.workspace import socket_path, web_pid_path
     from marius.channels.web.server import WebServer
+    import os
 
     console = Console(highlight=False)
     config = ConfigStore().load()
@@ -842,15 +885,167 @@ def _cmd_web(args) -> None:
     except OSError as exc:
         console.print(f"\n[bold color(208)]Connexion au gateway impossible : {exc}[/]\n")
         return
+    try:
+        server.bind()
+    except OSError as exc:
+        server.shutdown()
+        if getattr(exc, "errno", None) == 98:
+            if _marius_web_available(port, expected_agent=name):
+                console.print(
+                    f"\n[green]✓[/] Gateway redémarré. Interface web déjà disponible : "
+                    f"[bold]http://localhost:{port}[/]\n"
+                )
+            else:
+                console.print(
+                    f"\n[bold color(208)]Le port {port} est déjà utilisé.[/]\n"
+                    f"  Fermez le processus qui l'occupe ou lancez : [bold]marius web --port {port + 1}[/]\n"
+                )
+        else:
+            console.print(f"\n[bold color(208)]Impossible de lancer le web : {exc}[/]\n")
+        return
 
     console.print(f"\n[green]✓[/] Interface web sur [bold]http://localhost:{port}[/]")
     console.print("[dim]Ctrl+C pour arrêter le web (le gateway continue).[/]\n")
+    web_pid = web_pid_path(name, port)
+    web_pid.parent.mkdir(parents=True, exist_ok=True)
+    web_pid.write_text(str(os.getpid()), encoding="utf-8")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        _remove_pid_file_if_current(web_pid, os.getpid())
         server.shutdown()
+
+
+def _marius_web_available(port: int, *, expected_agent: str | None = None) -> bool:
+    import json
+    from urllib.error import URLError
+    from urllib.request import urlopen
+
+    try:
+        with urlopen(f"http://localhost:{port}/health", timeout=1.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, json.JSONDecodeError):
+        return False
+    if payload.get("ok") is not True:
+        return False
+    if expected_agent and payload.get("agent") != expected_agent:
+        return False
+    return True
+
+
+def _stop_web_sync(agent_name: str, port: int) -> bool:
+    import os
+    import time
+
+    from marius.gateway.workspace import web_pid_path
+
+    stopped = False
+    pid_file = web_pid_path(agent_name, port)
+    pid = _read_pid_file(pid_file)
+    if pid is not None:
+        stopped = _terminate_pid(pid)
+        _remove_pid_file_if_current(pid_file, pid)
+
+    protected_pids = _current_process_family_pids()
+    for pid in _find_marius_web_pids(agent_name, port):
+        if pid in protected_pids:
+            continue
+        stopped = _terminate_pid(pid) or stopped
+
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if not _marius_web_available(port, expected_agent=agent_name):
+            return stopped
+        time.sleep(0.1)
+    return stopped
+
+
+def _read_pid_file(path) -> int | None:
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _remove_pid_file_if_current(path, pid: int) -> None:
+    try:
+        if int(path.read_text(encoding="utf-8").strip()) == int(pid):
+            path.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+def _terminate_pid(pid: int) -> bool:
+    import os
+    import signal
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+
+
+def _current_process_family_pids() -> set[int]:
+    import os
+    from pathlib import Path
+
+    pids = {os.getpid()}
+    current = os.getppid()
+    while current > 1:
+        pids.add(current)
+        try:
+            stat = (Path(f"/proc/{current}") / "stat").read_text(encoding="utf-8")
+        except OSError:
+            break
+        before_state, _, after_state = stat.rpartition(") ")
+        if not before_state or not after_state:
+            break
+        parts = after_state.split()
+        if len(parts) < 2:
+            break
+        try:
+            current = int(parts[1])
+        except ValueError:
+            break
+    return pids
+
+
+def _find_marius_web_pids(agent_name: str, port: int) -> list[int]:
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, args = stripped.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if "marius" not in args or (" web" not in args and " restart" not in args):
+            continue
+        if f"--agent {agent_name}" not in args and f"--agent={agent_name}" not in args:
+            continue
+        if f"--port {int(port)}" not in args and f"--port={int(port)}" not in args:
+            continue
+        pids.append(pid)
+    return pids
 
 
 def _has_assistant_skill(agent_cfg) -> bool:
@@ -868,4 +1063,3 @@ def _print_assistant_required(console, agent_name: str) -> None:
         f"  Activez-le avec :\n"
         f"    [bold]marius skills activate assistant --agent {agent_name}[/]\n"
     )
-

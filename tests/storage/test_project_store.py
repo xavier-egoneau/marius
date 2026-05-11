@@ -9,7 +9,7 @@ from marius.storage.project_store import ProjectEntry, ProjectStore
 
 @pytest.fixture()
 def store(tmp_path: Path) -> ProjectStore:
-    return ProjectStore(store_path=tmp_path / "projects.json")
+    return ProjectStore(store_path=tmp_path / "projects.json", active_path=tmp_path / "active_project.json")
 
 
 # ── record_open ───────────────────────────────────────────────────────────────
@@ -88,6 +88,34 @@ def test_get_known_project(store: ProjectStore, tmp_path: Path) -> None:
 def test_get_unknown_project_returns_none(store: ProjectStore, tmp_path: Path) -> None:
     project = tmp_path / "unknown"
     assert store.get(project) is None
+
+
+# ── projet actif ─────────────────────────────────────────────────────────────
+
+
+def test_set_active_records_and_persists_project(store: ProjectStore, tmp_path: Path) -> None:
+    project = tmp_path / "myproject"
+    project.mkdir()
+
+    active = store.set_active(project)
+
+    assert active.name == "myproject"
+    assert Path(active.path) == project.resolve()
+    assert store.get(project) is not None
+    loaded = store.get_active()
+    assert loaded is not None
+    assert loaded.path == active.path
+
+
+def test_get_active_returns_none_when_missing(store: ProjectStore) -> None:
+    assert store.get_active() is None
+
+
+def test_get_active_ignores_corrupt_json(tmp_path: Path) -> None:
+    active_path = tmp_path / "active_project.json"
+    active_path.write_text("{nope", encoding="utf-8")
+    store = ProjectStore(store_path=tmp_path / "projects.json", active_path=active_path)
+    assert store.get_active() is None
 
 
 # ── persistance ───────────────────────────────────────────────────────────────

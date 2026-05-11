@@ -8,6 +8,7 @@ import pytest
 
 from marius.storage.memory_store import MemoryStore
 from marius.tools.factory import STATIC_ENTRIES, build_tool_entries
+from marius.provider_config.contracts import AuthType, ProviderEntry, ProviderKind
 
 
 @pytest.fixture()
@@ -26,6 +27,38 @@ def test_all_tools_when_none(memory_store: MemoryStore, tmp_path: Path) -> None:
     assert names >= set(STATIC_ENTRIES.keys())
     assert "memory" in names
     assert "open_marius_web" in names
+    assert "host_status" in names
+    assert "host_gateway_restart" in names
+    assert "project_list" in names
+    assert "approval_list" in names
+    assert "secret_ref_list" in names
+    assert "secret_ref_prepare_file" in names
+    assert "provider_list" in names
+    assert "self_update_propose" in names
+    assert "self_update_apply" in names
+    assert "self_update_rollback" in names
+    assert "watch_add" in names
+    assert "rag_source_add" in names
+    assert "rag_search" in names
+    assert "rag_checklist_add" in names
+
+
+def test_dynamic_dreaming_tools_included_when_entry_is_available(
+    memory_store: MemoryStore, tmp_path: Path
+) -> None:
+    entry = ProviderEntry(
+        id="p1",
+        name="test",
+        provider=ProviderKind.OPENAI,
+        auth_type=AuthType.API,
+        api_key="secret:test",
+        model="gpt-test",
+    )
+    entries = build_tool_entries(None, memory_store, tmp_path, entry=entry, active_skills=["dev"])
+    names = {e.definition.name for e in entries}
+
+    assert "dreaming_run" in names
+    assert "daily_digest" in names
 
 
 def test_memory_always_present_when_none(memory_store: MemoryStore, tmp_path: Path) -> None:

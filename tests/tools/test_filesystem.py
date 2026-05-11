@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from marius.tools.filesystem import LIST_DIR, READ_FILE, WRITE_FILE
+from marius.tools.filesystem import LIST_DIR, MAKE_DIR, MOVE_PATH, READ_FILE, WRITE_FILE
 
 
 def test_read_file_returns_content(tmp_path):
@@ -123,3 +123,58 @@ def test_write_file_creates_parent_dirs(tmp_path):
 def test_write_file_missing_path_arg():
     result = WRITE_FILE.handler({"content": "x"})
     assert result.ok is False
+
+
+def test_make_dir_creates_nested_directory(tmp_path):
+    dest = tmp_path / "a" / "b"
+
+    result = MAKE_DIR.handler({"path": str(dest)})
+
+    assert result.ok is True
+    assert dest.is_dir()
+
+
+def test_make_dir_missing_path_arg():
+    result = MAKE_DIR.handler({})
+
+    assert result.ok is False
+    assert result.error == "missing_arg:path"
+
+
+def test_move_path_moves_file(tmp_path):
+    source = tmp_path / "source.txt"
+    dest = tmp_path / "nested" / "dest.txt"
+    source.write_text("hello", encoding="utf-8")
+
+    result = MOVE_PATH.handler({"source": str(source), "destination": str(dest)})
+
+    assert result.ok is True
+    assert not source.exists()
+    assert dest.read_text(encoding="utf-8") == "hello"
+
+
+def test_move_path_refuses_existing_destination_without_overwrite(tmp_path):
+    source = tmp_path / "source.txt"
+    dest = tmp_path / "dest.txt"
+    source.write_text("new", encoding="utf-8")
+    dest.write_text("old", encoding="utf-8")
+
+    result = MOVE_PATH.handler({"source": str(source), "destination": str(dest)})
+
+    assert result.ok is False
+    assert result.error == "destination_exists"
+    assert source.exists()
+    assert dest.read_text(encoding="utf-8") == "old"
+
+
+def test_move_path_overwrites_when_requested(tmp_path):
+    source = tmp_path / "source.txt"
+    dest = tmp_path / "dest.txt"
+    source.write_text("new", encoding="utf-8")
+    dest.write_text("old", encoding="utf-8")
+
+    result = MOVE_PATH.handler({"source": str(source), "destination": str(dest), "overwrite": True})
+
+    assert result.ok is True
+    assert not source.exists()
+    assert dest.read_text(encoding="utf-8") == "new"

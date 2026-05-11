@@ -138,11 +138,127 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
 - Toute décision d’architecture durable doit être ajoutée ici.
 - Si une règle devient fausse, on la corrige explicitement plutôt que de la laisser dériver.
 
+## 2026-05-11 — Sortie de tour rendue en commun
+- Décision : ajouter un rendu de fin de tour commun qui agrège réponse assistant, artefacts d'outils et notice de compaction.
+- Principe : les outils restent des producteurs d'observations ; ils ne court-circuitent pas la réponse du LLM.
+- Portée : CLI, gateway web et Telegram utilisent le même rendu Markdown portable, avec adaptation minimale au streaming.
+- Impact : les diffs et rapports retournés par les tools restent visibles cross-canaux sans créer une logique concurrente dans chaque surface.
+- Rendu : les `diff` et les `report` avec contenu Markdown sont rendus en détail ; les autres artefacts gardent un fallback portable.
+
+## 2026-05-11 — Restart gateway différé et secrets hors modèle
+- Décision : exposer `host_gateway_restart` comme redémarrage planifié, pas comme arrêt immédiat du processus courant.
+- Principe : le tool retourne d'abord un `ToolResult`; le modèle peut donc faire son récap avant que le gateway redémarre.
+- Décision secret : `secret_ref_prepare_file` crée un fichier local privé `0600` et enregistre seulement sa référence.
+- Règle : aucune valeur secrète ne doit être fournie au modèle ; l'utilisateur remplit le fichier hors chat.
+- Règle agent principal : `host_agent_delete` refuse de supprimer `main_agent`, qui ancre les comportements par défaut CLI/gateway/web/Telegram/scheduler.
+
 ## 2026-05-09 — Logs locaux de diagnostic
 - Décision : ajouter un journal local JSONL sous `~/.marius/logs/marius.jsonl`, consultable avec `marius logs`.
 - Portée initiale : démarrage REPL/gateway, début/fin de tour, réponse vide, erreurs provider, erreurs inattendues, appels outils et résultats outils.
 - Principe : previews courts et métadonnées utiles plutôt que transcription complète, pour diagnostiquer sans transformer les logs en historique conversationnel concurrent.
 - Impact : le logging est best-effort et ne doit jamais bloquer l’expérience utilisateur ; la commande CLI sert au debug et aux tests manuels.
+
+## 2026-05-10 — Host diagnostics comme outils read-only
+- Décision : exposer les diagnostics host utiles au modèle via `host_status`, `host_doctor` et `host_logs`.
+- Portée initiale : lecture de config agents, état gateway/systemd, doctor existant et logs JSONL filtrables.
+- Principe : ces outils restent read-only et retournent des `ToolResult` structurés ; ils ne court-circuitent pas la réponse finale du LLM.
+- Impact : les actions host sensibles (agents CRUD, Telegram, secrets) restent une tranche séparée avec garde de permissions plus stricte.
+
+## 2026-05-10 — Actions host atomiques et secrets par référence
+- Décision : exposer les premières actions host sensibles via `host_agent_list`, `host_agent_save`, `host_agent_delete` et `host_telegram_configure`.
+- Portée initiale : création/mise à jour/suppression d'agents configurés, changement d'agent principal, configuration Telegram.
+- Principe : les écritures passent par le gardien de permissions ; les suppressions demandent `confirm: true`.
+- Règle secret : aucun token brut ne doit transiter par les arguments de l'outil ; Telegram accepte seulement `token_ref` (`env:NOM` ou `file:/chemin/token`).
+- Impact : la capture de secrets générique et la configuration provider restent une tranche distincte.
+
+## 2026-05-10 — Self-update proposal-only
+- Décision : exposer le self-update initial comme outils de proposition, pas d'application.
+- Portée initiale : `self_update_propose`, `self_update_report_bug`, `self_update_list`, `self_update_show`.
+- Principe : les propositions et bugs sont persistés en Markdown sous `~/.marius/self_updates/`; un diff peut être joint comme artefact portable.
+- Règle : un outil self-update ne modifie jamais le code de Marius et refuse les arguments `apply` / `auto_apply`.
+- Impact : l'application explicite, le rollback et les rapports post-apply restent une tranche séparée.
+
+## 2026-05-11 — Self-update apply/rollback explicites
+- Décision : exposer `self_update_apply` et `self_update_rollback` comme actions sensibles séparées des propositions.
+- Règle : `self_update_apply` exige une proposition existante, un patch attaché, `confirm: true`, un dépôt git valide et un worktree propre sauf `allow_dirty` explicite.
+- Tests : seules des commandes bornées (`pytest`, `python -m pytest`, `git diff --check`) sont exécutées par l'outil.
+- Rollback : `self_update_rollback` inverse uniquement un patch déjà enregistré dans un rapport d'application.
+- Principe : aucun agent ne valide seul une update ; le gardien de permissions et la confirmation humaine restent la frontière.
+
+## 2026-05-10 — Veille persistante explicite
+- Décision : exposer la veille via `watch_add`, `watch_list`, `watch_remove` et `watch_run`.
+- Portée initiale : topics JSON standalone sous `~/.marius/watch/topics.json`, rapports sous `~/.marius/watch/reports/`, exécution manuelle via web search.
+- Principe : `watch_run` persiste des observations ; le modèle reformule et décide quoi faire. Dreaming/daily lisent les rapports existants, sans déclencher de recherche web cachée.
+- Impact : cadence automatique, notifications et déduplication de résultats restent une tranche scheduler séparée.
+
+## 2026-05-10 — Veille automatisée par scheduler
+- Décision : les topics de veille avec cadence non manuelle deviennent des jobs `watch:<topic_id>` dans le scheduler du gateway.
+- Cadences acceptées : `hourly`, `daily`, `weekly`, ou des durées simples `Nm`, `Nh`, `Nd`.
+- Principe : le scheduler déclenche le même pipeline que `watch_run`; les rapports restent persistés dans `~/.marius/watch/reports/`.
+- Notifications : Telegram est opt-in par topic via tag `notify` ou `telegram`.
+- Déduplication : les URLs déjà vues pour un topic sont filtrées avant sauvegarde du rapport.
+
+## 2026-05-11 — Veille avancée comme observation enrichie
+- Décision : `watch_run` enrichit les rapports avec `novelty_score`, `is_new`, raisons de score et métadonnées agrégées.
+- Résumé : un résumé LLM par topic peut être injecté via un summarizer optionnel ; il est stocké dans le rapport comme observation, sans court-circuiter la réponse finale du modèle.
+- Notifications : les topics acceptent des settings génériques (`notify`, `notify_min_score`, `summary_enabled`) en plus des tags historiques.
+- Backfill : `watch_run` garde la déduplication par défaut et expose `dedupe: false` seulement pour les runs de backfill/audit explicites.
+- Modularité : le store JSON reste autonome ; l'accès provider est injecté depuis les surfaces qui disposent déjà d'un provider courant.
+
+## 2026-05-11 — Commandes slash gateway alignées
+- Décision : les commandes slash de base (`/help`, `/remember`, `/memories`, `/forget`, `/doctor`, `/dream`, `/daily`, `/context`, `/compact`) sont gérées par le gateway, pas seulement par le REPL local.
+- Principe : une commande déclarée dans une surface doit être exécutable de bout en bout sur les surfaces qui l'affichent.
+- Règle : les commandes directes retournent du Markdown visible ; les commandes de skill restent résolues en prompt et passent par le LLM.
+- Impact : web, Telegram et client gateway partagent le même comportement pour ces commandes, au lieu de laisser le modèle répondre "commande inconnue".
+
+## 2026-05-11 — SearxNG démarré avec Marius
+- Décision : quand `web_search` est actif, le REPL local et le gateway tentent de démarrer le SearxNG local fourni par `docker-compose.searxng.yml`.
+- Principe : `web_search` doit être utilisable dès le premier tour après lancement, sans demander au modèle de diagnostiquer le backend.
+- Portée : démarrage best-effort, attente courte, logs `searxng_startup`; Marius ne plante pas si Docker est absent.
+- Désactivation : `MARIUS_SEARCH_AUTO_START=0` coupe cet auto-start ; `MARIUS_SEARCH_URL` personnalisé reste à la charge de l'utilisateur.
+
+## 2026-05-11 — Observations d'outils structurées pour le provider
+- Décision : les messages `tool` réinjectés au provider contiennent une observation bornée avec `summary`, `data` et artefacts utiles, au lieu du seul résumé visible.
+- Principe : le résumé court reste adapté aux traces UI, mais le modèle doit recevoir la charge utile structurée pour produire sa réponse finale.
+- Sécurité : les clés évidentes de secrets (`token`, `api_key`, `password`, etc.) sont masquées avant injection.
+- Impact : `web_search` fournit bien ses URLs et snippets au modèle, sans court-circuiter le chat ni transformer l'outil en réponse finale.
+
+## 2026-05-11 — Migration des skills utilisateur Maurice
+- Décision : porter `caldav_calendar` et `sentinelle` comme skills Marius Markdown-first, avec outils Marius natifs lorsque l'ancien skill avait du code.
+- Principe : ne pas importer aveuglément les wrappers `tools.py` Maurice ; chaque capacité devient une brique testable sous `marius/tools/`.
+- Stockage : `sentinelle` écrit dans le workspace de l'agent courant ; `caldav_calendar` reste une façade locale autour de `vdirsyncer` et `khal`.
+- Impact : les skills restent activables par agent, le LLM garde la réponse finale, et les outils ne court-circuitent pas la conversation.
+
+## 2026-05-11 — RAG Markdown comme sources consultables
+- Décision : introduire un skill `rag` pour gérer des sources Markdown indexées, distinctes de la mémoire durable.
+- Principe : les sources RAG sont consultées au besoin via outils ; `memory.db` reste le coeur des faits utiles au quotidien.
+- Format v1 : dossiers/fichiers Markdown façon Obsidian, frontmatter optionnel et tags inline `[always]`, `[important]`, `[daily]`, `[fresh]`, `[archive]`.
+- Règle : `[always]` et `[important]` signalent des candidates à injection/promotion, mais l'agent doit décider ou demander validation ; aucun corpus n'est injecté en bloc.
+- Indexation : `rag_source_sync` catalogue tous les documents, mais n'indexe le contenu détaillé que pour les chunks taggés `[always]`, `[important]`, `[daily]` ou `[fresh]`; les documents non taggés restent localisables par titre/chemin/inventaire.
+- Listes : `rag_checklist_add` remplace l'ancien usage de `todos` pour les ajouts simples en écrivant des entrées Markdown `- [ ] ...` dans une source ou liste RAG.
+- Impact : l'ancien skill `todos` est retiré ; les listes/notes Markdown deviennent des sources RAG.
+
+## 2026-05-10 — Projet actif explicite
+- Décision : ajouter un pointeur de projet actif explicite sous `~/.marius/active_project.json`, séparé du registre historique `~/.marius/projects.json`.
+- Principe : `projects.json` reste un registre de projets connus ; le projet actif est un choix explicite, modifiable via `project_set_active`, et consultable via `project_list`.
+- Impact : les commandes de skill projet peuvent s'appuyer sur des outils génériques sans créer une base de tâches concurrente ni deviner agressivement le contexte.
+
+## 2026-05-10 — Approvals et secrets par référence
+- Décision : persister un audit des demandes de permissions sous `~/.marius/approvals.json` et les références de secrets sous `~/.marius/secret_refs.json`.
+- Principe : le garde de permissions peut consulter une décision mémorisée, mais continue à demander confirmation pour les actions sensibles non connues.
+- Règle secret : Marius stocke des références (`env:`, `file:`, `secret:`), jamais des valeurs brutes passées par le modèle.
+- Impact : les tools `approval_*` et `secret_ref_*` deviennent des briques administrables, sans court-circuiter la réponse finale du LLM.
+
+## 2026-05-11 — Provider config depuis l'agent
+- Décision : exposer la configuration provider via `provider_list`, `provider_save`, `provider_delete` et `provider_models`.
+- Principe : ces tools écrivent la source existante `~/.marius/marius_providers.json`; ils ne créent pas un store concurrent.
+- Règle secret : `provider_save` refuse les clés brutes et accepte seulement `api_key_ref` (`env:`, `file:` ou `secret:`). Les anciennes clés brutes restent compatibles mais sont masquées dans les sorties.
+- Impact : l'agent peut gérer les providers courants sans casser la fluidité du chat ni exposer de secret au modèle.
+
+## 2026-05-11 — Dreaming et daily exposés comme ToolEntry
+- Décision : exposer le moteur mémoire via `dreaming_run` et `daily_digest`, construits dynamiquement par session avec provider, mémoire, skills et projet courant.
+- Principe : les tools retournent des `ToolResult` et artefacts Markdown ; le modèle garde la reformulation finale.
+- Impact : `/dream`, `/daily`, le scheduler et les appels modèle s'appuient sur le même wrapper, sans dupliquer le moteur `marius.dreaming.engine`.
 
 ## 2026-05-09 — Observations courtes de session
 - Décision : ajouter une couche d’observations de session non persistante, dérivée des résultats d’outils vérifiés.

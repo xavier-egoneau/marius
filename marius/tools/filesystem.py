@@ -6,6 +6,7 @@ Standalone : dépend uniquement de kernel/tool_router et kernel/contracts.
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +118,69 @@ def _write_file(arguments: dict[str, Any]) -> ToolResult:
         return ToolResult(tool_call_id="", ok=False, summary=str(exc), error=str(exc))
 
 
+def _make_dir(arguments: dict[str, Any]) -> ToolResult:
+    path_str = arguments.get("path", "")
+    if not path_str:
+        return ToolResult(tool_call_id="", ok=False, summary="Argument `path` manquant.", error="missing_arg:path")
+
+    path = Path(path_str).expanduser()
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return ToolResult(
+            tool_call_id="",
+            ok=True,
+            summary=f"Dossier créé : {path}",
+            data={"path": str(path)},
+        )
+    except PermissionError:
+        return ToolResult(tool_call_id="", ok=False, summary=f"Permission refusée : {path}", error="permission_denied")
+    except Exception as exc:
+        return ToolResult(tool_call_id="", ok=False, summary=str(exc), error=str(exc))
+
+
+def _move_path(arguments: dict[str, Any]) -> ToolResult:
+    source_str = arguments.get("source", "")
+    destination_str = arguments.get("destination", "")
+    overwrite = bool(arguments.get("overwrite", False))
+
+    if not source_str:
+        return ToolResult(tool_call_id="", ok=False, summary="Argument `source` manquant.", error="missing_arg:source")
+    if not destination_str:
+        return ToolResult(tool_call_id="", ok=False, summary="Argument `destination` manquant.", error="missing_arg:destination")
+
+    source = Path(source_str).expanduser()
+    destination = Path(destination_str).expanduser()
+
+    if not source.exists():
+        return ToolResult(tool_call_id="", ok=False, summary=f"Source introuvable : {source}", error="source_not_found")
+    if destination.exists() and not overwrite:
+        return ToolResult(
+            tool_call_id="",
+            ok=False,
+            summary=f"Destination déjà existante : {destination}. Passe `overwrite=true` pour remplacer.",
+            error="destination_exists",
+        )
+
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() and overwrite:
+            if destination.is_dir():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink()
+        moved_to = shutil.move(str(source), str(destination))
+        return ToolResult(
+            tool_call_id="",
+            ok=True,
+            summary=f"Chemin déplacé : {source} -> {destination}",
+            data={"source": str(source), "destination": moved_to},
+        )
+    except PermissionError:
+        return ToolResult(tool_call_id="", ok=False, summary="Permission refusée.", error="permission_denied")
+    except Exception as exc:
+        return ToolResult(tool_call_id="", ok=False, summary=str(exc), error=str(exc))
+
+
 # ── entrées du registre ───────────────────────────────────────────────────────
 
 READ_FILE = ToolEntry(
@@ -163,6 +227,38 @@ WRITE_FILE = ToolEntry(
         },
     ),
     handler=_write_file,
+)
+
+MAKE_DIR = ToolEntry(
+    definition=ToolDefinition(
+        name="make_dir",
+        description="Crée un dossier et ses parents si nécessaire.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Chemin du dossier à créer."},
+            },
+            "required": ["path"],
+        },
+    ),
+    handler=_make_dir,
+)
+
+MOVE_PATH = ToolEntry(
+    definition=ToolDefinition(
+        name="move_path",
+        description="Déplace ou renomme un fichier ou dossier.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "Chemin source à déplacer."},
+                "destination": {"type": "string", "description": "Nouveau chemin."},
+                "overwrite": {"type": "boolean", "description": "Remplacer la destination si elle existe."},
+            },
+            "required": ["source", "destination"],
+        },
+    ),
+    handler=_move_path,
 )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from email.message import Message
 from unittest.mock import MagicMock
+from urllib.error import URLError
 
 from marius.tools.web import WEB_FETCH, WEB_SEARCH
 
@@ -53,8 +54,29 @@ def test_web_search_returns_valid_tool_result(monkeypatch):
     assert result.data["results"][0]["title"] == "Marius"
 
 
+def test_web_search_retries_when_searxng_is_starting(monkeypatch):
+    payload = {"results": [{"title": "Marius", "url": "https://example.test", "content": "ok"}]}
+    calls = {"count": 0}
+
+    def flaky_urlopen(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise URLError("connection refused")
+        return _mock_response(json.dumps(payload).encode("utf-8"), content_type="application/json")
+
+    monkeypatch.setattr("marius.tools.web.urlopen", flaky_urlopen)
+    monkeypatch.setattr("marius.tools.web.time.sleep", lambda _seconds: None)
+
+    result = WEB_SEARCH.handler({"query": "marius"})
+
+    assert result.ok is True
+    assert calls["count"] == 2
+    assert result.data["results"][0]["title"] == "Marius"
+
+
 def test_web_search_validation_returns_valid_tool_result():
     result = WEB_SEARCH.handler({})
 
     assert result.ok is False
     assert result.tool_call_id == ""
+    assert result.error == "web_error"

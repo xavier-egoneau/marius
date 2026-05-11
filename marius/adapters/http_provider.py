@@ -18,6 +18,7 @@ from marius.kernel.provider import ProviderChunk, ProviderError, ProviderRequest
 from marius.kernel.tool_router import ToolDefinition
 from marius.provider_config.contracts import AuthType, ProviderEntry
 from marius.provider_config.registry import PROVIDER_REGISTRY, ProviderProtocol
+from marius.provider_config.secrets import resolve_provider_secret
 
 
 def make_adapter(
@@ -54,7 +55,7 @@ class OpenAICompatibleAdapter:
             payload["tools"] = _tools_to_openai(request.tools)
             payload["tool_choice"] = "auto"
 
-        raw = _http_post(url, payload, api_key=self.entry.api_key, timeout=self.timeout)
+        raw = _http_post(url, payload, api_key=resolve_provider_secret(self.entry.api_key), timeout=self.timeout)
 
         try:
             choice = raw["choices"][0]
@@ -107,7 +108,7 @@ class OpenAICompatibleAdapter:
         finish_reason = ""
 
         try:
-            for event in _iter_sse(_http_open(url, payload, api_key=self.entry.api_key, timeout=self.timeout)):
+            for event in _iter_sse(_http_open(url, payload, api_key=resolve_provider_secret(self.entry.api_key), timeout=self.timeout)):
                 if event.get("usage"):
                     u = event["usage"]
                     yield ProviderChunk(
@@ -168,7 +169,7 @@ class OllamaNativeAdapter:
         if request.tools:
             payload["tools"] = _tools_to_openai(request.tools)
 
-        raw = _http_post(url, payload, api_key=self.entry.api_key, timeout=self.timeout)
+        raw = _http_post(url, payload, api_key=resolve_provider_secret(self.entry.api_key), timeout=self.timeout)
 
         try:
             msg = raw.get("message", {})
@@ -218,7 +219,7 @@ class OllamaNativeAdapter:
         pending_tool_calls: list[dict[str, Any]] = []
 
         try:
-            for chunk in _iter_ndjson(_http_open(url, payload, api_key=self.entry.api_key, timeout=self.timeout)):
+            for chunk in _iter_ndjson(_http_open(url, payload, api_key=resolve_provider_secret(self.entry.api_key), timeout=self.timeout)):
                 msg = chunk.get("message") or {}
                 if msg.get("content"):
                     yield ProviderChunk(type="text_delta", delta=msg["content"])
@@ -301,7 +302,7 @@ class ChatGPTOAuthAdapter:
         saw_text_delta = False
 
         try:
-            response = _http_open_headers(url, payload, headers=_chatgpt_headers(self.entry.api_key), timeout=self.timeout)
+            response = _http_open_headers(url, payload, headers=_chatgpt_headers(resolve_provider_secret(self.entry.api_key)), timeout=self.timeout)
         except ProviderError:
             raise
 

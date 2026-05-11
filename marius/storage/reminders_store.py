@@ -81,6 +81,16 @@ class RemindersStore:
     def list_pending(self) -> list[Reminder]:
         return [r for r in self.load() if not r.fired]
 
+    def cancel(self, reminder_id: str) -> bool:
+        """Supprime un rappel non déclenché."""
+        with self._lock:
+            reminders = self.load()
+            remaining = [r for r in reminders if not (r.id == reminder_id and not r.fired)]
+            if len(remaining) == len(reminders):
+                return False
+            self._save(remaining)
+            return True
+
 
 def _parse_dt(iso: str) -> datetime:
     from marius.kernel.time_utils import parse_stored_dt

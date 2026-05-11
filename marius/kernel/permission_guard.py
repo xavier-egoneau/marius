@@ -17,7 +17,7 @@ import fnmatch
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 # ── chemins système jamais accessibles ───────────────────────────────────────
 
@@ -32,6 +32,20 @@ _SENSITIVE_PATTERNS = (
     "**/.ssh/**", "**/.gnupg/**",
     str(Path.home() / ".marius" / "marius_providers.json"),
 )
+_SKILLS_DIR = Path.home() / ".marius" / "skills"
+_MARIUS_CONFIG_PATH = Path.home() / ".marius" / "config.json"
+_TELEGRAM_CONFIG_PATH = Path.home() / ".marius" / "telegram.json"
+_SELF_UPDATE_DIR = Path.home() / ".marius" / "self_updates"
+_WATCH_DIR = Path.home() / ".marius" / "watch"
+_RAG_DIR = Path.home() / ".marius" / "workspace"
+_PROJECTS_PATH = Path.home() / ".marius" / "projects.json"
+_ACTIVE_PROJECT_PATH = Path.home() / ".marius" / "active_project.json"
+_APPROVALS_PATH = Path.home() / ".marius" / "approvals.json"
+_SECRET_REFS_PATH = Path.home() / ".marius" / "secret_refs.json"
+_SECRET_FILES_DIR = Path.home() / ".marius" / "secrets"
+_PROVIDERS_PATH = Path.home() / ".marius" / "marius_providers.json"
+_DREAMS_DIR = Path.home() / ".marius" / "dreams"
+_WORKSPACE_ROOT = Path.home() / ".marius" / "workspace"
 
 # ── commandes shell destructrices ─────────────────────────────────────────────
 
@@ -71,6 +85,8 @@ class PermissionGuard:
     mode: str           # "safe" | "limited" | "power"
     cwd: Path
     on_ask: Callable[[str, dict, str], bool] | None = None
+    approval_lookup: Callable[[str], bool | None] | None = None
+    approval_recorder: Callable[[dict[str, Any]], None] | None = None
 
     # Cache des approbations de la session (fingerprint → bool)
     _approvals: dict[str, bool] = field(default_factory=dict, repr=False)
@@ -89,28 +105,157 @@ class PermissionGuard:
         if fp in self._approvals:
             return self._approvals[fp]
 
+        if self.approval_lookup is not None:
+            remembered = self.approval_lookup(fp)
+            if remembered is not None:
+                self._approvals[fp] = remembered
+                return remembered
+
         if self.on_ask is not None:
             approved = self.on_ask(tool_name, arguments, decision.reason)
             self._approvals[fp] = approved
+            self._record_approval(
+                fingerprint=fp,
+                tool_name=tool_name,
+                arguments=arguments,
+                reason=decision.reason,
+                approved=approved,
+            )
             return approved
 
         return False  # pas de callback → deny par défaut
+
+    def _record_approval(
+        self,
+        *,
+        fingerprint: str,
+        tool_name: str,
+        arguments: dict,
+        reason: str,
+        approved: bool,
+    ) -> None:
+        if self.approval_recorder is None:
+            return
+        try:
+            self.approval_recorder({
+                "fingerprint": fingerprint,
+                "tool_name": tool_name,
+                "arguments": arguments,
+                "reason": reason,
+                "mode": self.mode,
+                "cwd": str(self.cwd),
+                "approved": bool(approved),
+            })
+        except Exception:
+            return
 
     def _evaluate(self, tool_name: str, arguments: dict) -> PermissionDecision:
         if self.mode == "power":
             return self._check_invariants(tool_name, arguments)
 
-        if tool_name in ("web_fetch", "web_search", "memory"):
+        if tool_name in (
+            "web_fetch", "web_search", "memory",
+            "host_status", "host_doctor", "host_logs", "host_agent_list",
+            "project_list", "approval_list", "secret_ref_list", "provider_list",
+            "daily_digest", "caldav_doctor",
+            "caldav_agenda", "sentinelle_scan",
+            "rag_source_list", "rag_search", "rag_get",
+        ):
             return _ALLOW
 
         if tool_name == "run_bash":
             return self._check_shell(arguments)
 
-        if tool_name in ("read_file", "list_dir", "vision"):
+        if tool_name in ("read_file", "list_dir", "vision", "explore_tree", "explore_grep", "explore_summary"):
             return self._check_read(arguments)
 
-        if tool_name == "write_file":
+        if tool_name in ("write_file", "make_dir"):
             return self._check_write(arguments)
+        if tool_name == "move_path":
+            return self._check_move(arguments)
+        if tool_name in ("skill_list", "skill_reload"):
+            return self._check_read({"path": str(_SKILLS_DIR)})
+        if tool_name == "skill_create":
+            name = str(arguments.get("name") or "_new_skill")
+            return self._check_write({"path": str(_SKILLS_DIR / name / "SKILL.md")})
+        if tool_name in ("host_agent_save", "host_agent_delete"):
+            return self._check_write({"path": str(_MARIUS_CONFIG_PATH)})
+        if tool_name == "host_gateway_restart":
+            return PermissionDecision("ask", "Redémarrage du gateway demandé.")
+        if tool_name == "host_telegram_configure":
+            decisions: list[PermissionDecision] = []
+            token_ref = str(arguments.get("token_ref") or "")
+            if token_ref.startswith("file:"):
+                decisions.append(self._check_read({"path": token_ref[5:].strip()}))
+            if token_ref.startswith("secret:"):
+                decisions.append(self._check_read({"path": str(_SECRET_REFS_PATH)}))
+            decisions.append(self._check_write({"path": str(_TELEGRAM_CONFIG_PATH)}))
+            return _combine_decisions(decisions)
+        if tool_name in ("self_update_list", "self_update_show"):
+            return self._check_read({"path": str(_SELF_UPDATE_DIR)})
+        if tool_name in ("self_update_propose", "self_update_report_bug"):
+            return self._check_write({"path": str(_SELF_UPDATE_DIR)})
+        if tool_name in ("self_update_apply", "self_update_rollback"):
+            repo_path = str(arguments.get("repo_path") or Path.cwd())
+            return _combine_decisions([
+                self._check_write({"path": repo_path}),
+                self._check_write({"path": str(_SELF_UPDATE_DIR)}),
+            ])
+        if tool_name == "watch_list":
+            return self._check_read({"path": str(_WATCH_DIR)})
+        if tool_name in ("watch_add", "watch_remove", "watch_run"):
+            return self._check_write({"path": str(_WATCH_DIR)})
+        if tool_name == "rag_source_add":
+            decisions = [self._check_write({"path": str(_RAG_DIR)})]
+            source_path = str(arguments.get("path") or arguments.get("uri") or "")
+            if source_path:
+                decisions.append(self._check_read({"path": source_path}))
+            return _combine_decisions(decisions)
+        if tool_name == "rag_source_sync":
+            return self._check_write({"path": str(_RAG_DIR)})
+        if tool_name == "rag_promote_to_memory":
+            return _ALLOW
+        if tool_name == "rag_checklist_add":
+            path = str(arguments.get("path") or "")
+            if path:
+                return self._check_write({"path": path})
+            return self._check_write({"path": str(_RAG_DIR)})
+        if tool_name == "caldav_maintenance":
+            return PermissionDecision("ask", "Maintenance CalDAV demandée (discover/sync/verify).")
+        if tool_name == "project_set_active":
+            decisions = [
+                self._check_write({"path": str(_PROJECTS_PATH)}),
+                self._check_write({"path": str(_ACTIVE_PROJECT_PATH)}),
+            ]
+            requested = arguments.get("path")
+            if isinstance(requested, str) and requested.strip():
+                decisions.append(self._check_read({"path": requested}))
+            return _combine_decisions(decisions)
+        if tool_name in ("approval_decide", "approval_forget"):
+            return self._check_write({"path": str(_APPROVALS_PATH)})
+        if tool_name in ("secret_ref_save", "secret_ref_delete"):
+            decisions = [self._check_write({"path": str(_SECRET_REFS_PATH)})]
+            ref = str(arguments.get("ref") or "")
+            if ref.startswith("file:"):
+                decisions.append(self._check_read({"path": ref[5:].strip()}))
+            return _combine_decisions(decisions)
+        if tool_name == "secret_ref_prepare_file":
+            return _combine_decisions([
+                self._check_write({"path": str(_SECRET_REFS_PATH)}),
+                self._check_write({"path": str(_SECRET_FILES_DIR)}),
+            ])
+        if tool_name in ("provider_save", "provider_delete"):
+            decisions = [self._check_write({"path": str(_PROVIDERS_PATH)})]
+            api_key_ref = str(arguments.get("api_key_ref") or "")
+            if api_key_ref.startswith("file:"):
+                decisions.append(self._check_read({"path": api_key_ref[5:].strip()}))
+            if api_key_ref.startswith("secret:"):
+                decisions.append(self._check_read({"path": str(_SECRET_REFS_PATH)}))
+            return _combine_decisions(decisions)
+        if tool_name == "provider_models":
+            return self._check_read({"path": str(_PROVIDERS_PATH)})
+        if tool_name == "dreaming_run":
+            return self._check_write({"path": str(_DREAMS_DIR)})
 
         return _ALLOW
 
@@ -157,6 +302,16 @@ class PermissionGuard:
             return PermissionDecision("ask", f"Écriture hors du projet ({path})")
         return _ALLOW
 
+    def _check_move(self, arguments: dict) -> PermissionDecision:
+        source = arguments.get("source")
+        destination = arguments.get("destination")
+        for path in (source, destination):
+            if path:
+                decision = self._check_write({"path": path})
+                if decision.verdict != "allow":
+                    return decision
+        return _ALLOW
+
     def _check_shell(self, arguments: dict) -> PermissionDecision:
         if self.mode == "safe":
             return _DENY_SHELL
@@ -170,7 +325,7 @@ class PermissionGuard:
 
 
 def _extract_path(arguments: dict) -> str | None:
-    for key in ("path", "file_path", "directory", "dest", "destination"):
+    for key in ("path", "file_path", "directory", "source", "dest", "destination"):
         val = arguments.get(key)
         if val and isinstance(val, str):
             return val
@@ -210,3 +365,14 @@ def _fingerprint(tool_name: str, arguments: dict) -> str:
     import hashlib, json
     data = json.dumps({"tool": tool_name, "args": arguments}, sort_keys=True)
     return hashlib.sha256(data.encode()).hexdigest()[:16]
+
+
+def _combine_decisions(decisions: list[PermissionDecision]) -> PermissionDecision:
+    denies = [decision for decision in decisions if decision.verdict == "deny"]
+    if denies:
+        return denies[0]
+    asks = [decision for decision in decisions if decision.verdict == "ask"]
+    if asks:
+        reasons = [decision.reason for decision in asks if decision.reason]
+        return PermissionDecision("ask", "\n".join(reasons))
+    return _ALLOW

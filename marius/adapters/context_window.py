@@ -11,6 +11,8 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 
+from marius.provider_config.secrets import resolve_provider_secret
+
 
 def resolve_via_api(
     base_url: str,
@@ -29,8 +31,9 @@ def resolve_via_api(
     body = json.dumps({"name": model}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", "application/json")
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
+    resolved_key = resolve_provider_secret(api_key)
+    if resolved_key:
+        req.add_header("Authorization", f"Bearer {resolved_key}")
 
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

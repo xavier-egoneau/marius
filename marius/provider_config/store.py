@@ -45,6 +45,15 @@ class ProviderStore:
                 return True
         return False
 
+    def delete(self, provider_id: str) -> bool:
+        """Supprime un entry par id. Retourne True si trouvé."""
+        entries = self.load()
+        kept = [entry for entry in entries if entry.id != provider_id]
+        if len(kept) == len(entries):
+            return False
+        self.save(kept)
+        return True
+
 
 def _to_dict(entry: ProviderEntry) -> dict[str, Any]:
     return {

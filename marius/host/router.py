@@ -14,7 +14,7 @@ from typing import Any
 from marius.kernel.contracts import Artifact, Message, Role
 from marius.kernel.runtime import RuntimeOrchestrator, TurnInput
 from marius.kernel.session import SessionRuntime
-from marius.render.adapter import render_message
+from marius.render.adapter import RenderSurface, render_turn_output
 from marius.storage.ui_history import InMemoryVisibleHistoryStore, VisibleHistoryEntry
 
 
@@ -73,13 +73,23 @@ class HostRouter:
         )
 
         if turn_output.assistant_message is not None:
-            rendered_text = render_message(turn_output.assistant_message)
+            rendered_text = render_turn_output(
+                turn_output.assistant_message,
+                tool_results=turn_output.tool_results,
+                compaction_notice=turn_output.compaction_notice,
+                surface=_surface_for_channel(request.channel),
+            )
             self.history_store.append(
                 request.session_id,
-                self._visible_entry_from_message(turn_output.assistant_message),
+                self._visible_entry_from_message(turn_output.assistant_message, content=rendered_text),
             )
         else:
-            rendered_text = "Requête prête pour le provider."
+            rendered_text = render_turn_output(
+                None,
+                tool_results=turn_output.tool_results,
+                compaction_notice=turn_output.compaction_notice,
+                surface=_surface_for_channel(request.channel),
+            ) or "Requête prête pour le provider."
 
         payload_metadata = {
             **turn_output.metadata,
@@ -119,10 +129,10 @@ class HostRouter:
             metadata=self._build_turn_metadata(request),
         )
 
-    def _visible_entry_from_message(self, message: Message) -> VisibleHistoryEntry:
+    def _visible_entry_from_message(self, message: Message, *, content: str | None = None) -> VisibleHistoryEntry:
         return VisibleHistoryEntry(
             role=message.role.value,
-            content=message.content,
+            content=message.content if content is None else content,
             metadata=dict(message.metadata),
             artifacts=[self._artifact_to_dict(artifact) for artifact in message.artifacts],
         )
@@ -134,3 +144,10 @@ class HostRouter:
             "path": artifact.path,
             "data": dict(artifact.data),
         }
+
+
+def _surface_for_channel(channel: str) -> RenderSurface:
+    try:
+        return RenderSurface(channel)
+    except ValueError:
+        return RenderSurface.PORTABLE
