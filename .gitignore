@@ -1,55 +1,89 @@
-# Python caches
+# projet
+todos.md
+ROADMAP.md
+
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Test / tooling caches
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-
-# Packaging / build outputs
+*.pyo
+*.pyd
+.Python
 *.egg-info/
-.eggs/
-build/
 dist/
-pip-wheel-metadata/
+build/
+wheels/
+*.egg
+MANIFEST
 
-# Virtual environments
+# Environnements virtuels
 .venv/
 venv/
 env/
 ENV/
-
-# Local runtime data
-*.db
-*.db-*
-*.sqlite
-*.sqlite3
-*.log
-*.pid
-*.sock
-
-# Local secrets and environment
 .env
 .env.*
 !.env.example
-*.pem
-*.key
 
-# Local Marius scratch/runtime files
-todos.md
-PLAN.md
-docker/searxng/settings.yml
+# Tests & couverture
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
 
-# OS / editor noise
-.DS_Store
-Thumbs.db
-*~
-.swp
-.swo
+# Mypy / type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# SQLite — bases de données locales
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+
+# Marius — données runtime (stockées dans ~/.marius/, pas dans le repo)
+marius_providers.json
+config.json
+
+# Docker
+.docker/
+
+# IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Packaging
+*.whl
+pip-wheel-metadata/
+share/python-wheels/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs
+*.log
+logs/
+
+# Claude Code plans (artifacts de sessions)
+.hermes/

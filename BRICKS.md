@@ -46,7 +46,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 
 **Responsabilités**
 - Auth.
-- Generate / stream.
+- Generate synchrone minimal d’abord, puis stream si besoin réel.
 - Erreurs provider.
 - Remontée d’usage : tokens, limites, métriques si disponibles.
 
@@ -61,6 +61,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 
 **Standalone si**
 - On peut le brancher à un autre runtime agentique sans connaître Marius.
+- Un double en mémoire suffit pour le tester sans réseau.
 
 ---
 
@@ -73,6 +74,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - Évaluer une intention d’action.
 - Produire `allow`, `deny`, `ask`.
 - Gérer un minimum de politique et de TTL d’approbation.
+- Porter une sous-politique pure de décision d’extension d’allow (`guardian_policy`) réutilisable hors UI.
 
 **Dépendances autorisées**
 - Politique de sécurité.
@@ -94,21 +96,24 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - Assembler le contexte logique à envoyer au LLM.
 
 **Responsabilités**
-- Lire les Markdown pertinents.
-- Prioriser mémoire, décisions, repères projet.
+- Lire les Markdown pertinents explicitement fournis.
+- Préserver l’ordre déclaré des couches.
 - Produire un contexte compact et déclaratif.
+- Signaler les sources requises manquantes.
 
 **Dépendances autorisées**
-- Lecture de fichiers `.md`.
-- Métadonnées de session et de projet.
+- Lecture abstraite de sources `.md`.
+- Métadonnées de session et de projet injectées explicitement.
 
 **Dépendances interdites**
 - Appel provider.
 - UI.
 - Heuristique agressive de navigation projet.
+- Découverte automatique du projet actif.
 
 **Standalone si**
 - On peut l’employer dans un autre assistant piloté par des documents Markdown.
+- Un autre host peut lui fournir ses propres sources sans changer sa logique d’assemblage.
 
 ---
 
@@ -121,18 +126,26 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - Distinguer projet actif et projets cités.
 - Porter les règles local/global.
 - Décrire le contexte d’une branche ciblée.
+- Produire un préambule et des `ContextSource` pour le `context_builder` sans assembler lui-même le Markdown.
+- Résoudre la zone allow effective à partir du workspace, des roots déjà allowées et d’une décision injectée par `guardian_policy`.
+- Appliquer mécaniquement la décision du gardien sans réimplémenter la politique de promotion.
+- Ne pas muter l’allow-list quand aucune base allow n’est encore déclarée.
 
 **Dépendances autorisées**
 - Métadonnées projet.
 - Documents projet.
+- Métadonnées de permissions et roots allowées injectées par le host.
 
 **Dépendances interdites**
 - UI de sélection.
 - Provider.
 - Rendu.
+- Lecture directe du contenu Markdown.
 
 **Standalone si**
 - La même convention peut être reprise par un autre système multi-projets.
+- La résolution reste déterministe et testable avec un simple catalogue de chemins projet.
+- Les chemins documentaires du projet actif restent validables indépendamment du host et des permissions concrètes.
 
 ---
 
@@ -253,6 +266,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 
 **Standalone si**
 - Un canal peut être ajouté ou retiré sans casser le kernel.
+- Le host web peut rester léger, sans imposer FastAPI tant que les besoins produit n’en dépendent pas.
 
 ---
 
@@ -285,11 +299,12 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 - Adapter le contenu logique aux surfaces visibles.
 
 **Responsabilités**
-- Markdown portable.
-- Échappement.
-- Rendu des `diff`.
+- Markdown portable d’abord.
+- Échappement / variantes futures par surface.
+- Rendu détaillé des `diff`.
+- Fallback visible pour les autres artefacts.
 - Rendu des notices de compaction.
-- Variantes CLI/web/Telegram.
+- Variantes CLI/web/Telegram quand un besoin produit explicite l’exige.
 
 **Dépendances autorisées**
 - Contrats de sortie.
@@ -301,6 +316,7 @@ Une brique ne doit pas mélanger plusieurs couches sans raison forte.
 
 **Standalone si**
 - Il peut rendre les mêmes objets pour plusieurs surfaces.
+- Sa sortie minimale reste un `str` portable réutilisable hors host web spécifique.
 
 ---
 

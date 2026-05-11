@@ -49,6 +49,7 @@ class Message:
     visible: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
     artifacts: list[Artifact] = field(default_factory=list)
+    tool_calls: list[Any] = field(default_factory=list)  # list[ToolCall], Any pour éviter la référence forward
 
 
 @dataclass(slots=True)

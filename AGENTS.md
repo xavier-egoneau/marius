@@ -21,6 +21,15 @@ Marius doit rester un système agentique modulaire, lisible et réutilisable.
 - Les fichiers Markdown portent les intentions et les règles.
 - Le code porte l’exécution.
 - Les outils ne doivent pas produire des réponses de remplacement si le LLM doit reformuler.
+- Les tests kernel se lancent avec `pytest tests/ -q` depuis la racine du repo.
+- `SOUL.md` porte l’identité de l’agent ; `USER.md` le contexte humain durable ; `AGENTS.md` les conventions du projet.
+- Le host web doit rester une surface mince au-dessus du runtime, pas une source de vérité concurrente.
+- Le `provider_adapter` se développe en mode minimal d’abord : génération synchrone + usage + erreur normalisée avant le streaming.
+- Le `render_adapter` retourne d’abord du Markdown portable (`str`) à partir des contrats kernel avant toute divergence spécifique par canal.
+- Les artefacts `diff` ont un rendu détaillé ; les autres artefacts gardent au moins un fallback visible portable.
+- Le `context_builder` assemble des sources Markdown explicites dans un ordre déclaré ; il ne découvre pas seul le projet actif.
+- Le `project_context` résout explicitement le projet actif, les projets cités et le scope canonique/projet/branche avant d’alimenter le `context_builder`.
+- Les modes `safe` / `limited` / `power` relèvent du `project_context` et de la sécurité ; le workspace est une zone allow de base, pas forcément une prison.
 
 ## Objectif de qualité
 Le système doit être :
