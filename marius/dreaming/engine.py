@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, is_dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
 from marius.adapters.http_provider import make_adapter
-from marius.kernel.contracts import Message, Role
-from marius.kernel.provider import ProviderError, ProviderRequest
+from marius.kernel.contracts import ContextUsage, Message, Role
+from marius.kernel.provider import ProviderChunk, ProviderError, ProviderRequest
 from marius.provider_config.contracts import ProviderEntry
 from marius.storage.memory_store import MemoryStore
 from marius.storage.session_corpus import archive_session_file, list_unprocessed
@@ -16,6 +17,13 @@ from .context import DreamingContext, build_dreaming_context
 from .operations import DreamingResult, apply_operations, parse_response
 from .prompt import build_daily_prompt, build_dreaming_prompt
 from .report import DreamReport, load_last_dream_report, save_dream_report
+
+
+@dataclass(frozen=True)
+class LLMCallResult:
+    text: str
+    usage: ContextUsage
+    model: str = ""
 
 
 def run_dreaming(
@@ -97,6 +105,7 @@ def run_daily(
     dreams_dir: Path | None = None,
     skills_dir: Path | None = None,
     watch_dir: Path | None = None,
+    model: str | None = None,
 ) -> str:
     """Génère le briefing quotidien en Markdown.
 
@@ -122,8 +131,10 @@ def run_daily(
 
     last_report = load_last_dream_report(dreams_dir)
     system_prompt = build_daily_prompt(ctx, last_dream_report=last_report)
+    daily_entry = _with_model(entry, model) if model else entry
     try:
-        return _call_llm(entry, system_prompt, "Génère mon briefing du jour.")
+        result = _call_llm_with_usage(daily_entry, system_prompt, "Génère mon briefing du jour.")
+        return _with_daily_usage_footer(result.text, result.usage, result.model or daily_entry.model)
     except ProviderError as exc:
         return f"# Briefing\n\nErreur provider : {exc}"
 
@@ -133,6 +144,21 @@ def run_daily(
 
 def _call_llm(entry: ProviderEntry, system_prompt: str, user_message: str) -> str:
     """Appel LLM direct (streaming collecté). Ne passe pas par l'orchestrateur."""
+    return _call_llm_with_usage(entry, system_prompt, user_message).text
+
+
+def _with_model(entry: ProviderEntry, model: str | None) -> ProviderEntry:
+    if not model:
+        return entry
+    if is_dataclass(entry):
+        return replace(entry, model=model)
+    data = dict(getattr(entry, "__dict__", {}))
+    data["model"] = model
+    return type(entry)(**data)
+
+
+def _call_llm_with_usage(entry: ProviderEntry, system_prompt: str, user_message: str) -> LLMCallResult:
+    """Appel LLM direct avec récupération best-effort de l'usage tokens."""
     adapter = make_adapter(entry)
     now = datetime.now(timezone.utc)
     messages = [
@@ -141,7 +167,45 @@ def _call_llm(entry: ProviderEntry, system_prompt: str, user_message: str) -> st
     ]
     request = ProviderRequest(messages=messages, tools=[])
     text = ""
+    usage = ContextUsage()
     for chunk in adapter.stream(request):
         if chunk.type == "text_delta":
             text += chunk.delta
-    return text
+        elif chunk.type in {"usage", "done"}:
+            usage = _chunk_usage(chunk, usage)
+    return LLMCallResult(text=text, usage=usage, model=entry.model)
+
+
+def _chunk_usage(chunk: ProviderChunk, current: ContextUsage) -> ContextUsage:
+    raw = chunk.usage
+    if raw is None:
+        return current
+    if isinstance(raw, ContextUsage):
+        return raw
+    if isinstance(raw, dict):
+        return ContextUsage(
+            estimated_input_tokens=int(raw.get("input_tokens") or current.estimated_input_tokens or 0),
+            provider_input_tokens=raw.get("input_tokens", current.provider_input_tokens),
+            provider_output_tokens=raw.get("output_tokens", current.provider_output_tokens),
+            max_context_tokens=current.max_context_tokens,
+        )
+    return current
+
+
+def _with_daily_usage_footer(markdown: str, usage: ContextUsage, model: str) -> str:
+    input_tokens = usage.provider_input_tokens or usage.estimated_input_tokens
+    output_tokens = usage.provider_output_tokens
+    if not input_tokens and output_tokens is None and not model:
+        return markdown
+    parts: list[str] = []
+    if input_tokens:
+        parts.append(f"entrée {input_tokens:,}".replace(",", " "))
+    if output_tokens is not None:
+        parts.append(f"sortie {output_tokens:,}".replace(",", " "))
+    if input_tokens and output_tokens is not None:
+        parts.append(f"total {(input_tokens + output_tokens):,}".replace(",", " "))
+    if model:
+        parts.append(f"modèle `{model}`")
+    if not parts:
+        return markdown
+    return markdown.rstrip() + "\n\n---\n_Tokens daily : " + " · ".join(parts) + "_"

@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
-from marius.dreaming.engine import run_daily, run_dreaming
+from marius.dreaming.engine import LLMCallResult, run_daily, run_dreaming
+from marius.kernel.contracts import ContextUsage
 from marius.storage.memory_store import MemoryStore
 
 
@@ -53,6 +54,7 @@ def test_run_dreaming_empty_context_returns_early(
         memory_store=memory_store,
         entry=entry,
         project_root=tmp_path,
+        watch_dir=tmp_path / "watch",
         archive_sessions=False,
     )
     assert "vide" in result.summary.lower() or "rien" in result.summary.lower()
@@ -75,6 +77,7 @@ def test_run_dreaming_applies_add_operation(
             memory_store=memory_store,
             entry=entry,
             project_root=tmp_path,
+            watch_dir=tmp_path / "watch",
             archive_sessions=False,
         )
 
@@ -97,6 +100,7 @@ def test_run_dreaming_returns_llm_summary(
             memory_store=memory_store,
             entry=entry,
             project_root=tmp_path,
+            watch_dir=tmp_path / "watch",
             archive_sessions=False,
         )
 
@@ -117,6 +121,7 @@ def test_run_dreaming_saves_dream_report(
             entry=entry,
             project_root=tmp_path,
             dreams_dir=dreams_dir,
+            watch_dir=tmp_path / "watch",
             archive_sessions=False,
         )
 
@@ -138,6 +143,7 @@ def test_run_dreaming_provider_error_returns_gracefully(
             memory_store=memory_store,
             entry=entry,
             project_root=tmp_path,
+            watch_dir=tmp_path / "watch",
             archive_sessions=False,
         )
 
@@ -158,6 +164,7 @@ def test_run_dreaming_invalid_llm_response_no_crash(
             memory_store=memory_store,
             entry=entry,
             project_root=tmp_path,
+            watch_dir=tmp_path / "watch",
             archive_sessions=False,
         )
 
@@ -175,6 +182,7 @@ def test_run_daily_empty_context_returns_placeholder(
         memory_store=memory_store,
         entry=entry,
         project_root=tmp_path,
+        watch_dir=tmp_path / "watch",
     )
     assert isinstance(briefing, str)
     assert len(briefing) > 0
@@ -188,15 +196,51 @@ def test_run_daily_returns_llm_output(
 ) -> None:
     memory_store.add("Préférence : réponses courtes")
 
-    with patch("marius.dreaming.engine._call_llm", return_value="# Briefing\n\nTout va bien."):
+    with patch(
+        "marius.dreaming.engine._call_llm_with_usage",
+        return_value=LLMCallResult(
+            text="# Briefing\n\nTout va bien.",
+            usage=ContextUsage(provider_input_tokens=120, provider_output_tokens=20),
+            model="gpt-4o",
+        ),
+    ):
         briefing = run_daily(
             memory_store=memory_store,
             entry=entry,
             project_root=tmp_path,
+            watch_dir=tmp_path / "watch",
         )
 
     assert "Briefing" in briefing
     assert "Tout va bien." in briefing
+    assert "Tokens daily" in briefing
+    assert "total 140" in briefing
+    assert "gpt-4o" in briefing
+
+
+def test_run_daily_can_use_model_override(
+    memory_store: MemoryStore, entry, tmp_path: Path
+) -> None:
+    memory_store.add("Préférence : réponses courtes")
+
+    with patch(
+        "marius.dreaming.engine._call_llm_with_usage",
+        return_value=LLMCallResult(
+            text="# Briefing\n\nTout va bien.",
+            usage=ContextUsage(),
+            model="gpt-mini",
+        ),
+    ) as call:
+        briefing = run_daily(
+            memory_store=memory_store,
+            entry=entry,
+            project_root=tmp_path,
+            watch_dir=tmp_path / "watch",
+            model="gpt-mini",
+        )
+
+    assert call.call_args.args[0].model == "gpt-mini"
+    assert "modèle `gpt-mini`" in briefing
 
 
 def test_run_daily_provider_error_returns_error_message(
@@ -205,11 +249,12 @@ def test_run_daily_provider_error_returns_error_message(
     memory_store.add("Mémoire test")
     from marius.kernel.provider import ProviderError
 
-    with patch("marius.dreaming.engine._call_llm", side_effect=ProviderError("refused")):
+    with patch("marius.dreaming.engine._call_llm_with_usage", side_effect=ProviderError("refused")):
         briefing = run_daily(
             memory_store=memory_store,
             entry=entry,
             project_root=tmp_path,
+            watch_dir=tmp_path / "watch",
         )
 
     assert "Erreur" in briefing or "erreur" in briefing
@@ -273,7 +318,14 @@ def test_scheduler_runner_daily_writes_cache(
     memory_store.add("mémoire pour le daily")
 
     with (
-        patch("marius.dreaming.engine._call_llm", return_value="# Briefing\n\nBonjour."),
+        patch(
+            "marius.dreaming.engine._call_llm_with_usage",
+            return_value=LLMCallResult(
+                text="# Briefing\n\nBonjour.",
+                usage=ContextUsage(provider_input_tokens=10, provider_output_tokens=5),
+                model="gpt-4o",
+            ),
+        ),
         patch("marius.gateway.workspace.daily_cache_path", return_value=tmp_path / "daily.md"),
     ):
         runner._run_scheduled_daily()

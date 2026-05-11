@@ -379,7 +379,13 @@ def _search_result(chunks: list[RagChunk], documents: list[Any], title: str) -> 
             "chunks": [chunk_to_dict(chunk) for chunk in chunks],
             "documents": [document_hit_to_dict(document) for document in documents],
         },
-        artifacts=[Artifact(type=ArtifactType.REPORT, path="rag-results.md", data={"content": markdown})],
+        artifacts=[
+            Artifact(
+                type=ArtifactType.REPORT,
+                path="rag-results.md",
+                data={"content": markdown, "display": False},
+            )
+        ],
     )
 
 

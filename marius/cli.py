@@ -1017,6 +1017,7 @@ def _current_process_family_pids() -> set[int]:
 
 def _find_marius_web_pids(agent_name: str, port: int) -> list[int]:
     import subprocess
+    from marius.config.store import ConfigStore
 
     try:
         result = subprocess.run(
@@ -1028,6 +1029,12 @@ def _find_marius_web_pids(agent_name: str, port: int) -> list[int]:
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
+    default_agent = None
+    try:
+        config = ConfigStore().load()
+        default_agent = config.main_agent if config else None
+    except Exception:
+        default_agent = None
     pids: list[int] = []
     for line in result.stdout.splitlines():
         stripped = line.strip()
@@ -1040,9 +1047,15 @@ def _find_marius_web_pids(agent_name: str, port: int) -> list[int]:
             continue
         if "marius" not in args or (" web" not in args and " restart" not in args):
             continue
-        if f"--agent {agent_name}" not in args and f"--agent={agent_name}" not in args:
+        has_agent_arg = "--agent " in args or "--agent=" in args
+        has_port_arg = "--port " in args or "--port=" in args
+        if has_agent_arg and f"--agent {agent_name}" not in args and f"--agent={agent_name}" not in args:
             continue
-        if f"--port {int(port)}" not in args and f"--port={int(port)}" not in args:
+        if not has_agent_arg and default_agent and agent_name != default_agent:
+            continue
+        if has_port_arg and f"--port {int(port)}" not in args and f"--port={int(port)}" not in args:
+            continue
+        if not has_port_arg and int(port) != 8765:
             continue
         pids.append(pid)
     return pids

@@ -69,7 +69,13 @@ def build_daily_prompt(ctx: DreamingContext, last_dream_report: "Any | None" = N
     parts.append(
         "Tu es le processus de briefing quotidien de Marius.\n"
         "Ta mission : générer un briefing de début de journée clair et actionnable.\n"
-        "Réponds en Markdown structuré."
+        "Réponds en Markdown structuré.\n"
+        "Ne produis pas un simple résumé compact : structure agenda, priorités/listes, "
+        "veille utile, croisements/déductions et prochaine action quand les sources existent.\n"
+        "Si une source attendue n'est pas présente dans ce contexte, indique seulement "
+        "qu'elle n'a pas été vérifiée au lieu d'inventer ou de conclure à vide.\n"
+        "Aère le Markdown : lignes vides entre sections, et si tu utilises `---`, "
+        "laisse une ligne vide avant et après le séparateur."
     )
 
     # Dernier rapport de dream si disponible

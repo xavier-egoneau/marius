@@ -52,6 +52,44 @@ body {
 }
 .hbtn:hover { color: var(--bright); border-color: #6b4b2b; }
 #btn-git.active { color: var(--accent); border-color: #6b4b2b; }
+#btn-history.active { color: var(--accent); border-color: #6b4b2b; }
+
+/* ── historique ─────────────────────────────────────────────────── */
+#history-panel {
+  display: none; border-bottom: 1px solid var(--line);
+  background: #171411; flex-shrink: 0; max-height: 260px;
+  overflow: hidden; flex-direction: column;
+}
+#history-panel.show { display: flex; }
+#history-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 18px; border-bottom: 1px solid var(--line);
+}
+#history-summary { font-size: 12px; color: var(--soft); flex: 1; }
+#history-refresh {
+  background: none; border: none; color: var(--soft);
+  cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 4px;
+}
+#history-refresh:hover { color: var(--bright); }
+#history-list { overflow-y: auto; padding: 4px 0; }
+.history-item {
+  width: 100%; border: none; background: none; color: var(--text);
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 18px; text-align: left; cursor: pointer;
+}
+.history-item:hover { background: #211d19; }
+.history-title {
+  color: var(--bright); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1;
+}
+.history-meta { color: var(--soft); font-size: 12px; flex-shrink: 0; }
+#archive-bar {
+  display: none; align-items: center; gap: 10px;
+  border-bottom: 1px solid var(--line); background: #171411;
+  padding: 8px 18px; color: var(--soft); font-size: 12px; flex-shrink: 0;
+}
+#archive-bar.show { display: flex; }
+#archive-title { color: var(--bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── messages ───────────────────────────────────────────────────── */
 #messages { flex: 1; overflow-y: auto; padding: 20px 0; scroll-behavior: smooth; }
@@ -95,7 +133,7 @@ body {
 .body.md ul,.body.md ol { padding-left: 1.4em; margin: .4em 0; }
 .body.md li { margin: .15em 0; }
 .body.md blockquote { border-left: 3px solid var(--accent); margin: .5em 0; padding: .25em .8em; color: var(--soft); }
-.body.md hr  { border: none; border-top: 1px solid var(--line); margin: .8em 0; }
+.body.md hr  { border: none; border-top: 1px solid var(--line); margin: 1.35em 0; }
 .body.md a   { color: var(--accent); text-decoration: none; }
 .body.md a:hover { text-decoration: underline; }
 .body.md table { border-collapse: collapse; margin: .5em 0; font-size: .88em; width: 100%; }
@@ -269,11 +307,25 @@ body {
   <div id="status"></div>
   <span id="agent-label">Marius</span>
   <span id="model-label"></span>
+  <button class="hbtn" id="btn-history" onclick="toggleHistoryPanel()">Historique</button>
   <button class="hbtn" id="btn-git" onclick="toggleGitPanel()">Diff</button>
   <button class="hbtn" onclick="newConv()">Nouvelle conversation</button>
 </div>
 
+<div id="history-panel">
+  <div id="history-head">
+    <div id="history-summary">Conversations archivées</div>
+    <button id="history-refresh" onclick="loadConversations()" title="Rafraîchir">↻</button>
+  </div>
+  <div id="history-list"></div>
+</div>
+
 <div id="upload-preview"></div>
+<div id="archive-bar">
+  <span>Archive</span>
+  <span id="archive-title"></span>
+  <button class="hbtn" onclick="returnToCurrentConversation()">Conversation courante</button>
+</div>
 <div id="messages"></div>
 
 <div id="git-panel">
@@ -303,6 +355,8 @@ let busy = false;
 let pendingUploads = [];   // [{name, path}]
 let pendingPermId = null;
 let es = null;
+let currentHistory = [];
+let viewingArchive = false;
 
 // ── init ──────────────────────────────────────────────────────────
 async function init() {
@@ -326,10 +380,8 @@ async function init() {
   try {
     const h = await fetch('/api/history').then(r => r.json());
     if (h.ok && h.messages.length > 0) {
-      for (const msg of h.messages) {
-        appendMsg(msg.role, msg.content, msg.role === 'assistant');
-      }
-      scrollBottom();
+      currentHistory = h.messages;
+      renderMessages(currentHistory);
     }
   } catch {}
 
@@ -368,8 +420,8 @@ function handleSSE(ev) {
   } else if (ev.type === 'permission_request') {
     showPermission(ev);
   } else if (ev.type === 'error') {
-    finishTurn();
     appendError(ev.error);
+    finishTurn();
   } else if (ev.type === 'status') {
     appendStatus(ev.message);
   } else if (ev.type === 'disconnected') {
@@ -458,6 +510,7 @@ let _activeMsg = null;
 let _rawText = '';   // buffer pendant le streaming
 
 async function send() {
+  if (viewingArchive) return;
   const inp = document.getElementById('input');
   let text = inp.value.trim();
   document.getElementById('cmd-suggestions').className = '';
@@ -471,12 +524,8 @@ async function send() {
   // Gateway commands (/new /stop) → CommandEvent, pas de tour LLM
   if (cmdDef?.gateway && !pendingUploads.length) {
     inp.value = ''; autoResize(inp); inp.focus();
-    await fetch('/api/command', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({cmd: cmdName}),
-    });
-    if (cmdName === '/new') {
+    const ok = await postCommand(cmdName);
+    if (ok && cmdName === '/new') {
       document.getElementById('messages').innerHTML = '';
       _rawText = ''; _activeMsg = null; _cursorEl = null;
     }
@@ -505,6 +554,7 @@ async function send() {
   setBusy(true);
 
   appendMsg('user', text);
+  currentHistory.push({role: 'user', content: text});
   _rawText = '';
   // Crée le message sans .body — il sera inséré au premier delta de texte,
   // après les éventuelles traces d'outils qui précèdent la réponse.
@@ -517,11 +567,20 @@ async function send() {
   document.getElementById('messages').appendChild(_activeMsg);
   scrollBottom();
 
-  await fetch('/api/message', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({text, session_id: SESSION_ID}),
-  });
+  try {
+    const resp = await fetch('/api/message', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text, session_id: SESSION_ID}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${resp.status}`);
+    }
+  } catch (err) {
+    appendError(err.message || String(err));
+    finishTurn();
+  }
   // Response arrives via SSE
 }
 
@@ -540,16 +599,20 @@ function appendDelta(delta) {
 }
 
 function finishTurn() {
+  const finalText = _rawText;
   if (_cursorEl) { _cursorEl.remove(); _cursorEl = null; }
-  if (_activeMsg && _rawText) {
+  if (_activeMsg && finalText) {
     let body = _activeMsg.querySelector('.body');
     if (!body) {
       body = document.createElement('div');
       body.className = 'body';
       _activeMsg.appendChild(body);
     }
-    body.innerHTML = renderMarkdown(_rawText);
+    body.innerHTML = renderMarkdown(finalText);
     body.classList.add('md');
+  }
+  if (!viewingArchive && finalText.trim()) {
+    currentHistory.push({role: 'assistant', content: finalText});
   }
   _rawText = '';
   _activeMsg = null;
@@ -558,10 +621,22 @@ function finishTurn() {
 }
 
 function appendError(msg) {
+  if (!_activeMsg) {
+    _activeMsg = document.createElement('div');
+    _activeMsg.className = 'msg assistant';
+    _activeMsg.innerHTML = '<div class="role">Marius</div>';
+    document.getElementById('messages').appendChild(_activeMsg);
+  }
   if (_activeMsg) {
-    const body = _activeMsg.querySelector('.body');
+    let body = _activeMsg.querySelector('.body');
+    if (!body) {
+      body = document.createElement('div');
+      body.className = 'body';
+      _activeMsg.insertBefore(body, _cursorEl);
+    }
     if (_cursorEl) _cursorEl.remove();
-    body.textContent += `\n[Erreur : ${msg}]`;
+    body.textContent += body.textContent ? `\n[Erreur : ${msg}]` : `[Erreur : ${msg}]`;
+    scrollBottom();
   }
 }
 
@@ -578,23 +653,104 @@ function appendStatus(msg) {
 
 // ── /stop ─────────────────────────────────────────────────────────
 async function sendStop() {
-  await fetch('/api/command', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({cmd: '/stop'}),
-  });
+  await postCommand('/stop');
 }
 
 // ── /new ──────────────────────────────────────────────────────────
 async function newConv() {
-  await fetch('/api/command', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({cmd: '/new'}),
-  });
+  if (viewingArchive) returnToCurrentConversation();
+  const ok = await postCommand('/new');
+  if (!ok) return;
   document.getElementById('messages').innerHTML = '';
+  currentHistory = [];
   _activeMsg = null;
   _cursorEl = null;
+  await loadConversations();
+}
+
+async function postCommand(cmd) {
+  try {
+    const resp = await fetch('/api/command', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({cmd}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    return true;
+  } catch (err) {
+    appendError(err.message || String(err));
+    setBusy(false);
+    return false;
+  }
+}
+
+// ── historique conversations ─────────────────────────────────────
+function toggleHistoryPanel() {
+  const panel = document.getElementById('history-panel');
+  const btn = document.getElementById('btn-history');
+  if (panel.classList.contains('show')) {
+    panel.className = '';
+    btn.classList.remove('active');
+  } else {
+    panel.className = 'show';
+    btn.classList.add('active');
+    loadConversations();
+  }
+}
+
+async function loadConversations() {
+  const list = document.getElementById('history-list');
+  const summary = document.getElementById('history-summary');
+  try {
+    const d = await fetch('/api/conversations').then(r => r.json());
+    const conversations = d.conversations || [];
+    summary.textContent = conversations.length
+      ? `${conversations.length} conversation${conversations.length > 1 ? 's' : ''} archivée${conversations.length > 1 ? 's' : ''}`
+      : 'Aucune conversation archivée';
+    if (!conversations.length) {
+      list.innerHTML = '<div style="padding:12px 18px;color:var(--soft);font-size:12px">Aucune archive pour l’instant</div>';
+      return;
+    }
+    list.innerHTML = conversations.map(c => {
+      const title = escHtml(c.title || 'Conversation');
+      const when = escHtml(formatDate(c.closed_at || c.opened_at));
+      const turns = Number(c.turns || 0);
+      return `<button class="history-item" onclick="openConversation('${escHtml(c.id)}')">` +
+        `<span class="history-title">${title}</span>` +
+        `<span class="history-meta">${turns} tour${turns > 1 ? 's' : ''} · ${when}</span>` +
+      `</button>`;
+    }).join('');
+  } catch {
+    summary.textContent = 'Historique indisponible';
+  }
+}
+
+async function openConversation(id) {
+  try {
+    const d = await fetch(`/api/conversation?id=${encodeURIComponent(id)}`).then(r => r.json());
+    if (!d.ok || !d.conversation) return;
+    viewingArchive = true;
+    renderMessages(d.conversation.messages || []);
+    document.getElementById('archive-title').textContent = d.conversation.title || 'Conversation';
+    document.getElementById('archive-bar').className = 'show';
+    setBusy(false);
+  } catch {}
+}
+
+function returnToCurrentConversation() {
+  viewingArchive = false;
+  document.getElementById('archive-bar').className = '';
+  renderMessages(currentHistory);
+  setBusy(false);
+}
+
+function renderMessages(messages) {
+  document.getElementById('messages').innerHTML = '';
+  for (const msg of messages || []) {
+    appendMsg(msg.role, msg.content, msg.role === 'assistant');
+  }
+  scrollBottom();
 }
 
 // ── /model ────────────────────────────────────────────────────────
@@ -865,8 +1021,9 @@ function renderUserContent(text) {
 function setBusy(val) {
   busy = val;
   document.getElementById('status').className = val ? 'on busy' : 'on';
-  document.getElementById('btn-send').disabled = val;
-  document.getElementById('input').disabled = val;
+  document.getElementById('btn-send').disabled = val || viewingArchive;
+  document.getElementById('input').disabled = val || viewingArchive;
+  document.getElementById('btn-upload').disabled = val || viewingArchive;
   document.getElementById('btn-stop').className = val ? 'show' : '';
   if (!val) {
     Object.keys(_toolLines).forEach(k => delete _toolLines[k]);
@@ -882,6 +1039,15 @@ function scrollBottom() {
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
                   .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formatDate(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toLocaleString('fr-FR', {
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+  });
 }
 
 function autoResize(el) {

@@ -15,6 +15,8 @@ Routes :
   POST /api/command       → envoie CommandEvent (/new, /stop)
   POST /api/permission    → répond à une PermissionRequestEvent
   POST /api/upload        → sauvegarde un fichier (base64), retourne le path
+  GET  /api/conversations → liste les conversations visibles archivées
+  GET  /api/conversation  → charge une conversation visible archivée
 """
 
 from __future__ import annotations
@@ -34,7 +36,9 @@ from marius.gateway.protocol import (
     CommandEvent, InputEvent, PermissionResponseEvent,
     decode, encode,
 )
-from marius.gateway.workspace import web_history_path
+from marius.gateway.workspace import web_conversations_dir, web_history_path
+from marius.storage.log_store import log_event
+from marius.storage.ui_history import FileVisibleConversationStore
 
 _SSE_KEEPALIVE = 25   # secondes entre deux keep-alive SSE
 
@@ -78,6 +82,7 @@ class WebServer:
         # Historique de la conversation (persisté sur disque)
         self._history_path = web_history_path(agent_name)
         self._history: list[dict] = self._load_history()
+        self._conversation_store = FileVisibleConversationStore(web_conversations_dir(agent_name))
         self._current_assistant: str = ""       # accumule les deltas du tour en cours
 
         self._welcome: dict = {}   # données du WelcomeEvent
@@ -97,6 +102,18 @@ class WebServer:
             self._history_path.write_text(json.dumps(self._history, ensure_ascii=False))
         except Exception:
             pass
+
+    def _archive_history(self) -> dict[str, Any] | None:
+        try:
+            return self._conversation_store.archive(self._history, agent=self.agent_name)
+        except Exception:
+            return None
+
+    def list_conversations(self) -> list[dict[str, Any]]:
+        return self._conversation_store.list()
+
+    def load_conversation(self, conversation_id: str) -> dict[str, Any] | None:
+        return self._conversation_store.load(conversation_id)
 
     # ── connexion ─────────────────────────────────────────────────────────────
 
@@ -123,23 +140,28 @@ class WebServer:
 
     def send_input(self, text: str, session_id: str) -> None:
         self._active_session = session_id
-        self._history.append({"role": "user", "content": text})
-        self._save_history()
         self._current_assistant = ""
-        with self._send_lock:
-            self._ensure_connected()
-            assert self._sock is not None
-            self._sock.sendall(encode(InputEvent(text=text)))
+        try:
+            with self._send_lock:
+                self._send_gateway_event(InputEvent(text=text))
+        except OSError:
+            self._fail_active_turn()
+            raise
+        self._history.append({"role": "user", "content": text, "created_at": _now_iso()})
+        self._save_history()
 
     def send_command(self, cmd: str) -> None:
+        try:
+            with self._send_lock:
+                self._send_gateway_event(CommandEvent(cmd=cmd))
+        except OSError:
+            self._fail_active_turn()
+            raise
         if cmd == "/new":
+            self._archive_history()
             self._history.clear()
             self._current_assistant = ""
             self._save_history()
-        with self._send_lock:
-            self._ensure_connected()
-            assert self._sock is not None
-            self._sock.sendall(encode(CommandEvent(cmd=cmd)))
 
     def approve_permission(self, request_id: str, approved: bool) -> None:
         with self._perms_lock:
@@ -168,10 +190,8 @@ class WebServer:
         while True:
             line = self._read_line(sock)
             if line is None:
-                with self._connect_lock:
-                    if self._sock is sock:
-                        self._sock = None
-                        self._buf.clear()
+                self._drop_connection(sock)
+                log_event("web_gateway_disconnected", {"agent": self.agent_name, "port": self.port})
                 self._broadcast({"type": "disconnected", "reason": "gateway_closed"})
                 break
             self._dispatch(line)
@@ -216,11 +236,7 @@ class WebServer:
             with self._perms_lock:
                 self._pending_perms.pop(req_id, None)
             with self._send_lock:
-                self._ensure_connected()
-                assert self._sock is not None
-                self._sock.sendall(encode(
-                    PermissionResponseEvent(request_id=req_id, approved=result[0])
-                ))
+                self._send_gateway_event(PermissionResponseEvent(request_id=req_id, approved=result[0]))
 
         elif etype == "error":
             self._push(sid, {"type": "error", "error": event.get("message", "")})
@@ -230,7 +246,11 @@ class WebServer:
 
         elif etype == "done":
             if self._current_assistant.strip():
-                self._history.append({"role": "assistant", "content": self._current_assistant})
+                self._history.append({
+                    "role": "assistant",
+                    "content": self._current_assistant,
+                    "created_at": _now_iso(),
+                })
                 self._save_history()
             self._current_assistant = ""
             self._push(sid, {"type": "done_turn"})
@@ -271,6 +291,60 @@ class WebServer:
     def _ensure_connected(self) -> None:
         if self._sock is None:
             self.connect()
+
+    def _send_gateway_event(self, event: Any) -> None:
+        """Envoie un event au gateway, avec reconnexion si la socket a expiré.
+
+        Après un restart, le serveur web peut garder une socket Unix morte
+        jusqu'à ce que le reader thread observe l'EOF. Sans retry ici, le POST
+        HTTP peut sembler accepté côté navigateur alors qu'aucun tour n'atteint
+        le gateway.
+        """
+        payload = encode(event)
+        last_error: OSError | None = None
+        for _attempt in range(2):
+            self._ensure_connected()
+            sock = self._sock
+            if sock is None:
+                continue
+            try:
+                sock.sendall(payload)
+                if _attempt:
+                    log_event("web_gateway_reconnect_ok", {"agent": self.agent_name, "port": self.port})
+                return
+            except OSError as exc:
+                last_error = exc
+                log_event("web_gateway_send_retry", {
+                    "agent": self.agent_name,
+                    "port": self.port,
+                    "error": str(exc),
+                    "attempt": _attempt + 1,
+                })
+                self._drop_connection(sock)
+        log_event("web_gateway_send_failed", {
+            "agent": self.agent_name,
+            "port": self.port,
+            "error": str(last_error or "gateway socket unavailable"),
+        })
+        raise last_error or OSError("gateway socket unavailable")
+
+    def _drop_connection(self, sock: socket.socket | None = None) -> None:
+        current: socket.socket | None = None
+        with self._connect_lock:
+            if sock is not None and self._sock is not sock:
+                return
+            current = self._sock
+            self._sock = None
+            self._buf.clear()
+        if current is not None:
+            try:
+                current.close()
+            except OSError:
+                pass
+
+    def _fail_active_turn(self) -> None:
+        self._current_assistant = ""
+        self._active_session = None
 
     # ── HTTP server ───────────────────────────────────────────────────────────
 
@@ -331,6 +405,20 @@ def _make_handler(ws: WebServer):
                 self._json({"ok": True, "messages": ws._history})
                 return
 
+            if parsed.path == "/api/conversations":
+                self._json({"ok": True, "conversations": ws.list_conversations()})
+                return
+
+            if parsed.path == "/api/conversation":
+                query = parse_qs(parsed.query)
+                conversation_id = query.get("id", [""])[0]
+                conversation = ws.load_conversation(conversation_id)
+                if conversation is None:
+                    self._json({"ok": False, "error": "not_found"}, 404)
+                    return
+                self._json({"ok": True, "conversation": conversation})
+                return
+
             if parsed.path == "/api/git/status":
                 from marius.channels.web.git_helpers import git_changes
                 self._json(git_changes(ws._cwd))
@@ -373,7 +461,11 @@ def _make_handler(ws: WebServer):
                 if not text:
                     self._json({"ok": False, "error": "empty_message"}, 400)
                     return
-                ws.send_input(text, sid)
+                try:
+                    ws.send_input(text, sid)
+                except OSError as exc:
+                    self._json({"ok": False, "error": str(exc)}, 503)
+                    return
                 self._json({"ok": True, "session_id": sid})
                 return
 
@@ -387,7 +479,11 @@ def _make_handler(ws: WebServer):
                 if cmd not in ("/new", "/stop"):
                     self._json({"ok": False, "error": f"commande non reconnue : {cmd}"}, 400)
                     return
-                ws.send_command(cmd)
+                try:
+                    ws.send_command(cmd)
+                except OSError as exc:
+                    self._json({"ok": False, "error": str(exc)}, 503)
+                    return
                 self._json({"ok": True})
                 return
 
@@ -519,6 +615,11 @@ def _get_skill_commands(agent_name: str) -> list[dict]:
         return [{"name": f"/{n}", "desc": sc.description or sc.name} for n, sc in cmds.items()]
     except Exception:
         return []
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _get_models(ws: WebServer) -> list[str]:

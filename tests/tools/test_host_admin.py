@@ -95,6 +95,7 @@ def test_host_agent_save_creates_agent_from_provider(tmp_path):
         {
             "name": "worker",
             "provider_id": "provider-1",
+            "daily_model": "gpt-mini",
             "add_tools": ["host_status"],
             "skills": ["assistant"],
             "set_main": True,
@@ -106,6 +107,7 @@ def test_host_agent_save_creates_agent_from_provider(tmp_path):
     assert loaded is not None
     assert loaded.main_agent == "worker"
     assert loaded.agents["worker"].model == "gpt-test"
+    assert loaded.agents["worker"].daily_model == "gpt-mini"
     assert "host_status" in loaded.agents["worker"].tools
 
 

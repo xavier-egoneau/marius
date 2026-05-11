@@ -22,6 +22,9 @@ from marius.tools.web import WEB_SEARCH
 SearchHandler = Callable[[dict[str, Any]], ToolResult]
 WatchSummarizer = Callable[[Any, list[dict[str, Any]], dict[str, Any]], str]
 
+_DAILY_TOPIC_SOFT_LIMIT = 8
+_MANUAL_CADENCES = {"", "manual", "none", "off"}
+
 
 def make_watch_tools(
     store: WatchStore | None = None,
@@ -36,15 +39,19 @@ def make_watch_tools(
     def watch_add(arguments: dict[str, Any]) -> ToolResult:
         title = _text(arguments.get("title"))
         query = _text(arguments.get("query"))
+        cadence = _text(arguments.get("cadence")) or "manual"
         if not title:
             return ToolResult(tool_call_id="", ok=False, summary="Argument `title` missing.", error="missing_arg:title")
         if not query:
             return ToolResult(tool_call_id="", ok=False, summary="Argument `query` missing.", error="missing_arg:query")
+        limit_warning = _daily_topic_limit_warning(watch_store, arguments, cadence)
+        if limit_warning:
+            return limit_warning
         try:
             topic = watch_store.add(
                 title=title,
                 query=query,
-                cadence=_text(arguments.get("cadence")) or "manual",
+                cadence=cadence,
                 tags=_string_list(arguments.get("tags")),
                 settings=_settings_from_args(arguments),
                 topic_id=_text(arguments.get("id")) or None,
@@ -86,7 +93,10 @@ def make_watch_tools(
     def watch_run(arguments: dict[str, Any]) -> ToolResult:
         topic_id = _text(arguments.get("id"))
         max_results = _bounded_int(arguments.get("max_results"), default=5, minimum=1, maximum=20)
+        timeout_seconds = _bounded_int(arguments.get("timeout_seconds"), default=8, minimum=1, maximum=60)
+        retry_attempts = _bounded_int(arguments.get("retry_attempts"), default=1, minimum=1, maximum=5)
         dedupe = _optional_bool(arguments.get("dedupe"), True)
+        include_portals = _optional_bool(arguments.get("include_portals"), False)
         topics = [watch_store.get(topic_id)] if topic_id else watch_store.list_topics(include_disabled=False)
         topics = [topic for topic in topics if topic is not None and topic.enabled]
         if not topics:
@@ -95,24 +105,33 @@ def make_watch_tools(
         reports = []
         lines = [f"Watch run: {len(topics)} topic(s)."]
         for topic in topics:
-            search_result = search({"query": topic.query, "max_results": max_results})
+            search_result = search(
+                {
+                    "query": topic.query,
+                    "max_results": max_results,
+                    "timeout_seconds": timeout_seconds,
+                    "retry_attempts": retry_attempts,
+                }
+            )
             if not search_result.ok:
                 lines.append(f"- {topic.id}: search failed — {search_result.summary}")
                 reports.append({"topic": asdict(topic), "ok": False, "error": search_result.error, "summary": search_result.summary})
                 continue
             raw_results = _search_results(search_result)
             results = _score_results(raw_results, topic, watch_store.last_seen_urls(topic.id))
+            results, skipped_portal_count = _filter_portal_results(results, include_portals=include_portals)
             duplicate_count = 0
             if dedupe:
                 results, duplicate_count = watch_store.dedupe_results(topic.id, results)
             metadata = _result_metrics(results)
             metadata["duplicate_count"] = duplicate_count
+            metadata["skipped_portal_count"] = skipped_portal_count
             metadata["dedupe"] = dedupe
             llm_summary, summary_status = _maybe_summarize(topic, results, metadata, arguments, summarizer)
             metadata["summary_status"] = summary_status
             if llm_summary:
                 metadata["llm_summary"] = llm_summary
-            summary = _report_summary(topic, len(raw_results), len(results), duplicate_count, llm_summary)
+            summary = _report_summary(topic, len(raw_results), len(results), duplicate_count, skipped_portal_count, llm_summary)
             report = watch_store.save_report(
                 topic,
                 results,
@@ -132,7 +151,13 @@ def make_watch_tools(
             ok=any(item.get("ok") for item in reports),
             summary="\n".join(lines),
             data={"reports": reports},
-            artifacts=[Artifact(type=ArtifactType.REPORT, path="watch-run.md", data={"content": markdown})],
+            artifacts=[
+                Artifact(
+                    type=ArtifactType.REPORT,
+                    path="watch-run.md",
+                    data={"content": markdown, "display": False},
+                )
+            ],
         )
 
     return {
@@ -147,6 +172,13 @@ def make_watch_tools(
                         "title": {"type": "string"},
                         "query": {"type": "string"},
                         "cadence": {"type": "string", "description": "Human cadence label, default manual."},
+                        "confirm_over_limit": {
+                            "type": "boolean",
+                            "description": (
+                                "Set true only after the user confirms adding a scheduled topic "
+                                "beyond the daily watch soft limit."
+                            ),
+                        },
                         "tags": {"type": "array", "items": {"type": "string"}},
                         "summary_enabled": {"type": "boolean", "description": "Whether watch_run should ask the LLM for a topic summary when available. Default true."},
                         "notify": {
@@ -206,6 +238,9 @@ def make_watch_tools(
                     "properties": {
                         "id": {"type": "string", "description": "Optional topic id. If omitted, runs all enabled topics."},
                         "max_results": {"type": "integer", "description": "Results per topic, default 5, max 20."},
+                        "timeout_seconds": {"type": "integer", "description": "Search timeout per topic, default 8 seconds."},
+                        "retry_attempts": {"type": "integer", "description": "Search retry attempts per topic, default 1."},
+                        "include_portals": {"type": "boolean", "description": "Include likely portal/index pages. Default false."},
                         "summarize": {"type": "boolean", "description": "Override topic summary setting for this run."},
                         "dedupe": {"type": "boolean", "description": "Keep true by default. Set false only for controlled backfill or audit runs."},
                     },
@@ -286,6 +321,48 @@ def _search_results(result: ToolResult) -> list[dict[str, Any]]:
     return [item for item in raw if isinstance(item, dict)]
 
 
+def _daily_topic_limit_warning(watch_store: WatchStore, arguments: dict[str, Any], cadence: str) -> ToolResult | None:
+    if _optional_bool(arguments.get("confirm_over_limit"), False):
+        return None
+    topic_id = _text(arguments.get("id"))
+    existing = watch_store.get(topic_id) if topic_id else None
+    if existing is not None and _is_scheduled_cadence(existing.cadence):
+        return None
+    if not _is_scheduled_cadence(cadence):
+        return None
+    count = _scheduled_topic_count(watch_store)
+    if count < _DAILY_TOPIC_SOFT_LIMIT:
+        return None
+    title = _text(arguments.get("title"))
+    return ToolResult(
+        tool_call_id="",
+        ok=False,
+        summary=(
+            f"Daily watch topic soft limit reached: {count} active scheduled topic(s). "
+            "Ask the user for confirmation, then retry watch_add with confirm_over_limit: true."
+        ),
+        error="watch_topic_limit_warning",
+        data={
+            "existing_count": count,
+            "limit": _DAILY_TOPIC_SOFT_LIMIT,
+            "requested_title": title,
+            "requested_cadence": cadence,
+        },
+    )
+
+
+def _scheduled_topic_count(watch_store: WatchStore) -> int:
+    return sum(
+        1
+        for topic in watch_store.list_topics(include_disabled=False)
+        if _is_scheduled_cadence(getattr(topic, "cadence", "manual"))
+    )
+
+
+def _is_scheduled_cadence(cadence: object) -> bool:
+    return _text(cadence).lower() not in _MANUAL_CADENCES
+
+
 def _run_markdown(reports: list[dict[str, Any]]) -> str:
     lines = ["# Watch Run", ""]
     for item in reports:
@@ -354,15 +431,76 @@ def _score_results(results: list[dict[str, Any]], topic: Any, seen_urls: set[str
         if _text(item.get("published_at") or item.get("published") or item.get("date")):
             score += 0.05
             reasons.append("dated")
+        if _is_specific_result(item):
+            score += 0.12
+            reasons.append("specific_result")
+            item["watch_result_type"] = "specific"
+        elif _is_likely_portal_result(item):
+            score -= 0.45
+            reasons.append("portal_like")
+            item["watch_result_type"] = "portal"
+        else:
+            item["watch_result_type"] = "unknown"
         item["is_new"] = is_new
-        item["novelty_score"] = round(min(score, 1.0), 3)
+        item["novelty_score"] = round(max(0.0, min(score, 1.0)), 3)
         item["novelty_reasons"] = reasons
         scored.append(item)
         if url:
             run_seen.add(url)
             if domain:
                 seen_domains.add(domain)
-    return scored
+    return sorted(scored, key=lambda item: _float(item.get("novelty_score"), 0.0), reverse=True)
+
+
+def _filter_portal_results(results: list[dict[str, Any]], *, include_portals: bool) -> tuple[list[dict[str, Any]], int]:
+    if include_portals:
+        return results, 0
+    filtered = [item for item in results if item.get("watch_result_type") != "portal"]
+    return filtered, len(results) - len(filtered)
+
+
+def _is_specific_result(item: dict[str, Any]) -> bool:
+    url = _text(item.get("url"))
+    domain = _domain(url)
+    path_parts = _path_parts(url)
+    haystack = " ".join(
+        _text(item.get(key)).lower()
+        for key in ("title", "content", "snippet", "description", "url")
+    )
+    if domain == "github.com" and len(path_parts) >= 2 and path_parts[0] not in _GITHUB_RESERVED_PATHS:
+        return True
+    specific_markers = {
+        "annonce", "annoncé", "launch", "launched", "release", "sortie",
+        "cve-", "vulnérabilité", "vulnerability", "patch", "exploit",
+        "rapport", "étude", "case study", "open source", "nouveau",
+        "nouvelle version", "version", "prototype",
+    }
+    if any(marker in haystack for marker in specific_markers):
+        return True
+    return any(part.isdigit() and len(part) == 4 for part in path_parts)
+
+
+def _is_likely_portal_result(item: dict[str, Any]) -> bool:
+    url = _text(item.get("url"))
+    domain = _domain(url)
+    path_parts = _path_parts(url)
+    haystack = " ".join(
+        _text(item.get(key)).lower()
+        for key in ("title", "content", "snippet", "description", "url")
+    )
+    if domain == "github.com" and path_parts[:1] == ["trending"]:
+        return True
+    if len(path_parts) > 2:
+        return False
+    portal_markers = {
+        "actualité", "actualités", "news", "rubrique", "category", "tag",
+        "topic", "topics", "dossier", "section", "tendance", "tendances",
+        "trending", "veille", "archive", "archives", "intelligence-artificielle",
+        "design/actualite", "actualite-design",
+    }
+    if any(marker in haystack for marker in portal_markers):
+        return True
+    return not path_parts
 
 
 def _maybe_summarize(
@@ -394,8 +532,17 @@ def _summary_enabled(topic: Any, override: object) -> bool:
     return _optional_bool(settings.get("summary_enabled"), True)
 
 
-def _report_summary(topic: Any, raw_count: int, saved_count: int, duplicate_count: int, llm_summary: str) -> str:
+def _report_summary(
+    topic: Any,
+    raw_count: int,
+    saved_count: int,
+    duplicate_count: int,
+    skipped_portal_count: int,
+    llm_summary: str,
+) -> str:
     parts = [f"{saved_count}/{raw_count} result(s) saved for {getattr(topic, 'query', '')!r}"]
+    if skipped_portal_count:
+        parts.append(f"{skipped_portal_count} portal/index page(s) skipped")
     if duplicate_count:
         parts.append(f"{duplicate_count} duplicate result(s) skipped")
     if llm_summary:
@@ -465,6 +612,25 @@ def _domain(url: str) -> str:
     if not url:
         return ""
     return urlparse(url).netloc.lower().removeprefix("www.")
+
+
+_GITHUB_RESERVED_PATHS = {
+    "about", "apps", "blog", "collections", "customer-stories", "enterprise",
+    "events", "explore", "features", "marketplace", "new", "notifications",
+    "orgs", "pricing", "pulls", "search", "settings", "showcases", "topics",
+    "trending",
+}
+
+
+def _path_parts(url: str) -> list[str]:
+    if not url:
+        return []
+    parsed = urlparse(url)
+    return [
+        part.strip().lower()
+        for part in parsed.path.split("/")
+        if part.strip()
+    ]
 
 
 def _dict(value: object) -> dict[str, Any]:

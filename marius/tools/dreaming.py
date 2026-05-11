@@ -27,6 +27,7 @@ def make_dreaming_tools(
     dreams_dir: Path | None = None,
     skills_dir: Path | None = None,
     watch_dir: Path | None = None,
+    daily_model: str = "",
 ) -> dict[str, ToolEntry]:
     root = Path(project_root)
 
@@ -60,6 +61,7 @@ def make_dreaming_tools(
         )
 
     def daily_digest(arguments: dict[str, Any]) -> ToolResult:
+        requested_model = _optional_text(arguments.get("model")) or daily_model
         briefing = run_daily(
             memory_store=memory_store,
             entry=entry,
@@ -68,8 +70,12 @@ def make_dreaming_tools(
             dreams_dir=dreams_dir,
             skills_dir=skills_dir,
             watch_dir=watch_dir,
+            model=requested_model or None,
         )
+        footer = _extract_daily_usage_footer(briefing)
         summary = _markdown_summary(briefing)
+        if footer and footer not in summary:
+            summary = f"{summary}\n\n{footer}"
         return ToolResult(
             tool_call_id="",
             ok=not briefing.startswith("# Briefing\n\nErreur provider"),
@@ -77,11 +83,13 @@ def make_dreaming_tools(
             data={
                 "markdown": briefing,
                 "project_root": str(root),
+                "model": requested_model or entry.model,
+                "usage_footer": footer,
             },
             artifacts=[
                 Artifact(
                     type=ArtifactType.REPORT,
-                    data={"format": "markdown", "content": briefing},
+                    data={"format": "markdown", "content": briefing, "display": False},
                 )
             ],
             error="daily_failed" if briefing.startswith("# Briefing\n\nErreur provider") else None,
@@ -109,7 +117,16 @@ def make_dreaming_tools(
             definition=ToolDefinition(
                 name="daily_digest",
                 description="Generate the daily briefing markdown from memories, skill daily contracts and watch reports.",
-                parameters={"type": "object", "properties": {}, "required": []},
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "model": {
+                            "type": "string",
+                            "description": "Optional model override for this daily only.",
+                        },
+                    },
+                    "required": [],
+                },
             ),
             handler=daily_digest,
         ),
@@ -126,8 +143,20 @@ def _optional_bool(value: object, default: bool) -> bool:
     return bool(value)
 
 
+def _optional_text(value: object) -> str:
+    return str(value).strip() if value is not None else ""
+
+
 def _markdown_summary(markdown: str, *, limit: int = 400) -> str:
     text = "\n".join(line.strip() for line in markdown.splitlines() if line.strip())
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
+
+
+def _extract_daily_usage_footer(markdown: str) -> str:
+    for line in reversed(markdown.splitlines()):
+        text = line.strip()
+        if text.startswith("_Tokens daily :") and text.endswith("_"):
+            return text
+    return ""

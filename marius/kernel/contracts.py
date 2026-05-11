@@ -73,6 +73,7 @@ class ToolResult:
 class ContextUsage:
     estimated_input_tokens: int = 0
     provider_input_tokens: int | None = None
+    provider_output_tokens: int | None = None
     max_context_tokens: int | None = None
 
 

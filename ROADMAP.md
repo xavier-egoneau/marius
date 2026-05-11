@@ -12,12 +12,14 @@ interface web · canal Telegram · service systemd user · dreaming + daily (LLM
 /dream /daily) · skill dev (plan/dev/commit/review/test/resume/pr) · subagents dev ·
 outil `open_marius_web` · host diagnostics/action tools (`host_status`, `host_doctor`,
 `host_logs`, `host_agent_*`, `host_telegram_configure`, `host_gateway_restart`) · self-update proposal tools
-· persistent watch topics · projet actif explicite (`project_list`, `project_set_active`)
+· persistent watch topics avec limite douce · projet actif explicite (`project_list`, `project_set_active`)
 · commandes dev projet (`/projects`, `/project`, `/tasks`, `/decision`, `/check`)
 · approvals/secrets administrables · provider config tools · dreaming/daily ToolEntry
 · artefacts cross-canaux via rendu de sortie de tour commun · skills utilisateur migrés
 `caldav_calendar`, `sentinelle` · RAG Markdown v1 (`rag_source_*`,
-`rag_search`, `rag_get`, `rag_promote_to_memory`)
+`rag_search`, `rag_get`, `rag_promote_to_memory`) · historique web des conversations
+visibles canoniques · skill `watch` pour sujets de veille daily · daily coaché
+avec footer tokens et modèle dédié optionnel
 
 ---
 
@@ -73,6 +75,14 @@ perd pas de capacités importantes tout en conservant sa logique v2.
       déduplication par URL et notifications Telegram opt-in via tag `notify`/`telegram`.
 - [x] **Veille avancée** — améliorer la qualité des rapports : scoring de nouveauté,
       résumé LLM par topic, configuration fine des notifications et backfill contrôlé.
+- [x] **Skill veille daily** — guider l'agent pour transformer “ajoute X à mes sujets
+      de veille” en `watch_add`, puis utiliser les rapports comme sources de synthèse
+      sans imprimer le rapport brut.
+- [x] **Veille bornée UX** — prévenir avant d'ajouter un 9e sujet planifié actif,
+      demander confirmation, puis autoriser l'ajout explicite sans bloquer durablement.
+- [x] **Veille daily bornée en temps** — pour un daily, limiter `watch_run`
+      à peu de résultats, sans résumé LLM intermédiaire, avec timeout court et
+      un seul retry par sujet.
 - [x] **Explore tools** — ajouter des outils standalone `tree`, `grep` et `summary`
       (`explore_tree`, `explore_grep`, `explore_summary`) sans dépendre du shell.
 - [x] **Commandes projet Maurice** — compléter le skill dev ou un skill projet avec
@@ -82,6 +92,8 @@ perd pas de capacités importantes tout en conservant sa logique v2.
 - [x] **Daily/dreaming comme ToolEntry optionnels** — exposer `dreaming_run` et
       `daily_digest` au modèle quand c'est utile, tout en gardant `/dream`, `/daily`
       et le scheduler comme surfaces directes.
+- [x] **Daily optimisable** — afficher l'usage tokens en bas du daily et permettre
+      un modèle dédié via `daily_model` ou un override ponctuel de `daily_digest`.
 - [x] **Rappels complets** — l'outil Marius crée des rappels, mais doit aussi lister
       et annuler les rappels comme Maurice (`reminders.list`, `reminders.cancel`).
 - [x] **Mémoire consultable par outil** — exposer recherche/liste/get mémoire au modèle,
@@ -195,6 +207,8 @@ Le subagent tourne en isolation, rend son résultat au parent, puis s'arrête.
 - [x] **Multi-canal** — même session accessible depuis CLI, web et Telegram
 - [x] **Artefacts cross-canaux** — diffs, notices de compaction lisibles dans tous les canaux
 - [x] **Rendu Markdown** — tester la cohérence entre CLI (rich), web (HTML) et Telegram
+- [x] **Historique web canonique** — archiver les conversations visibles sur `/new`
+      et les consulter depuis Marius web sans réactiver une ancienne session runtime
 
 ---
 

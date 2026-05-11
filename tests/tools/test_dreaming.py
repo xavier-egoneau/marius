@@ -41,14 +41,23 @@ def test_dreaming_run_returns_structured_result(tmp_path: Path, monkeypatch):
 
 def test_daily_digest_returns_markdown_artifact(tmp_path: Path, monkeypatch):
     memory = MemoryStore(db_path=tmp_path / "memory.db")
+    calls = {}
 
-    monkeypatch.setattr("marius.tools.dreaming.run_daily", lambda **kwargs: "# Briefing\n\nSalut")
-    tools = make_dreaming_tools(memory_store=memory, entry=_entry(), project_root=tmp_path)
+    def fake_run_daily(**kwargs):
+        calls.update(kwargs)
+        return "# Briefing\n\nSalut\n\n---\n_Tokens daily : entrée 10 · sortie 5 · total 15 · modèle `gpt-mini`_"
+
+    monkeypatch.setattr("marius.tools.dreaming.run_daily", fake_run_daily)
+    tools = make_dreaming_tools(memory_store=memory, entry=_entry(), project_root=tmp_path, daily_model="gpt-mini")
 
     result = tools["daily_digest"].handler({})
 
     assert result.ok is True
-    assert result.data["markdown"] == "# Briefing\n\nSalut"
+    assert result.data["markdown"].startswith("# Briefing\n\nSalut")
+    assert result.data["model"] == "gpt-mini"
+    assert result.data["usage_footer"] == "_Tokens daily : entrée 10 · sortie 5 · total 15 · modèle `gpt-mini`_"
+    assert result.data["usage_footer"] in result.summary
+    assert calls["model"] == "gpt-mini"
     assert result.artifacts
     assert result.artifacts[0].data["format"] == "markdown"
     memory.close()

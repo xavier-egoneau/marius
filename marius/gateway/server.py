@@ -18,6 +18,7 @@ import signal
 import socket
 import sys
 import threading
+import fcntl
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,7 +52,7 @@ from .protocol import (
     ToolStartEvent, WelcomeEvent, decode, encode, tool_target,
 )
 from .workspace import (
-    ensure_workspace,
+    ensure_workspace, lock_path,
     memory_db_path, pid_path, reminders_path, sessions_dir, socket_path,
     web_history_path,
 )
@@ -389,6 +390,7 @@ class GatewayServer:
             active_skills=self.active_skills or None,
             project_root=self.workspace,
             watch_dir=self._watch_dir_for_commands(),
+            daily_model=getattr(getattr(self, "agent_config", None), "daily_model", ""),
         )
         result = tools["dreaming_run"].handler({})
         return result.summary if result.ok else f"Dreaming échoué : {result.summary}"
@@ -401,6 +403,7 @@ class GatewayServer:
             active_skills=self.active_skills or None,
             project_root=self.workspace,
             watch_dir=self._watch_dir_for_commands(),
+            daily_model=getattr(getattr(self, "agent_config", None), "daily_model", ""),
         )
         result = tools["daily_digest"].handler({})
         markdown = str(result.data.get("markdown") or result.summary)
@@ -582,6 +585,19 @@ class GatewayServer:
 
     def serve(self) -> None:
         sock_path = socket_path(self.agent_name)
+        lock_file = lock_path(self.agent_name).open("w", encoding="utf-8")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.stderr.write(f"Gateway '{self.agent_name}' déjà actif.\n")
+            lock_file.close()
+            return
+
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+
         if sock_path.exists():
             sock_path.unlink()
 
@@ -622,6 +638,10 @@ class GatewayServer:
             pf = pid_path(self.agent_name)
             if pf.exists():
                 pf.unlink()
+            try:
+                lock_file.close()
+            except OSError:
+                pass
             self._write_corpus()
 
     def _handle_connection(self, conn: socket.socket) -> None:
@@ -669,7 +689,14 @@ class GatewayServer:
 
             elif etype == "input":
                 if turn_thread and turn_thread.is_alive():
-                    continue  # ignore if turn running
+                    log_event("turn_input_rejected_busy", {
+                        "session_id": self.agent_name,
+                        "agent": self.agent_name,
+                        "user_preview": preview(str(event.get("text", ""))),
+                    })
+                    self._send(conn, ErrorEvent(message="Un tour est déjà en cours. Attends la fin ou utilise Stop."))
+                    self._send(conn, DoneEvent())
+                    continue
                 stop_event = threading.Event()
                 text = event.get("text", "")
                 turn_thread = threading.Thread(

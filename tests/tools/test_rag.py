@@ -29,6 +29,7 @@ def test_rag_tools_add_sync_search_and_promote(tmp_path):
     found = tools["rag_search"].handler({"query": "memory"})
     assert found.ok is True
     assert len(found.data["chunks"]) == 1
+    assert found.artifacts[0].data["display"] is False
 
     promoted = tools["rag_promote_to_memory"].handler({
         "chunk_id": found.data["chunks"][0]["id"],

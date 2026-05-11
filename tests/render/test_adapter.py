@@ -140,6 +140,16 @@ def test_render_report_artifact_with_markdown_content() -> None:
     assert "Résumé de veille." in rendered
 
 
+def test_render_hidden_report_artifact_returns_empty_string() -> None:
+    artifact = Artifact(
+        type=ArtifactType.REPORT,
+        path="rag-results.md",
+        data={"content": "# Internal observation", "display": False},
+    )
+
+    assert render_artifact(artifact) == ""
+
+
 def test_render_artifacts_deduplicates_identical_artifacts() -> None:
     artifact = Artifact(type=ArtifactType.REPORT, path="report.txt")
 

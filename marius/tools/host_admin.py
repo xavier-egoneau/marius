@@ -73,7 +73,8 @@ def make_host_admin_tools(
         for name in sorted(cfg.agents):
             agent = cfg.agents[name]
             suffix = " (main)" if name == cfg.main_agent else ""
-            lines.append(f"- {name}{suffix}: {agent.provider_id} / {agent.model}, {len(agent.skills)} skill(s)")
+            daily = f", daily={agent.daily_model}" if agent.daily_model else ""
+            lines.append(f"- {name}{suffix}: {agent.provider_id} / {agent.model}{daily}, {len(agent.skills)} skill(s)")
             row = _agent_config_data(agent)
             if not include_tools:
                 row.pop("tools", None)
@@ -107,6 +108,9 @@ def make_host_admin_tools(
         model = _optional_text(arguments.get("model")) or (existing.model if existing else provider_model)
         if not model:
             return ToolResult(tool_call_id="", ok=False, summary="Argument `model` is required when creating an agent.", error="missing_arg:model")
+        daily_model = _optional_text(arguments.get("daily_model"))
+        if not daily_model and existing:
+            daily_model = existing.daily_model
 
         try:
             tools = _resolve_toolset(existing.tools if existing else list(DEFAULT_TOOLS), arguments)
@@ -125,6 +129,7 @@ def make_host_admin_tools(
             name=name,
             provider_id=provider_id,
             model=model,
+            daily_model=daily_model,
             tools=tools,
             skills=skills,
             scheduler_enabled=scheduler_enabled,
@@ -362,6 +367,7 @@ def make_host_admin_tools(
                         "name": {"type": "string"},
                         "provider_id": {"type": "string"},
                         "model": {"type": "string"},
+                        "daily_model": {"type": "string", "description": "Optional model used only for daily generation."},
                         "tools": {"type": "array", "items": {"type": "string"}},
                         "add_tools": {"type": "array", "items": {"type": "string"}},
                         "remove_tools": {"type": "array", "items": {"type": "string"}},
@@ -495,6 +501,7 @@ def _agent_status(cfg: MariusConfig, name: str, is_running: StatusRunner) -> dic
         "configured": True,
         "provider_id": agent.provider_id,
         "model": agent.model,
+        "daily_model": agent.daily_model,
         "tool_count": len(agent.tools),
         "tools": list(agent.tools),
         "skill_count": len(agent.skills),
@@ -513,6 +520,7 @@ def _agent_config_data(agent: AgentConfig) -> dict[str, Any]:
         "name": agent.name,
         "provider_id": agent.provider_id,
         "model": agent.model,
+        "daily_model": agent.daily_model,
         "tools": list(agent.tools),
         "skills": list(agent.skills),
         "scheduler_enabled": agent.scheduler_enabled,

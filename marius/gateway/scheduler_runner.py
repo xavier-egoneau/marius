@@ -47,6 +47,7 @@ class GatewayScheduler:
         self.watch_store    = watch_store if watch_store is not None else WatchStore()
         self.watch_search_handler = watch_search_handler
         self.watch_summarizer = watch_summarizer
+        self.daily_model    = str(getattr(agent_config, "daily_model", "") or "").strip()
         self._get_chat_id   = get_telegram_chat_id
         self._scheduler     = None
 
@@ -96,6 +97,7 @@ class GatewayScheduler:
             active_skills=self.active_skills or None,
             project_root=self.workspace,
             watch_dir=self.watch_store.root,
+            daily_model=self.daily_model,
         )
         result = tools["dreaming_run"].handler({})
         log_event("dreaming_run", {
@@ -114,6 +116,7 @@ class GatewayScheduler:
             active_skills=self.active_skills or None,
             project_root=self.workspace,
             watch_dir=self.watch_store.root,
+            daily_model=self.daily_model,
         )
         result = tools["daily_digest"].handler({})
         briefing = str(result.data.get("markdown") or result.summary)

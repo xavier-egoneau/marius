@@ -74,6 +74,22 @@ def test_web_search_retries_when_searxng_is_starting(monkeypatch):
     assert result.data["results"][0]["title"] == "Marius"
 
 
+def test_web_search_can_disable_retries(monkeypatch):
+    calls = {"count": 0}
+
+    def failing_urlopen(*args, **kwargs):
+        calls["count"] += 1
+        raise URLError("connection refused")
+
+    monkeypatch.setattr("marius.tools.web.urlopen", failing_urlopen)
+    monkeypatch.setattr("marius.tools.web.time.sleep", lambda _seconds: None)
+
+    result = WEB_SEARCH.handler({"query": "marius", "retry_attempts": 1})
+
+    assert result.ok is False
+    assert calls["count"] == 1
+
+
 def test_web_search_validation_returns_valid_tool_result():
     result = WEB_SEARCH.handler({})
 

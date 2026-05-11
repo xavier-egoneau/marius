@@ -94,6 +94,8 @@ def render_artifact(
     surface: RenderSurface = RenderSurface.PORTABLE,
 ) -> str:
     del surface
+    if artifact.data.get("display") is False:
+        return ""
     if artifact.type is ArtifactType.DIFF:
         patch = _resolve_diff_content(artifact)
         label = artifact.path or str(artifact.data.get("path", "diff"))

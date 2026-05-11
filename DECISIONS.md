@@ -223,6 +223,35 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
 - Sécurité : les clés évidentes de secrets (`token`, `api_key`, `password`, etc.) sont masquées avant injection.
 - Impact : `web_search` fournit bien ses URLs et snippets au modèle, sans court-circuiter le chat ni transformer l'outil en réponse finale.
 
+## 2026-05-11 — Historique web des conversations visibles
+- Décision : archiver les conversations visibles du web au moment de `/new`, sous forme de snapshots JSON par agent.
+- Principe : l'historique web est consultable depuis l'interface, mais ne devient pas une source de vérité concurrente du runtime agent.
+- Règle : consulter une archive ne réactive pas une ancienne session ; la conversation courante reste portée par le gateway.
+- Impact : le web conserve la fluidité multi-canal tout en permettant de retrouver les conversations canoniques clôturées.
+
+## 2026-05-11 — Artefacts observationnels non imprimés par défaut
+- Décision : les outils de collecte de contexte (`rag_search`, `watch_run`, `daily_digest`) peuvent retourner des rapports structurés masqués au rendu final.
+- Principe : le modèle reçoit les données d'outil et doit produire une synthèse lisible ; le chat ne doit pas recevoir un dump brut après la réponse.
+- Règle : les artefacts d'action utiles comme les diffs restent visibles ; les rapports de sources servent d'observations sauf demande explicite.
+- Impact : le daily et les réponses RAG/veille gagnent en lisibilité sans perdre les données nécessaires au LLM.
+
+## 2026-05-11 — Daily coach et veille bornée
+- Décision : le daily est une synthèse coachée, pas un agrégat exhaustif de sources.
+- Principe : les sources RAG, calendrier, veille et dreaming servent à croiser, déduire et prioriser ; elles ne doivent pas être imprimées telles quelles.
+- Décision veille : `watch_add` applique une limite douce à 8 sujets planifiés actifs ; au-delà, l'agent demande confirmation puis peut réessayer explicitement.
+- Impact : l'utilisateur garde la main sur le coût et le bruit du daily, sans bloquer les ajouts volontaires.
+
+## 2026-05-11 — Daily optimisable par modèle dédié
+- Décision : le daily affiche en bas un footer d'usage tokens best-effort, quand le provider expose ces données.
+- Décision : un agent peut déclarer un `daily_model` optionnel, utilisé seulement pour le daily planifié ou `/daily`; `daily_digest` accepte aussi un `model` ponctuel.
+- Principe : changer le modèle du daily ne change pas le modèle conversationnel courant.
+- Impact : les tâches récurrentes peuvent être optimisées en coût/latence sans casser l'expérience du chat principal.
+
+## 2026-05-11 — Veille daily bornée en temps
+- Décision : les recherches de veille déclenchées pour préparer un daily doivent utiliser des timeouts courts et peu de retries.
+- Principe : le daily doit rester un briefing fluide ; les résumés LLM intermédiaires de chaque topic sont désactivés pendant le daily, puisque l'agent synthétise déjà en réponse finale.
+- Impact : plusieurs sujets de veille peuvent enrichir le daily sans bloquer le tour pendant de longues minutes.
+
 ## 2026-05-11 — Migration des skills utilisateur Maurice
 - Décision : porter `caldav_calendar` et `sentinelle` comme skills Marius Markdown-first, avec outils Marius natifs lorsque l'ancien skill avait du code.
 - Principe : ne pas importer aveuglément les wrappers `tools.py` Maurice ; chaque capacité devient une brique testable sous `marius/tools/`.

@@ -16,6 +16,7 @@ def test_config_store_roundtrip(tmp_path):
                 name="main",
                 provider_id="provider-1",
                 model="gemma4",
+                daily_model="gemma4-mini",
                 tools=["read_file", "vision"],
                 skills=["assistant"],
             )
@@ -27,6 +28,7 @@ def test_config_store_roundtrip(tmp_path):
 
     assert loaded is not None
     assert loaded.permission_mode == "limited"
+    assert loaded.agents["main"].daily_model == "gemma4-mini"
     assert loaded.agents["main"].tools == ["read_file", "vision"]
     assert loaded.agents["main"].skills == ["assistant"]
 

@@ -114,6 +114,7 @@ def _handle_web_search(arguments: dict) -> ToolResult:
     base_url = os.environ.get("MARIUS_SEARCH_URL", _DEFAULT_SEARCH_URL).rstrip("/")
     max_results = int(arguments.get("max_results") or 5)
     timeout = int(arguments.get("timeout_seconds") or _DEFAULT_TIMEOUT)
+    retry_attempts = _bounded_int(arguments.get("retry_attempts"), default=_SEARCH_RETRY_ATTEMPTS, minimum=1, maximum=5)
 
     search_url = _build_search_url(base_url, query)
     req = Request(
@@ -121,7 +122,7 @@ def _handle_web_search(arguments: dict) -> ToolResult:
         headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
     )
     try:
-        raw = _read_search_response(req, timeout=timeout)
+        raw = _read_search_response(req, timeout=timeout, retry_attempts=retry_attempts)
     except HTTPError as exc:
         if exc.code in (404, 502, 503):
             return _error(
@@ -178,6 +179,7 @@ WEB_SEARCH = ToolEntry(
                 "query": {"type": "string", "description": "Requête de recherche."},
                 "max_results": {"type": "integer", "description": "Nombre max de résultats (défaut 5)."},
                 "timeout_seconds": {"type": "integer", "description": "Timeout en secondes (défaut 20)."},
+                "retry_attempts": {"type": "integer", "description": "Nombre d'essais réseau (défaut 3, min 1, max 5)."},
             },
             "required": ["query"],
         },
@@ -202,9 +204,9 @@ def _decode(raw: bytes, content_type: str) -> str:
     return raw.decode(charset, errors="replace")
 
 
-def _read_search_response(req: Request, *, timeout: int) -> bytes:
+def _read_search_response(req: Request, *, timeout: int, retry_attempts: int = _SEARCH_RETRY_ATTEMPTS) -> bytes:
     last_error: URLError | OSError | None = None
-    for attempt in range(_SEARCH_RETRY_ATTEMPTS):
+    for attempt in range(retry_attempts):
         try:
             with urlopen(req, timeout=timeout) as resp:
                 return resp.read(_DEFAULT_MAX_BYTES + 1)
@@ -212,7 +214,7 @@ def _read_search_response(req: Request, *, timeout: int) -> bytes:
             raise
         except (URLError, OSError) as exc:
             last_error = exc
-            if attempt < _SEARCH_RETRY_ATTEMPTS - 1:
+            if attempt < retry_attempts - 1:
                 time.sleep(_SEARCH_RETRY_DELAY_SECONDS)
     if last_error is not None:
         raise last_error
@@ -222,3 +224,11 @@ def _read_search_response(req: Request, *, timeout: int) -> bytes:
 def _error(message: str, *, retryable: bool = False) -> ToolResult:
     error = "retryable_web_error" if retryable else "web_error"
     return ToolResult(tool_call_id="", ok=False, summary=message, error=error)
+
+
+def _bounded_int(value: object, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))

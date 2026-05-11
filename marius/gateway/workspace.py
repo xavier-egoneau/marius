@@ -29,6 +29,10 @@ def pid_path(agent_name: str) -> Path:
     return _RUN_DIR / f"{agent_name}.pid"
 
 
+def lock_path(agent_name: str) -> Path:
+    return _RUN_DIR / f"{agent_name}.lock"
+
+
 def web_pid_path(agent_name: str, port: int) -> Path:
     return _RUN_DIR / f"web_{agent_name}_{int(port)}.pid"
 
@@ -43,6 +47,10 @@ def telegram_offset_path(agent_name: str) -> Path:
 
 def web_history_path(agent_name: str) -> Path:
     return workspace_dir(agent_name) / "web_history.json"
+
+
+def web_conversations_dir(agent_name: str) -> Path:
+    return workspace_dir(agent_name) / "web_conversations"
 
 
 def reminders_path(agent_name: str) -> Path:

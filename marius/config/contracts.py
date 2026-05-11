@@ -79,6 +79,7 @@ class AgentConfig:
     name: str
     provider_id: str        # référence un ProviderEntry.id
     model: str
+    daily_model: str = ""        # modèle optionnel dédié au daily
     tools: list[str] = field(default_factory=lambda: list(DEFAULT_TOOLS))
     skills: list[str] = field(default_factory=list)
     dream_time: str = "02:00"        # HH:MM UTC — vide = désactivé

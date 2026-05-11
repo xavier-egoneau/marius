@@ -67,6 +67,7 @@ class OpenAICompatibleAdapter:
             usage = ContextUsage(
                 estimated_input_tokens=usage_raw.get("prompt_tokens", 0),
                 provider_input_tokens=usage_raw.get("prompt_tokens"),
+                provider_output_tokens=usage_raw.get("completion_tokens"),
             )
         except (KeyError, IndexError, TypeError) as exc:
             raise ProviderError(
@@ -116,6 +117,7 @@ class OpenAICompatibleAdapter:
                         usage=ContextUsage(
                             estimated_input_tokens=u.get("prompt_tokens", 0),
                             provider_input_tokens=u.get("prompt_tokens"),
+                            provider_output_tokens=u.get("completion_tokens"),
                         ),
                     )
                 for choice in event.get("choices") or []:
@@ -180,6 +182,7 @@ class OllamaNativeAdapter:
             usage = ContextUsage(
                 estimated_input_tokens=raw.get("prompt_eval_count", 0),
                 provider_input_tokens=raw.get("prompt_eval_count"),
+                provider_output_tokens=raw.get("eval_count"),
             )
         except (KeyError, TypeError) as exc:
             raise ProviderError(
@@ -231,6 +234,7 @@ class OllamaNativeAdapter:
                         usage=ContextUsage(
                             estimated_input_tokens=chunk.get("prompt_eval_count", 0),
                             provider_input_tokens=chunk.get("prompt_eval_count"),
+                            provider_output_tokens=chunk.get("eval_count"),
                         ),
                     )
         except ProviderError:
@@ -272,6 +276,7 @@ class ChatGPTOAuthAdapter:
                 usage = ContextUsage(
                     estimated_input_tokens=chunk.usage.get("input_tokens", 0),
                     provider_input_tokens=chunk.usage.get("input_tokens"),
+                    provider_output_tokens=chunk.usage.get("output_tokens"),
                 )
 
         return ProviderResponse(

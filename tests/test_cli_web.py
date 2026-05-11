@@ -42,16 +42,25 @@ def test_marius_web_available_returns_false_on_unavailable(monkeypatch):
 
 
 def test_find_marius_web_pids_matches_web_and_restart_commands(monkeypatch):
+    class _Config:
+        main_agent = "main"
+
+    class _Store:
+        def load(self):
+            return _Config()
+
     class _Result:
         stdout = "\n".join(
             [
                 " 123 /usr/bin/python3 /home/egza/.local/bin/marius web --agent main --port 8765",
                 " 124 /usr/bin/python3 /home/egza/.local/bin/marius restart --agent=main --port=8765",
+                " 127 /usr/bin/python3 /home/egza/.local/bin/marius restart",
                 " 125 /usr/bin/python3 /home/egza/.local/bin/marius web --agent other --port 8765",
                 " 126 /usr/bin/python3 /home/egza/.local/bin/marius web --agent main --port 8766",
             ]
         )
 
+    monkeypatch.setattr("marius.config.store.ConfigStore", lambda: _Store())
     monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: _Result())
 
-    assert _find_marius_web_pids("main", 8765) == [123, 124]
+    assert _find_marius_web_pids("main", 8765) == [123, 124, 127]

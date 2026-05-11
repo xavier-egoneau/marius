@@ -332,6 +332,7 @@ class RuntimeOrchestrator:
                     final_usage = ContextUsage(
                         estimated_input_tokens=chunk.usage.get("input_tokens", 0),
                         provider_input_tokens=chunk.usage.get("input_tokens"),
+                        provider_output_tokens=chunk.usage.get("output_tokens"),
                     )
                 elif chunk.usage and isinstance(chunk.usage, ContextUsage):
                     final_usage = chunk.usage
@@ -366,6 +367,7 @@ class RuntimeOrchestrator:
         return ContextUsage(
             estimated_input_tokens=estimated_tokens,
             provider_input_tokens=usage.provider_input_tokens,
+            provider_output_tokens=usage.provider_output_tokens,
             max_context_tokens=max_context_tokens,
         )
 
@@ -385,6 +387,11 @@ class RuntimeOrchestrator:
                 override.provider_input_tokens
                 if override.provider_input_tokens is not None
                 else base.provider_input_tokens
+            ),
+            provider_output_tokens=(
+                override.provider_output_tokens
+                if override.provider_output_tokens is not None
+                else base.provider_output_tokens
             ),
             max_context_tokens=override.max_context_tokens or base.max_context_tokens,
         )

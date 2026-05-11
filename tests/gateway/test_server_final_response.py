@@ -229,16 +229,13 @@ def test_gateway_agentic_watch_run_streams_events_and_report_artifact(tmp_path) 
         "tool_start",
         "tool_result",
         "delta",
-        "delta",
         "done",
     ]
     assert events[0]["name"] == "watch_add"
     assert events[2]["name"] == "watch_run"
     deltas = [event["text"] for event in events if event["type"] == "delta"]
     assert deltas[0] == "J’ai lancé la veille et je te fais le récap."
-    assert "**Rapport — `watch-run.md`**" in deltas[1]
-    assert "# Watch Run" in deltas[1]
-    assert "Résumé veille: une nouveauté utile à suivre." in deltas[1]
+    assert not any("**Rapport — `watch-run.md`**" in delta for delta in deltas)
     assert "novelty max" in server.session.state.turns[-1].tool_results[-1].summary
     assert "Résumé veille" in server.session.state.turns[-1].tool_results[-1].summary
 
