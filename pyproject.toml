@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marius"
+version = "0.0.0"
+description = "Socle agentique modulaire pour Marius v2"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Egza Gonal" }]
+license = { text = "MIT" }
+dependencies = [
+  "rich>=13.0",
+]
+keywords = ["agent", "llm", "kernel", "runtime"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "License :: OSI Approved :: MIT License",
+]
+
+[project.scripts]
+marius = "marius.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+include = ["marius*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

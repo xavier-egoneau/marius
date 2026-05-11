@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marius</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  color-scheme: dark;
+  --bg:      #141210;
+  --panel:   #1a1714;
+  --line:    #2a2520;
+  --soft:    #8f8276;
+  --text:    #ddd8d0;
+  --bright:  #f0ebe3;
+  --accent:  #d97706;
+  --user-bg: #1f1510;
+  --err:     #ef4444;
+  --ok:      #22c55e;
+}
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  font-size: 14px;
+}
+
+/* ── header ──────────────────────────────────────────────────────── */
+#header {
+  min-height: 50px; padding: 10px 18px;
+  border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 12px; flex-shrink: 0;
+}
+#status {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #3a3530;
+  transition: background .3s, box-shadow .3s;
+  flex-shrink: 0;
+}
+#status.on   { background: var(--accent); box-shadow: 0 0 5px #d9770655; }
+#status.busy { animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+#agent-label { color: var(--soft); font-size: 12px; }
+#model-label  { color: var(--soft); font-size: 12px; margin-left: auto; }
+.hbtn {
+  border: 1px solid #2e2a24; background: var(--panel); color: var(--soft);
+  padding: 6px 11px; border-radius: 6px; font-size: 12px; cursor: pointer;
+}
+.hbtn:hover { color: var(--bright); border-color: #6b4b2b; }
+#btn-git.active { color: var(--accent); border-color: #6b4b2b; }
+
+/* ── messages ───────────────────────────────────────────────────── */
+#messages { flex: 1; overflow-y: auto; padding: 20px 0; scroll-behavior: smooth; }
+.msg { display: flex; flex-direction: column; padding: 12px 24px; line-height: 1.6; gap: 4px; }
+.msg.user      { background: var(--user-bg); border-left: 2px solid #7c2d12; }
+.msg.assistant { border-left: 2px solid transparent; }
+.msg .role  { font-size: 11px; color: var(--soft); text-transform: uppercase;
+              letter-spacing: .05em; margin-bottom: 4px; }
+.msg .body  { white-space: pre-wrap; word-break: break-word; color: var(--text); }
+.msg.assistant .body { color: var(--bright); }
+.chat-img {
+  max-width: min(420px, 85%); max-height: 280px;
+  border-radius: 8px; margin-top: 6px; display: block;
+  border: 1px solid var(--line); cursor: zoom-in;
+  object-fit: contain; background: #0f0d0b;
+}
+.chat-img:hover { border-color: var(--accent); }
+
+/* ── markdown rendu ──────────────────────────────────────────────── */
+.body.md { white-space: normal; }
+.body.md p  { margin: .5em 0; }
+.body.md p:first-child { margin-top: 0; }
+.body.md p:last-child  { margin-bottom: 0; }
+.body.md h1,.body.md h2,.body.md h3,.body.md h4 {
+  color: var(--bright); font-weight: 600; margin: .8em 0 .3em;
+}
+.body.md h1 { font-size: 1.2em; } .body.md h2 { font-size: 1.08em; }
+.body.md h3 { font-size: 1em;   } .body.md h4 { font-size: .95em; color: var(--soft); }
+.body.md strong { color: var(--bright); font-weight: 600; }
+.body.md em     { font-style: italic; }
+.body.md code {
+  font-family: ui-monospace,"Cascadia Code",Menlo,monospace; font-size: .87em;
+  background: #1c1814; border: 1px solid #2e2a24;
+  border-radius: 4px; padding: 1px 5px; color: #e8b36a;
+}
+.body.md pre {
+  background: #0f0d0b; border: 1px solid #2e2a24; border-radius: 7px;
+  padding: 14px 16px; overflow-x: auto; margin: .6em 0;
+}
+.body.md pre code { background: none; border: none; padding: 0; font-size: .84em; color: #d4c5a9; }
+.body.md ul,.body.md ol { padding-left: 1.4em; margin: .4em 0; }
+.body.md li { margin: .15em 0; }
+.body.md blockquote { border-left: 3px solid var(--accent); margin: .5em 0; padding: .25em .8em; color: var(--soft); }
+.body.md hr  { border: none; border-top: 1px solid var(--line); margin: .8em 0; }
+.body.md a   { color: var(--accent); text-decoration: none; }
+.body.md a:hover { text-decoration: underline; }
+.body.md table { border-collapse: collapse; margin: .5em 0; font-size: .88em; width: 100%; }
+.body.md th,.body.md td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; }
+.body.md th { background: var(--panel); color: var(--bright); }
+
+.tool-line { font-size: 12px; color: var(--soft); display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+.tool-line.ok   .tdot { background: var(--ok); }
+.tool-line.fail .tdot { background: var(--err); }
+.tool-line.run  .tdot { background: var(--accent); animation: pulse 1s infinite; }
+.tdot { width: 5px; height: 5px; border-radius: 50%; background: var(--soft); flex-shrink: 0; }
+
+.cursor { display: inline-block; width: 2px; height: 1em; background: var(--accent);
+          animation: blink .7s step-end infinite; vertical-align: text-bottom; margin-left: 1px; }
+@keyframes blink { 50%{opacity:0} }
+
+/* ── permission dialog ───────────────────────────────────────────── */
+#perm-overlay {
+  display: none; position: fixed; inset: 0;
+  background: #0009; align-items: center; justify-content: center; z-index: 100;
+}
+#perm-overlay.show { display: flex; }
+#perm-box {
+  background: var(--panel); border: 1px solid #3a3530; border-radius: 10px;
+  padding: 24px; max-width: 420px; width: 90%;
+}
+#perm-box h3 { color: var(--bright); margin-bottom: 8px; font-size: 15px; }
+#perm-tool   { color: var(--accent); font-size: 13px; margin-bottom: 6px; }
+#perm-reason { color: var(--soft); font-size: 12px; margin-bottom: 18px; line-height: 1.5; }
+.perm-btns   { display: flex; gap: 10px; }
+.perm-btns button {
+  flex: 1; padding: 9px; border-radius: 7px; font-size: 13px;
+  cursor: pointer; border: none;
+}
+#perm-approve { background: var(--accent); color: #1a0e00; font-weight: 600; }
+#perm-deny    { background: #2e2520; color: var(--soft); }
+#perm-approve:hover { background: #b45309; }
+#perm-deny:hover    { color: var(--bright); }
+
+/* ── upload preview ──────────────────────────────────────────────── */
+#upload-preview {
+  display: none; padding: 8px 18px 0;
+  font-size: 12px; color: var(--soft);
+  background: var(--panel); border-top: 1px solid var(--line);
+  gap: 8px; flex-wrap: wrap;
+}
+#upload-preview.show { display: flex; }
+.upload-chip {
+  background: #211d19; border: 1px solid #3a3530; border-radius: 5px;
+  padding: 4px 8px; display: flex; align-items: center; gap: 6px;
+}
+.upload-chip img { height: 36px; width: 36px; object-fit: cover; border-radius: 3px; flex-shrink: 0; }
+.upload-chip button {
+  background: none; border: none; color: var(--soft); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 0 2px;
+}
+.upload-chip button:hover { color: var(--err); }
+
+/* ── panneau git ─────────────────────────────────────────────────── */
+#git-panel {
+  display: none; border-top: 1px solid var(--line);
+  background: var(--panel); flex-shrink: 0; max-height: 280px;
+  overflow: hidden; flex-direction: column;
+}
+#git-panel.show { display: flex; }
+#git-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 18px; border-bottom: 1px solid var(--line); flex-shrink: 0;
+}
+#git-summary { font-size: 12px; color: var(--soft); flex: 1; }
+#git-summary .ins { color: #22c55e; }
+#git-summary .del { color: var(--err); }
+#git-refresh { background: none; border: none; color: var(--soft);
+  cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 4px; }
+#git-refresh:hover { color: var(--bright); }
+#git-body { display: flex; min-height: 0; flex: 1; overflow: hidden; }
+#git-files { width: 220px; overflow-y: auto; border-right: 1px solid var(--line);
+  flex-shrink: 0; padding: 4px 0; }
+.git-file {
+  display: flex; align-items: center; gap: 8px; padding: 5px 12px;
+  cursor: pointer; font-size: 12px; color: var(--text);
+  border: none; background: none; width: 100%; text-align: left;
+}
+.git-file:hover { background: #211d19; }
+.git-file.active { background: #2a2520; }
+.git-file .gf-label { font-size: 10px; padding: 1px 5px; border-radius: 3px;
+  flex-shrink: 0; }
+.git-file .gf-label.modified  { background: #2a2a1a; color: #e8c46a; }
+.git-file .gf-label.added     { background: #1a2a1a; color: #86d08f; }
+.git-file .gf-label.deleted   { background: #2a1a1a; color: #e18a78; }
+.git-file .gf-label.untracked { background: #1a1a2a; color: #86a9e6; }
+.git-file .gf-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-file .gf-stats { margin-left: auto; font-size: 11px; flex-shrink: 0; }
+.git-file .ins { color: #22c55e; } .git-file .del { color: var(--err); }
+#git-diff { flex: 1; overflow: auto; padding: 10px 14px; }
+#git-diff pre {
+  font-family: ui-monospace,"Cascadia Code",Menlo,monospace; font-size: 12px;
+  line-height: 1.5; color: var(--text); white-space: pre; margin: 0;
+}
+.dl { display: block; }
+.dl.add { color: #86d08f; background: rgba(55,116,65,.14); }
+.dl.del { color: #e18a78; background: rgba(143,62,45,.14); }
+.dl.hunk { color: #86a9e6; background: rgba(73,96,145,.12); }
+.dl.file { color: #d7b778; }
+
+/* ── autocomplete commandes ──────────────────────────────────────── */
+#footer { position: relative; }
+#cmd-suggestions {
+  display: none; position: absolute; bottom: calc(100% + 4px); left: 18px;
+  background: var(--panel); border: 1px solid #3a3530; border-radius: 8px;
+  padding: 4px; z-index: 20; min-width: 260px; box-shadow: 0 4px 16px #0006;
+}
+#cmd-suggestions.show { display: block; }
+.cmd-row {
+  display: flex; align-items: baseline; gap: 10px; padding: 7px 12px;
+  border-radius: 5px; cursor: pointer;
+}
+.cmd-row:hover, .cmd-row.active { background: #2a2520; }
+.cmd-name { color: var(--accent); font-family: ui-monospace, monospace; font-size: 13px; }
+.cmd-desc { color: var(--soft); font-size: 12px; }
+
+/* ── footer ──────────────────────────────────────────────────────── */
+#footer {
+  border-top: 1px solid var(--line); padding: 12px 18px;
+  display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
+  background: var(--panel);
+}
+#input {
+  flex: 1; background: #1e1a16; border: 1px solid #2e2a24; color: var(--bright);
+  border-radius: 8px; padding: 10px 14px; font-size: 14px; font-family: inherit;
+  resize: none; min-height: 44px; max-height: 200px; outline: none; line-height: 1.5;
+}
+#input:focus { border-color: #6b4b2b; }
+#btn-upload {
+  background: none; border: 1px solid #2e2a24; border-radius: 8px;
+  color: var(--soft); padding: 10px 12px; cursor: pointer; flex-shrink: 0; align-self: flex-end;
+}
+#btn-upload:hover { color: var(--bright); border-color: #6b4b2b; }
+#btn-send {
+  background: var(--accent); color: #1a0e00; border: none; border-radius: 8px;
+  padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
+  flex-shrink: 0; align-self: flex-end;
+}
+#btn-send:disabled { opacity: .4; cursor: default; }
+#btn-send:not(:disabled):hover { background: #b45309; }
+#btn-stop {
+  display: none; background: #3a1a1a; color: var(--err); border: 1px solid #5a2a2a;
+  border-radius: 8px; padding: 10px 14px; font-size: 13px; cursor: pointer;
+  flex-shrink: 0; align-self: flex-end;
+}
+#btn-stop.show { display: block; }
+#btn-stop:hover { background: #5a1a1a; }
+</style>
+</head>
+<body>
+
+<!-- permission dialog -->
+<div id="perm-overlay">
+  <div id="perm-box">
+    <h3>Autorisation requise</h3>
+    <div id="perm-tool"></div>
+    <div id="perm-reason"></div>
+    <div class="perm-btns">
+      <button id="perm-approve" onclick="answerPerm(true)">Autoriser</button>
+      <button id="perm-deny"    onclick="answerPerm(false)">Refuser</button>
+    </div>
+  </div>
+</div>
+
+<div id="header">
+  <div id="status"></div>
+  <span id="agent-label">Marius</span>
+  <span id="model-label"></span>
+  <button class="hbtn" id="btn-git" onclick="toggleGitPanel()">Diff</button>
+  <button class="hbtn" onclick="newConv()">Nouvelle conversation</button>
+</div>
+
+<div id="upload-preview"></div>
+<div id="messages"></div>
+
+<div id="git-panel">
+  <div id="git-head">
+    <div id="git-summary">Aucun changement</div>
+    <button id="git-refresh" onclick="loadGitChanges()" title="Rafraîchir">↻</button>
+  </div>
+  <div id="git-body">
+    <div id="git-files"></div>
+    <div id="git-diff"><pre id="git-diff-content"></pre></div>
+  </div>
+</div>
+
+<div id="footer">
+  <div id="cmd-suggestions"></div>
+  <input type="file" id="file-input" multiple accept="image/*,.pdf,.txt,.md,.py,.js,.ts,.json,.csv" style="display:none" onchange="onFiles(this)">
+  <button id="btn-upload" title="Joindre un fichier" onclick="document.getElementById('file-input').click()">📎</button>
+  <textarea id="input" placeholder="Envoie un message…" rows="1"
+    onkeydown="onKey(event)" oninput="autoResize(this); onInputChange()"></textarea>
+  <button id="btn-stop" onclick="sendStop()">⏹ Stop</button>
+  <button id="btn-send" onclick="send()">Envoyer</button>
+</div>
+
+<script>
+const SESSION_ID = 'web-' + Math.random().toString(36).slice(2, 10);
+let busy = false;
+let pendingUploads = [];   // [{name, path}]
+let pendingPermId = null;
+let es = null;
+
+// ── init ──────────────────────────────────────────────────────────
+async function init() {
+  // Info agent + skill commands
+  try {
+    const d = await fetch('/api/info').then(r => r.json());
+    if (d.ok) {
+      document.getElementById('status').className = 'on';
+      document.getElementById('agent-label').textContent = d.agent || 'Marius';
+      if (d.model) document.getElementById('model-label').textContent = d.model;
+      if (Array.isArray(d.skill_commands)) {
+        for (const sc of d.skill_commands) {
+          if (!COMMANDS.find(c => c.name === sc.name))
+            COMMANDS.push({name: sc.name, desc: sc.desc, gateway: false});
+        }
+      }
+    }
+  } catch {}
+
+  // Historique de la conversation
+  try {
+    const h = await fetch('/api/history').then(r => r.json());
+    if (h.ok && h.messages.length > 0) {
+      for (const msg of h.messages) {
+        appendMsg(msg.role, msg.content, msg.role === 'assistant');
+      }
+      scrollBottom();
+    }
+  } catch {}
+
+  openSSE();
+}
+
+// ── SSE (connexion persistante) ───────────────────────────────────
+function openSSE() {
+  es = new EventSource(`/api/stream?session_id=${SESSION_ID}`);
+  es.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    handleSSE(ev);
+  };
+  es.onerror = () => {
+    setBusy(false);
+    document.getElementById('status').className = '';
+    // Reconnect after 3s
+    setTimeout(openSSE, 3000);
+  };
+}
+
+function handleSSE(ev) {
+  if (ev.type === 'text_delta') {
+    appendDelta(ev.delta);
+  } else if (ev.type === 'done_turn') {
+    finishTurn();
+  } else if (ev.type === 'tool_start') {
+    addToolLine(ev.tool, ev.target, 'run');
+  } else if (ev.type === 'tool_result') {
+    updateToolLine(ev.tool, ev.ok ? 'ok' : 'fail');
+    const _FILE_TOOLS = ['write_file', 'edit_file', 'bash', 'run_bash', 'str_replace_based_edit_tool'];
+    if (_FILE_TOOLS.includes(ev.tool) && document.getElementById('git-panel').classList.contains('show')) {
+      loadGitChanges();
+      if (_gitActiveFile) showDiff(_gitActiveFile, null);
+    }
+  } else if (ev.type === 'permission_request') {
+    showPermission(ev);
+  } else if (ev.type === 'error') {
+    finishTurn();
+    appendError(ev.error);
+  } else if (ev.type === 'status') {
+    appendStatus(ev.message);
+  } else if (ev.type === 'disconnected') {
+    setBusy(false);
+    document.getElementById('status').className = '';
+  }
+}
+
+// ── markdown renderer ─────────────────────────────────────────────
+// Rendu après la fin du tour (pas pendant le streaming).
+// Aucune dépendance externe — renderer inline.
+
+function renderMarkdown(src) {
+  // 1. Protège les blocs de code (évite de les modifier)
+  const codeBlocks = [];
+  src = src.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    codeBlocks.push({ lang, code: code.replace(/\n$/, '') });
+    return `\x02B${codeBlocks.length - 1}\x03`;
+  });
+  // 2. Protège le code inline
+  const inlines = [];
+  src = src.replace(/`([^`\n]+)`/g, (_, c) => {
+    inlines.push(c);
+    return `\x02I${inlines.length - 1}\x03`;
+  });
+  // 3. Blocs séparés par double saut de ligne
+  const html = src.split(/\n{2,}/).map(b => b.trim()).filter(Boolean).map(_block).join('\n');
+  // 4. Restaure
+  return html
+    .replace(/\x02B(\d+)\x03/g, (_, i) => {
+      const { lang, code } = codeBlocks[i];
+      const cls = lang ? ` class="lang-${_e(lang)}"` : '';
+      return `<pre><code${cls}>${_e(code)}</code></pre>`;
+    })
+    .replace(/\x02I(\d+)\x03/g, (_, i) => `<code>${_e(inlines[i])}</code>`);
+}
+
+function _block(b) {
+  if (/^\x02B\d+\x03$/.test(b)) return b;                          // code block
+  const hm = b.match(/^(#{1,4})\s+([\s\S]+)$/);
+  if (hm) { const n = hm[1].length; return `<h${n}>${_il(hm[2])}</h${n}>`; }
+  if (/^[-*_]{3,}$/.test(b)) return '<hr>';
+  if (b.startsWith('&gt;') || b.startsWith('> ')) {
+    return `<blockquote>${_il(b.replace(/^(&gt;|>) ?/gm, '')).replace(/\n/g, '<br>')}</blockquote>`;
+  }
+  // Table (| col | col |)
+  const rows = b.split('\n');
+  if (rows.length >= 2 && rows[0].includes('|') && /^\|?[-:| ]+\|?$/.test(rows[1])) {
+    const ths = rows[0].split('|').filter(c => c.trim());
+    const trs = rows.slice(2).map(r => '<tr>' + r.split('|').filter(c => c.trim()).map(c => `<td>${_il(c.trim())}</td>`).join('') + '</tr>');
+    return `<table><thead><tr>${ths.map(h => `<th>${_il(h.trim())}</th>`).join('')}</tr></thead><tbody>${trs.join('')}</tbody></table>`;
+  }
+  // Liste non ordonnée
+  const ul = rows.filter(l => l.trim());
+  if (ul.length && ul.every(l => /^[-*+]\s/.test(l))) {
+    return `<ul>${ul.map(l => `<li>${_il(l.replace(/^[-*+]\s/, ''))}</li>`).join('')}</ul>`;
+  }
+  // Liste ordonnée
+  if (ul.length && ul.every(l => /^\d+[.)]\s/.test(l))) {
+    return `<ol>${ul.map(l => `<li>${_il(l.replace(/^\d+[.)]\s/, ''))}</li>`).join('')}</ol>`;
+  }
+  return `<p>${_il(b).replace(/\n/g, '<br>')}</p>`;
+}
+
+function _il(t) {   // inline: escape puis formatage
+  return _e(t)
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/_(.+?)_/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+function _e(s) {
+  return String(s)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;')
+    .replace(/'/g,'&#39;');
+}
+
+// ── send ──────────────────────────────────────────────────────────
+let _cursorEl = null;
+let _activeMsg = null;
+let _rawText = '';   // buffer pendant le streaming
+
+async function send() {
+  const inp = document.getElementById('input');
+  let text = inp.value.trim();
+  document.getElementById('cmd-suggestions').className = '';
+
+  if (!text && pendingUploads.length === 0) return;
+  if (busy) return;
+
+  const cmdName = text.split(/\s+/)[0].toLowerCase();
+  const cmdDef = COMMANDS.find(c => c.name === cmdName);
+
+  // Gateway commands (/new /stop) → CommandEvent, pas de tour LLM
+  if (cmdDef?.gateway && !pendingUploads.length) {
+    inp.value = ''; autoResize(inp); inp.focus();
+    await fetch('/api/command', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({cmd: cmdName}),
+    });
+    if (cmdName === '/new') {
+      document.getElementById('messages').innerHTML = '';
+      _rawText = ''; _activeMsg = null; _cursorEl = null;
+    }
+    return;
+  }
+
+  // /model → affiche liste + permet de changer
+  if (cmdDef?.model && !pendingUploads.length) {
+    inp.value = ''; autoResize(inp); inp.focus();
+    const arg = text.slice(cmdName.length).trim();
+    await handleModelCmd(arg);
+    return;
+  }
+
+  // Inject upload paths
+  if (pendingUploads.length > 0) {
+    const paths = pendingUploads.map(u => `[fichier joint : ${u.path}]`).join('\n');
+    text = text ? `${text}\n\n${paths}` : paths;
+    pendingUploads = [];
+    updateUploadPreview();
+  }
+
+  inp.value = '';
+  autoResize(inp);
+  inp.focus();
+  setBusy(true);
+
+  appendMsg('user', text);
+  _rawText = '';
+  // Crée le message sans .body — il sera inséré au premier delta de texte,
+  // après les éventuelles traces d'outils qui précèdent la réponse.
+  _activeMsg = document.createElement('div');
+  _activeMsg.className = 'msg assistant';
+  _activeMsg.innerHTML = '<div class="role">Marius</div>';
+  _cursorEl = document.createElement('span');
+  _cursorEl.className = 'cursor';
+  _activeMsg.appendChild(_cursorEl);
+  document.getElementById('messages').appendChild(_activeMsg);
+  scrollBottom();
+
+  await fetch('/api/message', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text, session_id: SESSION_ID}),
+  });
+  // Response arrives via SSE
+}
+
+function appendDelta(delta) {
+  if (!_activeMsg) return;
+  _rawText += delta;
+  let body = _activeMsg.querySelector('.body');
+  if (!body) {
+    body = document.createElement('div');
+    body.className = 'body';
+    _activeMsg.insertBefore(body, _cursorEl);  // avant le curseur, après les traces
+  }
+  body.textContent = _rawText;
+  if (_cursorEl) _activeMsg.appendChild(_cursorEl);
+  scrollBottom();
+}
+
+function finishTurn() {
+  if (_cursorEl) { _cursorEl.remove(); _cursorEl = null; }
+  if (_activeMsg && _rawText) {
+    let body = _activeMsg.querySelector('.body');
+    if (!body) {
+      body = document.createElement('div');
+      body.className = 'body';
+      _activeMsg.appendChild(body);
+    }
+    body.innerHTML = renderMarkdown(_rawText);
+    body.classList.add('md');
+  }
+  _rawText = '';
+  _activeMsg = null;
+  setBusy(false);
+  scrollBottom();
+}
+
+function appendError(msg) {
+  if (_activeMsg) {
+    const body = _activeMsg.querySelector('.body');
+    if (_cursorEl) _cursorEl.remove();
+    body.textContent += `\n[Erreur : ${msg}]`;
+  }
+}
+
+function appendStatus(msg) {
+  if (_activeMsg) {
+    const line = document.createElement('div');
+    line.className = 'tool-line';
+    line.style.color = 'var(--soft)';
+    line.textContent = msg;
+    _activeMsg.appendChild(line);
+    scrollBottom();
+  }
+}
+
+// ── /stop ─────────────────────────────────────────────────────────
+async function sendStop() {
+  await fetch('/api/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({cmd: '/stop'}),
+  });
+}
+
+// ── /new ──────────────────────────────────────────────────────────
+async function newConv() {
+  await fetch('/api/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({cmd: '/new'}),
+  });
+  document.getElementById('messages').innerHTML = '';
+  _activeMsg = null;
+  _cursorEl = null;
+}
+
+// ── /model ────────────────────────────────────────────────────────
+async function handleModelCmd(arg) {
+  const info = await fetch('/api/info').then(r => r.json()).catch(() => ({}));
+  const current = info.model || '?';
+
+  if (arg) {
+    // Changer de modèle
+    const r = await fetch('/api/model', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: arg}),
+    });
+    const d = await r.json();
+    const msg = appendMsg('assistant', '');
+    const body = msg.querySelector('.body');
+    body.textContent = d.ok ? `Modèle → ${arg}` : `Erreur : ${d.error}`;
+    if (d.ok) document.getElementById('model-label').textContent = arg;
+    scrollBottom();
+    return;
+  }
+
+  // Afficher la liste
+  const models = await fetch('/api/models').then(r => r.json()).then(d => d.models || []).catch(() => []);
+  const msg = appendMsg('assistant', '');
+  const body = msg.querySelector('.body');
+  if (!models.length) {
+    body.textContent = `Modèle actuel : ${current}\n(liste indisponible)`;
+  } else {
+    body.innerHTML = `<strong>Modèle actuel : ${escHtml(current)}</strong><br><br>` +
+      models.map((m, i) => {
+        const active = m === current ? ' ✓' : '';
+        return `<span style="cursor:pointer;color:var(--accent)" onclick="switchModel('${escHtml(m)}')">${i+1}. ${escHtml(m)}${active}</span>`;
+      }).join('<br>');
+  }
+  scrollBottom();
+}
+
+async function switchModel(model) {
+  const r = await fetch('/api/model', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({model}),
+  });
+  const d = await r.json();
+  if (d.ok) {
+    document.getElementById('model-label').textContent = model;
+    appendMsg('assistant', `Modèle → ${model}`);
+    scrollBottom();
+  }
+}
+
+// ── permissions ───────────────────────────────────────────────────
+function showPermission(ev) {
+  pendingPermId = ev.request_id;
+  document.getElementById('perm-tool').textContent = ev.tool || '';
+  document.getElementById('perm-reason').textContent = ev.reason || '';
+  document.getElementById('perm-overlay').className = 'show';
+}
+
+async function answerPerm(approved) {
+  document.getElementById('perm-overlay').className = '';
+  if (!pendingPermId) return;
+  await fetch('/api/permission', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({request_id: pendingPermId, approved}),
+  });
+  pendingPermId = null;
+}
+
+// ── uploads ───────────────────────────────────────────────────────
+async function onFiles(input) {
+  for (const file of Array.from(input.files)) {
+    const isImg = file.type.startsWith('image/');
+    const preview = isImg ? URL.createObjectURL(file) : null;
+    const data = await toBase64(file);
+    try {
+      const r = await fetch('/api/upload', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({filename: file.name, data, mime_type: file.type}),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        pendingUploads.push({name: d.name, path: d.path, preview});
+      } else if (preview) {
+        URL.revokeObjectURL(preview);
+      }
+    } catch { if (preview) URL.revokeObjectURL(preview); }
+  }
+  input.value = '';
+  updateUploadPreview();
+}
+
+function updateUploadPreview() {
+  const el = document.getElementById('upload-preview');
+  el.innerHTML = '';
+  if (pendingUploads.length === 0) { el.className = ''; return; }
+  el.className = 'show';
+  pendingUploads.forEach((u, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'upload-chip';
+    const img = u.preview ? `<img src="${u.preview}" alt="">` : '';
+    chip.innerHTML = `${img}<span>${escHtml(u.name)}</span>
+      <button onclick="removeUpload(${i})">×</button>`;
+    el.appendChild(chip);
+  });
+}
+
+function removeUpload(i) {
+  const u = pendingUploads[i];
+  if (u.preview) URL.revokeObjectURL(u.preview);
+  pendingUploads.splice(i, 1);
+  updateUploadPreview();
+}
+
+function toBase64(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result.split(',')[1]);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+
+// ── autocomplete commandes ────────────────────────────────────────
+// gateway: true  → CommandEvent (/new /stop)
+// model: true    → traitement spécial modèle
+// gateway: false → InputEvent (gateway résout les commandes builtin + skills)
+const COMMANDS = [
+  {name: '/help',      desc: 'Afficher les commandes',              gateway: false},
+  {name: '/new',       desc: 'Nouvelle conversation',              gateway: true},
+  {name: '/stop',      desc: 'Interrompre le tour en cours',       gateway: true},
+  {name: '/remember',  desc: 'Mémoriser un fait  (/remember texte)',gateway: false},
+  {name: '/memories',  desc: 'Lister les souvenirs enregistrés',   gateway: false},
+  {name: '/forget',    desc: 'Supprimer un souvenir  (/forget id)', gateway: false},
+  {name: '/model',     desc: 'Afficher ou changer le modèle actif', model: true},
+  {name: '/doctor',    desc: 'Diagnostic de l\'installation',       gateway: false},
+  {name: '/dream',     desc: 'Consolider la mémoire (dreaming LLM)',gateway: false},
+  {name: '/daily',     desc: 'Briefing du jour',                    gateway: false},
+  {name: '/compact',   desc: 'Forcer la compaction du contexte',    gateway: false},
+  {name: '/context',   desc: 'Afficher l\'état du contexte',        gateway: false},
+  // skill commands ajoutés dynamiquement dans init()
+];
+let _cmdIdx = -1;
+
+function onInputChange() {
+  const val = document.getElementById('input').value;
+  const box = document.getElementById('cmd-suggestions');
+  _cmdIdx = -1;
+
+  // Montre l'autocomplete seulement si on tape une commande non encore complétée
+  if (!val.startsWith('/') || val.includes(' ') || val.includes('\n')) {
+    box.className = '';
+    return;
+  }
+  const q = val.toLowerCase();
+  const matches = COMMANDS.filter(c => c.name.startsWith(q));
+  if (!matches.length) { box.className = ''; return; }
+
+  box.innerHTML = matches.map((c, i) =>
+    `<div class="cmd-row" data-i="${i}" onclick="selectCmd('${c.name}')">
+      <span class="cmd-name">${c.name}</span>
+      <span class="cmd-desc">${c.desc}</span>
+    </div>`
+  ).join('');
+  box.className = 'show';
+}
+
+function selectCmd(name) {
+  const inp = document.getElementById('input');
+  inp.value = name + ' ';
+  inp.focus();
+  autoResize(inp);
+  document.getElementById('cmd-suggestions').className = '';
+  _cmdIdx = -1;
+}
+
+function _cmdNavKey(e) {
+  const box = document.getElementById('cmd-suggestions');
+  if (!box.classList.contains('show')) return false;
+  const rows = box.querySelectorAll('.cmd-row');
+  if (!rows.length) return false;
+  if (e.key === 'ArrowDown') {
+    _cmdIdx = Math.min(_cmdIdx + 1, rows.length - 1);
+  } else if (e.key === 'ArrowUp') {
+    _cmdIdx = Math.max(_cmdIdx - 1, 0);
+  } else if (e.key === 'Tab' || (e.key === 'Enter' && _cmdIdx >= 0)) {
+    if (_cmdIdx >= 0) rows[_cmdIdx].click();
+    return true;
+  } else if (e.key === 'Escape') {
+    box.className = ''; _cmdIdx = -1;
+    return true;
+  } else {
+    return false;
+  }
+  rows.forEach((r, i) => r.className = 'cmd-row' + (i === _cmdIdx ? ' active' : ''));
+  return true;
+}
+
+// ── tool activity ─────────────────────────────────────────────────
+const _toolLines = {};   // tool → last element
+
+function addToolLine(tool, target, state) {
+  if (!_activeMsg) return;
+  const line = document.createElement('div');
+  line.className = `tool-line ${state}`;
+  const label = target ? `${tool} — ${target.slice(0, 60)}` : tool;
+  line.innerHTML = `<span class="tdot"></span><span>${escHtml(label)}</span>`;
+  _toolLines[tool] = line;
+  _activeMsg.appendChild(line);
+  // Curseur toujours après les traces d'outils
+  if (_cursorEl) _activeMsg.appendChild(_cursorEl);
+  scrollBottom();
+}
+
+function updateToolLine(tool, state) {
+  const line = _toolLines[tool];
+  if (line) line.className = `tool-line ${state}`;
+}
+
+// ── helpers ───────────────────────────────────────────────────────
+function appendMsg(role, text, renderMd = false) {
+  const el = document.createElement('div');
+  el.className = `msg ${role}`;
+  let bodyHtml, mdClass = '';
+  if (role === 'user') {
+    bodyHtml = renderUserContent(text);
+  } else if (renderMd) {
+    bodyHtml = renderMarkdown(text);
+    mdClass = ' md';
+  } else {
+    bodyHtml = escHtml(text);
+  }
+  el.innerHTML = `<div class="role">${role === 'user' ? 'Vous' : 'Marius'}</div>
+                  <div class="body${mdClass}">${bodyHtml}</div>`;
+  document.getElementById('messages').appendChild(el);
+  scrollBottom();
+  return el;
+}
+
+function renderUserContent(text) {
+  // Remplace [fichier joint : /path/to/img.ext] par une image inline
+  const IMG_RE = /\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i;
+  const parts = [];
+  let last = 0;
+  const re = /\[fichier joint : ([^\]]+)\]/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    parts.push(escHtml(text.slice(last, m.index)));
+    const filePath = m[1];
+    if (IMG_RE.test(filePath)) {
+      const url = `/api/image?path=${encodeURIComponent(filePath)}`;
+      parts.push(`<a href="${url}" target="_blank" rel="noopener">` +
+        `<img src="${url}" class="chat-img" alt="${escHtml(filePath.split('/').pop())}">` +
+        `</a>`);
+    } else {
+      parts.push(escHtml(m[0]));
+    }
+    last = m.index + m[0].length;
+  }
+  parts.push(escHtml(text.slice(last)));
+  return parts.join('');
+}
+
+function setBusy(val) {
+  busy = val;
+  document.getElementById('status').className = val ? 'on busy' : 'on';
+  document.getElementById('btn-send').disabled = val;
+  document.getElementById('input').disabled = val;
+  document.getElementById('btn-stop').className = val ? 'show' : '';
+  if (!val) {
+    Object.keys(_toolLines).forEach(k => delete _toolLines[k]);
+    document.getElementById('input').focus();
+  }
+}
+
+function scrollBottom() {
+  const m = document.getElementById('messages');
+  m.scrollTop = m.scrollHeight;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                  .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+}
+
+function onKey(e) {
+  if (_cmdNavKey(e)) { e.preventDefault(); return; }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+}
+
+// ── git panel ─────────────────────────────────────────────────────
+let _gitActiveFile = null;
+
+function toggleGitPanel() {
+  const panel = document.getElementById('git-panel');
+  const btn   = document.getElementById('btn-git');
+  if (panel.classList.contains('show')) {
+    panel.className = '';
+    btn.style.color = '';
+  } else {
+    panel.className = 'show';
+    btn.style.color = 'var(--accent)';
+    loadGitChanges();
+  }
+}
+
+async function loadGitChanges() {
+  try {
+    const d = await fetch('/api/git/status').then(r => r.json());
+    const sumEl   = document.getElementById('git-summary');
+    const filesEl = document.getElementById('git-files');
+
+    if (!d.ok || !d.available) {
+      sumEl.textContent = 'Pas de dépôt git';
+      filesEl.innerHTML = '';
+      return;
+    }
+
+    const files = d.files || [];
+    const n = d.total_files;
+    sumEl.innerHTML = n
+      ? `${n} fichier${n > 1 ? 's' : ''} — <span class="ins">+${d.insertions}</span> <span class="del">-${d.deletions}</span>`
+      : 'Aucun changement';
+
+    if (!files.length) {
+      filesEl.innerHTML = '<div style="padding:12px;color:var(--soft);font-size:12px">Aucun fichier modifié</div>';
+      document.getElementById('git-diff').innerHTML = '<pre id="git-diff-content"></pre>';
+      _gitActiveFile = null;
+      return;
+    }
+
+    filesEl.innerHTML = files.map((f) => {
+      const label = f.label || 'changed';
+      const name  = f.path.split('/').pop();
+      const ins   = f.insertions ? `<span class="ins">+${f.insertions}</span>` : '';
+      const del   = f.deletions  ? `<span class="del">-${f.deletions}</span>`  : '';
+      const active = f.path === _gitActiveFile ? ' active' : '';
+      return `<button class="git-file${active}" onclick="showDiff('${escHtml(f.path)}', this)">` +
+        `<span class="gf-label ${label}">${label[0].toUpperCase()}</span>` +
+        `<span class="gf-name" title="${escHtml(f.path)}">${escHtml(name)}</span>` +
+        (ins || del ? `<span class="gf-stats">${ins}${del}</span>` : '') +
+        `</button>`;
+    }).join('');
+
+    // Re-show diff for current file if still in list
+    if (_gitActiveFile && files.find(f => f.path === _gitActiveFile)) {
+      // diff refreshed separately in handleSSE
+    } else if (files.length) {
+      const first = filesEl.querySelector('.git-file');
+      if (first && !_gitActiveFile) first.click();
+    }
+  } catch {
+    document.getElementById('git-summary').textContent = 'Erreur git';
+  }
+}
+
+async function showDiff(path, btn) {
+  document.querySelectorAll('.git-file').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  _gitActiveFile = path;
+
+  const diffEl = document.getElementById('git-diff');
+  diffEl.innerHTML = '<pre id="git-diff-content" style="color:var(--soft)">Chargement…</pre>';
+  try {
+    const d = await fetch(`/api/git/diff?path=${encodeURIComponent(path)}`).then(r => r.json());
+    if (!d.ok) { diffEl.innerHTML = `<pre id="git-diff-content">${escHtml(d.error || 'Erreur')}</pre>`; return; }
+    diffEl.innerHTML = `<pre id="git-diff-content">${renderDiff(d.diff)}</pre>`;
+    if (d.truncated) {
+      const note = document.createElement('div');
+      note.style.cssText = 'color:var(--soft);font-size:11px;padding:4px 0';
+      note.textContent = '… diff tronqué …';
+      diffEl.appendChild(note);
+    }
+  } catch {
+    diffEl.innerHTML = '<pre id="git-diff-content" style="color:var(--err)">Erreur réseau</pre>';
+  }
+}
+
+function renderDiff(text) {
+  return text.split('\n').map(line => {
+    const cls = line.startsWith('+') && !line.startsWith('+++') ? 'add'
+              : line.startsWith('-') && !line.startsWith('---') ? 'del'
+              : line.startsWith('@@')                           ? 'hunk'
+              : (line.startsWith('diff ') || line.startsWith('index ')
+                 || line.startsWith('--- ') || line.startsWith('+++ ')) ? 'file'
+              : '';
+    return `<span class="dl${cls ? ' ' + cls : ''}">${escHtml(line)}</span>`;
+  }).join('\n');
+}
+
+init();
+</script>
+</body>
+</html>
