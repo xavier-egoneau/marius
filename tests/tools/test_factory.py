@@ -37,7 +37,6 @@ def test_all_tools_when_none(memory_store: MemoryStore, tmp_path: Path) -> None:
     assert "self_update_propose" in names
     assert "self_update_apply" in names
     assert "self_update_rollback" in names
-    assert "watch_add" in names
     assert "rag_source_add" in names
     assert "rag_search" in names
     assert "rag_checklist_add" in names

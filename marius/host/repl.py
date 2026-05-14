@@ -19,6 +19,7 @@ from rich.theme import Theme
 
 from marius.adapters.context_window import make_api_resolver
 from marius.adapters.http_provider import make_adapter
+from marius.config.contracts import effective_tools_for_role
 from marius.kernel.compaction import CompactionConfig, CompactionLevel, compaction_level, resolve_token_count
 from marius.kernel.context_factory import build_system_prompt
 from marius.kernel.context_window import FALLBACK_CONTEXT_WINDOW, resolve_context_window
@@ -98,7 +99,6 @@ _COMMANDS: dict[str, str] = {
     "/forget":    "supprimer un souvenir  (/forget <id>)",
     "/doctor":    "diagnostic de l'installation (provider, SearxNG, gateway…)",
     "/dream":     "consolider la mémoire (dreaming LLM)",
-    "/daily":     "générer le briefing du jour",
     "/stop":      "interrompre l'inférence en cours",
     "/help":      "afficher toutes les commandes",
     "/exit":      "quitter Marius",
@@ -307,7 +307,7 @@ def _cmd_forget(raw_id: str, memory_store: MemoryStore) -> None:
         _console.print(f"\n  [dim]Souvenir #{memory_id} introuvable.[/]\n")
 
 
-# ── dreaming / daily ─────────────────────────────────────────────────────────
+# ── dreaming ─────────────────────────────────────────────────────────────────
 
 
 def _cmd_dream(
@@ -327,52 +327,6 @@ def _cmd_dream(
             project_root=cwd,
         )
     _console.print(f"\n  [dim]{result}[/]\n")
-
-
-def _cmd_daily(
-    memory_store: MemoryStore,
-    entry: ProviderEntry,
-    active_skills: list[str] | None,
-    cwd: Path,
-    agent_name: str | None = None,
-) -> None:
-    # Vérifie d'abord le cache généré par le scheduler du gateway (< 12h)
-    briefing = _read_daily_cache(agent_name)
-    if briefing:
-        _console.print("\n  [dim]Briefing du scheduler (cache)[/]")
-    else:
-        from marius.dreaming.engine import run_daily
-        with Status("[dim]Génération du briefing…[/]", spinner="dots", spinner_style="color(208)", console=_console):
-            briefing = run_daily(
-                memory_store=memory_store,
-                entry=entry,
-                active_skills=active_skills,
-                project_root=cwd,
-            )
-    _console.print()
-    _console.print(Markdown(briefing))
-    _console.print()
-
-
-def _read_daily_cache(agent_name: str | None, max_age_hours: float = 12.0) -> str | None:
-    """Retourne le briefing mis en cache par le scheduler si récent."""
-    if not agent_name:
-        return None
-    try:
-        from marius.gateway.workspace import daily_cache_path
-        import os
-        cache = daily_cache_path(agent_name)
-        if not cache.exists():
-            return None
-        age_hours = (Path(os.devnull).stat().st_mtime - cache.stat().st_mtime) / 3600
-        # Utilise l'heure de modification du fichier
-        import time as _time
-        age_hours = (_time.time() - cache.stat().st_mtime) / 3600
-        if age_hours > max_age_hours:
-            return None
-        return cache.read_text(encoding="utf-8")
-    except (OSError, ImportError):
-        return None
 
 
 # ── compaction ────────────────────────────────────────────────────────────────
@@ -603,17 +557,12 @@ _TOOL_VERBS: dict[str, str] = {
     "provider_delete": "Provider",
     "provider_models": "Models",
     "dreaming_run": "Dreaming",
-    "daily_digest": "Daily",
     "self_update_propose": "Update",
     "self_update_report_bug": "Bug",
     "self_update_list": "Updates",
     "self_update_show": "Update",
     "self_update_apply": "Update",
     "self_update_rollback": "Rollback",
-    "watch_add": "Veille",
-    "watch_list": "Veille",
-    "watch_remove": "Veille",
-    "watch_run": "Veille",
     "rag_source_add": "RAG",
     "rag_source_list": "RAG",
     "rag_source_sync": "RAG",
@@ -665,17 +614,12 @@ _TOOL_TARGET_KEYS: dict[str, str] = {
     "provider_delete": "id",
     "provider_models": "name",
     "dreaming_run": "archive_sessions",
-    "daily_digest": "project_root",
     "self_update_propose": "title",
     "self_update_report_bug": "title",
     "self_update_list": "kind",
     "self_update_show": "id",
     "self_update_apply": "id",
     "self_update_rollback": "id",
-    "watch_add": "title",
-    "watch_list": "include_disabled",
-    "watch_remove": "id",
-    "watch_run": "id",
     "rag_source_add": "name",
     "rag_source_sync": "source_id",
     "rag_search": "query",
@@ -731,7 +675,10 @@ def run_repl(
     cwd = Path.cwd()
     window = _resolve_window(entry)
     adapter = make_adapter(entry)
-    enabled_tools = agent_config.tools if agent_config is not None else None
+    enabled_tools = effective_tools_for_role(
+        list(agent_config.tools) if agent_config is not None else None,
+        getattr(agent_config, "role", None),
+    )
     active_skills = list(agent_config.skills) if agent_config is not None else None
     _ensure_search_backend(enabled_tools)
     guard = PermissionGuard(
@@ -820,13 +767,6 @@ def run_repl(
 
                 if cmd0 == "/dream":
                     _cmd_dream(memory_store, entry, active_skills, cwd)
-                    continue
-
-                if cmd0 == "/daily":
-                    _cmd_daily(
-                        memory_store, entry, active_skills, cwd,
-                        agent_name=agent_config.name if agent_config is not None else None,
-                    )
                     continue
 
                 go_on, session, turn_msg = _dispatch_command(

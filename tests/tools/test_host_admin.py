@@ -109,6 +109,44 @@ def test_host_agent_save_creates_agent_from_provider(tmp_path):
     assert loaded.agents["worker"].model == "gpt-test"
     assert loaded.agents["worker"].daily_model == "gpt-mini"
     assert "host_status" in loaded.agents["worker"].tools
+    assert loaded.agents["worker"].role == "agent"
+    assert "spawn_agent" not in loaded.agents["worker"].tools
+
+
+def test_host_agent_save_can_enable_spawn_agent_for_named_agent(tmp_path):
+    config_path = tmp_path / "config.json"
+    provider_path = tmp_path / "providers.json"
+    _provider(provider_path)
+    ConfigStore(path=config_path).save(
+        MariusConfig(permission_mode="limited", main_agent="main", agents={})
+    )
+    tools = make_host_admin_tools(config_path=config_path, provider_path=provider_path)
+
+    result = tools["host_agent_save"].handler(
+        {"name": "worker", "provider_id": "provider-1", "add_tools": ["spawn_agent"]}
+    )
+
+    loaded = ConfigStore(path=config_path).load()
+    assert result.ok is True
+    assert loaded is not None
+    assert "spawn_agent" in loaded.agents["worker"].tools
+
+
+def test_host_agent_save_rejects_admin_only_tools_for_named_agent(tmp_path):
+    config_path = tmp_path / "config.json"
+    provider_path = tmp_path / "providers.json"
+    _provider(provider_path)
+    ConfigStore(path=config_path).save(
+        MariusConfig(permission_mode="limited", main_agent="main", agents={})
+    )
+    tools = make_host_admin_tools(config_path=config_path, provider_path=provider_path)
+
+    result = tools["host_agent_save"].handler(
+        {"name": "worker", "provider_id": "provider-1", "add_tools": ["host_agent_save"]}
+    )
+
+    assert result.ok is False
+    assert result.error == "invalid_tools"
 
 
 def test_host_agent_save_rejects_unknown_tool(tmp_path):
@@ -153,6 +191,26 @@ def test_host_agent_delete_requires_confirmation_and_refuses_main_agent(tmp_path
     assert loaded is not None
     assert loaded.main_agent == "main"
     assert "worker" not in loaded.agents
+
+
+def test_host_agent_delete_refuses_admin_even_when_not_main(tmp_path):
+    config_path = tmp_path / "config.json"
+    ConfigStore(path=config_path).save(
+        MariusConfig(
+            permission_mode="limited",
+            main_agent="worker",
+            agents={
+                "main": AgentConfig(name="main", provider_id="provider-1", model="gpt-test", role="admin"),
+                "worker": AgentConfig(name="worker", provider_id="provider-1", model="gpt-test", role="agent"),
+            },
+        )
+    )
+    tools = make_host_admin_tools(config_path=config_path)
+
+    result = tools["host_agent_delete"].handler({"name": "main", "confirm": True})
+
+    assert result.ok is False
+    assert result.error == "admin_delete_forbidden"
 
 
 def test_host_telegram_configure_uses_env_ref_without_exposing_secret(tmp_path, monkeypatch):

@@ -7,6 +7,7 @@ Ajouter un protocole = ajouter une classe ici + une valeur dans ProviderProtocol
 from __future__ import annotations
 
 import json
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -43,6 +44,17 @@ class OpenAICompatibleAdapter:
         self.entry = entry
         self.defn = defn
         self.timeout = timeout
+        self._response_lock = threading.Lock()
+        self._current_response: Any | None = None
+
+    def cancel_current_request(self) -> None:
+        with self._response_lock:
+            response = self._current_response
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
 
     def generate(self, request: ProviderRequest) -> ProviderResponse:
         url = self.entry.base_url.rstrip("/") + self.defn.chat_endpoint
@@ -108,8 +120,11 @@ class OpenAICompatibleAdapter:
         pending_tool_calls: dict[int, dict[str, str]] = {}
         finish_reason = ""
 
+        response = _http_open(url, payload, api_key=resolve_provider_secret(self.entry.api_key), timeout=self.timeout)
+        with self._response_lock:
+            self._current_response = response
         try:
-            for event in _iter_sse(_http_open(url, payload, api_key=resolve_provider_secret(self.entry.api_key), timeout=self.timeout)):
+            for event in _iter_sse(response):
                 if event.get("usage"):
                     u = event["usage"]
                     yield ProviderChunk(
@@ -137,6 +152,10 @@ class OpenAICompatibleAdapter:
                             acc["arguments"] += fn["arguments"]
         except ProviderError:
             raise
+        finally:
+            with self._response_lock:
+                if self._current_response is response:
+                    self._current_response = None
 
         if pending_tool_calls:
             tool_calls = []
@@ -159,6 +178,17 @@ class OllamaNativeAdapter:
         self.entry = entry
         self.defn = defn
         self.timeout = timeout
+        self._response_lock = threading.Lock()
+        self._current_response: Any | None = None
+
+    def cancel_current_request(self) -> None:
+        with self._response_lock:
+            response = self._current_response
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
 
     def generate(self, request: ProviderRequest) -> ProviderResponse:
         url = self.entry.base_url.rstrip("/") + self.defn.chat_endpoint
@@ -221,8 +251,11 @@ class OllamaNativeAdapter:
 
         pending_tool_calls: list[dict[str, Any]] = []
 
+        response = _http_open(url, payload, api_key=resolve_provider_secret(self.entry.api_key), timeout=self.timeout)
+        with self._response_lock:
+            self._current_response = response
         try:
-            for chunk in _iter_ndjson(_http_open(url, payload, api_key=resolve_provider_secret(self.entry.api_key), timeout=self.timeout)):
+            for chunk in _iter_ndjson(response):
                 msg = chunk.get("message") or {}
                 if msg.get("content"):
                     yield ProviderChunk(type="text_delta", delta=msg["content"])
@@ -239,6 +272,10 @@ class OllamaNativeAdapter:
                     )
         except ProviderError:
             raise
+        finally:
+            with self._response_lock:
+                if self._current_response is response:
+                    self._current_response = None
 
         if pending_tool_calls:
             tool_calls = _parse_ollama_tool_calls(pending_tool_calls)
@@ -258,6 +295,17 @@ class ChatGPTOAuthAdapter:
     def __init__(self, entry: ProviderEntry, *, timeout: int = 120) -> None:
         self.entry = entry
         self.timeout = timeout
+        self._response_lock = threading.Lock()
+        self._current_response: Any | None = None
+
+    def cancel_current_request(self) -> None:
+        with self._response_lock:
+            response = self._current_response
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
 
     # ── public interface ──────────────────────────────────────────────────────
 
@@ -311,68 +359,75 @@ class ChatGPTOAuthAdapter:
         except ProviderError:
             raise
 
-        for event in _iter_sse(response):
-            event_type = event.get("type")
+        with self._response_lock:
+            self._current_response = response
+        try:
+            for event in _iter_sse(response):
+                event_type = event.get("type")
 
-            if event_type == "response.output_text.delta":
-                delta = event.get("delta") or ""
-                if delta:
-                    saw_text_delta = True
-                    yield ProviderChunk(type="text_delta", delta=delta)
+                if event_type == "response.output_text.delta":
+                    delta = event.get("delta") or ""
+                    if delta:
+                        saw_text_delta = True
+                        yield ProviderChunk(type="text_delta", delta=delta)
 
-            elif event_type == "response.output_text.done":
-                text = event.get("text") or ""
-                if text and not saw_text_delta:
-                    saw_text_delta = True
-                    yield ProviderChunk(type="text_delta", delta=text)
-
-            elif event_type == "response.output_item.done":
-                item = event.get("item") or {}
-                call = _normalize_chatgpt_tool_call(item)
-                if call is not None:
-                    pending_tool_calls.append(call)
-                else:
-                    text = _chatgpt_text_from_item(item)
+                elif event_type == "response.output_text.done":
+                    text = event.get("text") or ""
                     if text and not saw_text_delta:
                         saw_text_delta = True
                         yield ProviderChunk(type="text_delta", delta=text)
 
-            elif event_type == "response.completed":
-                response_data = event.get("response") or {}
-                completed_text = _chatgpt_text_from_response(response_data)
-                if completed_text and not saw_text_delta:
-                    saw_text_delta = True
-                    yield ProviderChunk(type="text_delta", delta=completed_text)
-                usage_raw = response_data.get("usage") or {}
-                if usage_raw:
-                    yield ProviderChunk(
-                        type="usage",
-                        usage={
-                            "input_tokens": int(usage_raw.get("input_tokens") or 0),
-                            "output_tokens": int(usage_raw.get("output_tokens") or 0),
-                        },
-                    )
-                calls = _chatgpt_tool_calls_from_response(response_data) or pending_tool_calls
-                if calls:
-                    yield ProviderChunk(
-                        type="tool_calls",
-                        tool_calls=[
-                            ToolCall(id=c["id"], name=c["name"], arguments=c["arguments"])
-                            for c in calls
-                        ],
-                        finish_reason="tool_calls",
-                    )
-                    return
-                yield ProviderChunk(type="done", finish_reason="stop")
-                return
+                elif event_type == "response.output_item.done":
+                    item = event.get("item") or {}
+                    call = _normalize_chatgpt_tool_call(item)
+                    if call is not None:
+                        pending_tool_calls.append(call)
+                    else:
+                        text = _chatgpt_text_from_item(item)
+                        if text and not saw_text_delta:
+                            saw_text_delta = True
+                            yield ProviderChunk(type="text_delta", delta=text)
 
-            elif event_type == "response.failed":
-                error = event.get("error") or {}
-                raise ProviderError(
-                    f"ChatGPT : {error.get('message') or 'provider_error'}",
-                    provider_name="chatgpt_oauth",
-                    retryable=False,
-                )
+                elif event_type == "response.completed":
+                    response_data = event.get("response") or {}
+                    completed_text = _chatgpt_text_from_response(response_data)
+                    if completed_text and not saw_text_delta:
+                        saw_text_delta = True
+                        yield ProviderChunk(type="text_delta", delta=completed_text)
+                    usage_raw = response_data.get("usage") or {}
+                    if usage_raw:
+                        yield ProviderChunk(
+                            type="usage",
+                            usage={
+                                "input_tokens": int(usage_raw.get("input_tokens") or 0),
+                                "output_tokens": int(usage_raw.get("output_tokens") or 0),
+                            },
+                        )
+                    calls = _chatgpt_tool_calls_from_response(response_data) or pending_tool_calls
+                    if calls:
+                        yield ProviderChunk(
+                            type="tool_calls",
+                            tool_calls=[
+                                ToolCall(id=c["id"], name=c["name"], arguments=c["arguments"])
+                                for c in calls
+                            ],
+                            finish_reason="tool_calls",
+                        )
+                        return
+                    yield ProviderChunk(type="done", finish_reason="stop")
+                    return
+
+                elif event_type == "response.failed":
+                    error = event.get("error") or {}
+                    raise ProviderError(
+                        f"ChatGPT : {error.get('message') or 'provider_error'}",
+                        provider_name="chatgpt_oauth",
+                        retryable=False,
+                    )
+        finally:
+            with self._response_lock:
+                if self._current_response is response:
+                    self._current_response = None
 
 
 # ── helpers ChatGPT ───────────────────────────────────────────────────────────

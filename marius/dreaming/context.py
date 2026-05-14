@@ -8,7 +8,6 @@ from pathlib import Path
 from marius.kernel.skills import SkillReader
 from marius.storage.memory_store import MemoryEntry, MemoryStore
 from marius.storage.session_corpus import list_unprocessed
-from marius.storage.watch_store import DEFAULT_WATCH_DIR, WatchReport, WatchStore
 
 
 @dataclass
@@ -16,14 +15,12 @@ class DreamingContext:
     memories: list[MemoryEntry] = field(default_factory=list)
     session_summaries: list[str] = field(default_factory=list)  # métadonnées des sessions
     dream_contracts: list[tuple[str, str]] = field(default_factory=list)  # (skill, contenu)
-    daily_contracts: list[tuple[str, str]] = field(default_factory=list)  # (skill, contenu)
-    watch_reports: list[WatchReport] = field(default_factory=list)
     decisions_doc: str = ""
     roadmap_doc: str = ""
 
     @property
     def is_empty(self) -> bool:
-        return not self.memories and not self.dream_contracts and not self.watch_reports
+        return not self.memories and not self.dream_contracts
 
 
 def build_dreaming_context(
@@ -32,7 +29,6 @@ def build_dreaming_context(
     project_root: Path | None = None,
     sessions_dir: Path | None = None,
     skills_dir: Path | None = None,
-    watch_dir: Path | None = None,
 ) -> DreamingContext:
     """Collecte toutes les données d'entrée pour un cycle dreaming."""
     ctx = DreamingContext()
@@ -50,16 +46,11 @@ def build_dreaming_context(
         for skill in reader.load_all(active_skills):
             if skill.dream_content:
                 ctx.dream_contracts.append((skill.meta.name, skill.dream_content))
-            if skill.daily_content:
-                ctx.daily_contracts.append((skill.meta.name, skill.daily_content))
 
     # Documents projet
     if project_root:
         ctx.decisions_doc = _read_optional(project_root / "DECISIONS.md")
         ctx.roadmap_doc   = _read_optional(project_root / "ROADMAP.md")
-
-    # Rapports de veille persistante
-    ctx.watch_reports = WatchStore(watch_dir or DEFAULT_WATCH_DIR).list_reports(limit=10)
 
     return ctx
 

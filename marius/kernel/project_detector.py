@@ -153,6 +153,16 @@ def _build_system_sets() -> tuple[frozenset[Path], tuple[Path, ...]]:
 
 
 _SYSTEM_EXACT, _SYSTEM_PREFIXES = _build_system_sets()
+_BROAD_HOME_DIR_NAMES = frozenset({
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Music",
+    "Pictures",
+    "Public",
+    "Templates",
+    "Videos",
+})
 
 
 # ── logique de détection ──────────────────────────────────────────────────────
@@ -174,6 +184,13 @@ def detect_project(path: Path) -> ProjectDetectionResult:
 
     # 1 — chemins système inconditionnels
     if _is_system_path(resolved):
+        return ProjectDetectionResult(
+            signal=ProjectSignal.DENIED,
+            markers_found=[],
+            path=resolved,
+        )
+
+    if _is_broad_home_dir(resolved):
         return ProjectDetectionResult(
             signal=ProjectSignal.DENIED,
             markers_found=[],
@@ -254,3 +271,12 @@ def _is_system_path(path: Path) -> bool:
         except ValueError:
             pass
     return False
+
+
+def _is_broad_home_dir(path: Path) -> bool:
+    home = Path.home().expanduser().resolve(strict=False)
+    try:
+        relative = path.relative_to(home)
+    except ValueError:
+        return False
+    return len(relative.parts) == 1 and relative.parts[0] in _BROAD_HOME_DIR_NAMES

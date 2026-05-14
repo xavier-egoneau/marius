@@ -1,10 +1,6 @@
-"""Construction des prompts pour le dreaming et le daily."""
+"""Construction des prompts pour le dreaming."""
 
 from __future__ import annotations
-
-from __future__ import annotations
-
-from typing import Any
 
 from .context import DreamingContext
 from marius.storage.memory_store import MemoryEntry
@@ -35,9 +31,6 @@ def build_dreaming_prompt(ctx: DreamingContext) -> str:
             + "\n".join(ctx.session_summaries)
         )
 
-    if ctx.watch_reports:
-        parts.append(_format_watch_reports_section(ctx.watch_reports))
-
     # Contrats de rêverie
     if ctx.dream_contracts:
         contracts_text = "\n\n".join(
@@ -62,53 +55,6 @@ def build_dreaming_prompt(ctx: DreamingContext) -> str:
     return "\n\n".join(parts)
 
 
-def build_daily_prompt(ctx: DreamingContext, last_dream_report: "Any | None" = None) -> str:
-    """Construit le system prompt pour l'appel LLM daily."""
-    parts: list[str] = []
-
-    parts.append(
-        "Tu es le processus de briefing quotidien de Marius.\n"
-        "Ta mission : générer un briefing de début de journée clair et actionnable.\n"
-        "Réponds en Markdown structuré.\n"
-        "Ne produis pas un simple résumé compact : structure agenda, priorités/listes, "
-        "veille utile, croisements/déductions et prochaine action quand les sources existent.\n"
-        "Si une source attendue n'est pas présente dans ce contexte, indique seulement "
-        "qu'elle n'a pas été vérifiée au lieu d'inventer ou de conclure à vide.\n"
-        "Aère le Markdown : lignes vides entre sections, et si tu utilises `---`, "
-        "laisse une ligne vide avant et après le séparateur."
-    )
-
-    # Dernier rapport de dream si disponible
-    if last_dream_report is not None:
-        parts.append(
-            f"## Dernier dreaming ({last_dream_report.generated_at[:16]})\n"
-            f"- {last_dream_report.added} souvenir(s) ajouté(s), "
-            f"{last_dream_report.updated} mis à jour, "
-            f"{last_dream_report.removed} supprimé(s)\n"
-            f"- Résumé : {last_dream_report.summary}"
-        )
-
-    if ctx.memories:
-        parts.append(_format_memories_section(ctx.memories))
-
-    if ctx.watch_reports:
-        parts.append(_format_watch_reports_section(ctx.watch_reports))
-
-    if ctx.daily_contracts:
-        contracts_text = "\n\n".join(
-            f"### Contrat [{name}]\n{content}"
-            for name, content in ctx.daily_contracts
-        )
-        parts.append(f"## Contrats daily\n{contracts_text}")
-    else:
-        parts.append(
-            "## Contrats daily\n"
-            "(aucun contrat daily actif — génère un briefing général "
-            "basé sur la mémoire disponible)"
-        )
-
-    return "\n\n".join(parts)
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -121,28 +67,6 @@ def _format_memories_section(memories: list[MemoryEntry]) -> str:
             scope_label = f"[project: {m.project_path}]"
         tag_label = f" [{m.tags}]" if m.tags else ""
         lines.append(f"#{m.id} {scope_label}{tag_label} : {m.content}")
-    return "\n".join(lines)
-
-
-def _format_watch_reports_section(reports: list["Any"]) -> str:
-    lines: list[str] = [f"## Veille persistante ({len(reports)} rapport(s))"]
-    for report in reports:
-        generated = (getattr(report, "generated_at", "") or "")[:16]
-        title = getattr(report, "title", "") or getattr(report, "topic_id", "")
-        query = getattr(report, "query", "")
-        lines.append(f"### {title} ({generated})")
-        if query:
-            lines.append(f"Query: {query}")
-        summary = getattr(report, "summary", "")
-        if summary:
-            lines.append(f"Summary: {summary}")
-        for result in getattr(report, "results", [])[:5]:
-            if not isinstance(result, dict):
-                continue
-            result_title = result.get("title") or result.get("url") or "result"
-            url = result.get("url") or ""
-            content = result.get("content") or ""
-            lines.append(f"- {result_title} — {url} — {content}".strip())
     return "\n".join(lines)
 
 

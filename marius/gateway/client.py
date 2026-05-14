@@ -82,17 +82,12 @@ _TOOL_VERBS: dict[str, str] = {
     "provider_delete": "Provider",
     "provider_models": "Models",
     "dreaming_run": "Dreaming",
-    "daily_digest": "Daily",
     "self_update_propose": "Update",
     "self_update_report_bug": "Bug",
     "self_update_list": "Updates",
     "self_update_show": "Update",
     "self_update_apply": "Update",
     "self_update_rollback": "Rollback",
-    "watch_add": "Veille",
-    "watch_list": "Veille",
-    "watch_remove": "Veille",
-    "watch_run": "Veille",
     "open_marius_web": "Web",
     "rag_source_add": "RAG",
     "rag_source_list": "RAG",
@@ -105,6 +100,7 @@ _TOOL_VERBS: dict[str, str] = {
     "caldav_agenda": "Calendar",
     "caldav_maintenance": "Calendar",
     "sentinelle_scan": "Sentinelle",
+    "call_agent": "Délégation",
 }
 
 _GATEWAY_COMMANDS: dict[str, str] = {
@@ -115,7 +111,6 @@ _GATEWAY_COMMANDS: dict[str, str] = {
     "/forget":   "supprimer un souvenir",
     "/doctor":   "diagnostic de l'installation",
     "/dream":    "consolider la mémoire",
-    "/daily":    "briefing du jour",
     "/context":  "afficher l'état du contexte",
     "/compact":  "compacter le contexte",
     "/shutdown": "arrêter le gateway",

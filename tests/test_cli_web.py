@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from urllib.error import URLError
 
-from marius.cli import _find_marius_web_pids, _marius_web_available
+from marius.cli import _find_marius_dashboard_pids, _find_marius_web_pids, _marius_web_available
 
 
 class _Response:
@@ -64,3 +64,19 @@ def test_find_marius_web_pids_matches_web_and_restart_commands(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: _Result())
 
     assert _find_marius_web_pids("main", 8765) == [123, 124, 127]
+
+
+def test_find_marius_dashboard_pids_matches_cli_and_module(monkeypatch):
+    class _Result:
+        stdout = "\n".join(
+            [
+                " 201 /usr/bin/python3 /home/egza/.local/bin/marius dashboard --port 8766",
+                " 202 python3 -m marius.channels.dashboard --port 8768 --no-open",
+                " 203 /usr/bin/python3 /home/egza/.local/bin/marius web --agent main --port 8765",
+                " 204 python3 -m some.other.dashboard --port 9999",
+            ]
+        )
+
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: _Result())
+
+    assert _find_marius_dashboard_pids() == [201, 202]

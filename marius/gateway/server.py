@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from marius.adapters.http_provider import make_adapter
+from marius.config.contracts import effective_tools_for_role
 from marius.kernel.compaction import CompactionConfig
 from marius.kernel.context_factory import build_system_prompt
 from marius.kernel.skills import SkillCommand, SkillReader, collect_skill_commands
@@ -42,7 +43,9 @@ from marius.provider_config.registry import PROVIDER_REGISTRY
 from marius.render.adapter import RenderSurface, render_turn_output
 from marius.storage.memory_store import MemoryStore
 from marius.storage.approval_store import ApprovalStore
+from marius.storage.allow_root_store import AllowRootStore
 from marius.storage.log_store import log_event, preview
+from marius.storage.project_store import ProjectStore
 from marius.storage.session_corpus import SessionRecord, write_session_file
 from marius.tools.factory import build_tool_entries
 
@@ -56,6 +59,71 @@ from .workspace import (
     memory_db_path, pid_path, reminders_path, sessions_dir, socket_path,
     web_history_path,
 )
+from .scheduler_runner import GatewayScheduler
+
+_PERMISSION_TIMEOUT_SECONDS = 300
+
+
+def _trusted_roots_for_active_project(
+    *,
+    permission_mode: str,
+    workspace: Path,
+    allow_store: AllowRootStore,
+) -> tuple[Path, ...]:
+    roots = tuple(root.expanduser().resolve(strict=False) for root in allow_store.paths())
+    try:
+        active = ProjectStore().get_active()
+    except Exception:
+        return roots
+    if active is None:
+        return roots
+    path = str(active.path or "").strip()
+    if not path:
+        return roots
+    try:
+        requested_root = Path(path).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return roots
+    if _is_under_root(requested_root, roots) or _is_under_root(requested_root, (workspace,)):
+        return roots
+
+    from marius.kernel.guardian_policy import (
+        AllowExpansionReason,
+        AllowExpansionRequest,
+        AllowExpansionStatus,
+        DefaultGuardianPolicy,
+    )
+    from marius.kernel.project_context import PermissionMode
+
+    try:
+        mode = PermissionMode(permission_mode)
+    except ValueError:
+        mode = PermissionMode.LIMITED
+    decision = DefaultGuardianPolicy().review_allow_expansion(
+        AllowExpansionRequest(
+            permission_mode=mode,
+            workspace_root=workspace,
+            current_allowed_roots=(workspace, *roots),
+            requested_root=requested_root,
+            reason=AllowExpansionReason.ACTIVATE_PROJECT,
+            explicit_user_request=True,
+        )
+    )
+    if decision.status is AllowExpansionStatus.ALLOW:
+        for root in decision.roots_to_add:
+            allow_store.add(root, reason=decision.code.value)
+        roots = tuple(root.expanduser().resolve(strict=False) for root in allow_store.paths())
+    return roots
+
+
+def _is_under_root(path: Path, roots: tuple[Path, ...]) -> bool:
+    normalized = path.expanduser().resolve(strict=False)
+    for root in roots:
+        normalized_root = root.expanduser().resolve(strict=False)
+        if normalized == normalized_root or normalized_root in normalized.parents:
+            return True
+    return False
+
 
 class _LineReader:
     """Lecteur de lignes sur socket Unix."""
@@ -94,6 +162,7 @@ class GatewayServer:
         self.workspace = ws
         self.memory_store = MemoryStore(memory_db_path(agent_name))
         self.approval_store = ApprovalStore()
+        self.allow_root_store = AllowRootStore()
 
         from marius.storage.reminders_store import RemindersStore
         self.reminders_store = RemindersStore(reminders_path(agent_name))
@@ -117,15 +186,29 @@ class GatewayServer:
         self._conn: socket.socket | None = None
         self._pending_perms: dict[str, tuple[threading.Event, list[bool]]] = {}
         self.telegram_chat_id: int | None = None   # mémorisé pour pushs daily
+        self.allowed_roots = _trusted_roots_for_active_project(
+            permission_mode=permission_mode,
+            workspace=ws,
+            allow_store=self.allow_root_store,
+        )
 
         guard = PermissionGuard(
             mode=permission_mode,
             cwd=ws,
+            allowed_roots=self.allowed_roots,
+            allowed_roots_provider=lambda: _trusted_roots_for_active_project(
+                permission_mode=permission_mode,
+                workspace=ws,
+                allow_store=self.allow_root_store,
+            ),
             on_ask=self._on_ask,
             approval_lookup=self.approval_store.lookup,
             approval_recorder=self._record_approval,
         )
-        enabled_tools = list(agent_config.tools) if agent_config else None
+        enabled_tools = effective_tools_for_role(
+            list(agent_config.tools) if agent_config else None,
+            getattr(agent_config, "role", None),
+        )
         self._ensure_search_backend(enabled_tools)
         self.tool_router = self._build_tool_router(enabled_tools, guard, ws, entry, permission_mode)
 
@@ -145,6 +228,7 @@ class GatewayServer:
             compaction_config=CompactionConfig(context_window_tokens=window),
         )
         self._opened_at = datetime.now(timezone.utc).isoformat()
+        self._recover_interrupted_tasks()
         log_event("gateway_start", {
             "agent": agent_name,
             "cwd": str(ws),
@@ -152,13 +236,12 @@ class GatewayServer:
             "provider_kind": entry.provider,
             "model": entry.model,
             "permission_mode": permission_mode,
+            "allowed_roots": [str(root) for root in self.allowed_roots],
             "tools": enabled_tools or "all",
             "restored_turns": restored_turns,
         })
 
         # Scheduler + reminders — délégués à GatewayScheduler
-        from .scheduler_runner import GatewayScheduler
-        from marius.tools.watch import make_provider_watch_summarizer
         self._scheduler_runner = GatewayScheduler(
             agent_name=agent_name,
             workspace=ws,
@@ -168,8 +251,25 @@ class GatewayServer:
             agent_config=agent_config,
             reminders_store=self.reminders_store,
             get_telegram_chat_id=lambda: self.telegram_chat_id,
-            watch_summarizer=make_provider_watch_summarizer(entry),
         )
+
+    def _recover_interrupted_tasks(self) -> None:
+        try:
+            from marius.storage.task_store import TaskStore
+
+            recovered = TaskStore().recover_interrupted_running(self.agent_name)
+            for task in recovered:
+                log_event("task_recovered_interrupted", {
+                    "agent": self.agent_name,
+                    "task_id": task.id,
+                    "status": task.status,
+                    "last_error": task.last_error,
+                })
+        except Exception as exc:
+            log_event("task_recovery_failed", {
+                "agent": self.agent_name,
+                "error": str(exc)[:300],
+            })
 
     # ── Telegram channel ──────────────────────────────────────────────────────
 
@@ -320,8 +420,6 @@ class GatewayServer:
             return self._command_doctor()
         if cmd == "/dream":
             return self._command_dream()
-        if cmd == "/daily":
-            return self._command_daily()
         if cmd == "/context":
             return self._command_context()
         if cmd == "/compact":
@@ -340,7 +438,6 @@ class GatewayServer:
             ("/forget <id>", "Supprimer un souvenir"),
             ("/doctor", "Diagnostic de l'installation"),
             ("/dream", "Consolider la mémoire"),
-            ("/daily", "Générer le briefing du jour"),
             ("/context", "Afficher l'état du contexte"),
             ("/compact", "Compacter le contexte court"),
         ]
@@ -389,25 +486,9 @@ class GatewayServer:
             entry=self.entry,
             active_skills=self.active_skills or None,
             project_root=self.workspace,
-            watch_dir=self._watch_dir_for_commands(),
-            daily_model=getattr(getattr(self, "agent_config", None), "daily_model", ""),
         )
         result = tools["dreaming_run"].handler({})
         return result.summary if result.ok else f"Dreaming échoué : {result.summary}"
-
-    def _command_daily(self) -> str:
-        from marius.tools.dreaming import make_dreaming_tools
-        tools = make_dreaming_tools(
-            memory_store=self.memory_store,
-            entry=self.entry,
-            active_skills=self.active_skills or None,
-            project_root=self.workspace,
-            watch_dir=self._watch_dir_for_commands(),
-            daily_model=getattr(getattr(self, "agent_config", None), "daily_model", ""),
-        )
-        result = tools["daily_digest"].handler({})
-        markdown = str(result.data.get("markdown") or result.summary)
-        return markdown if result.ok else f"Daily échoué :\n\n{markdown}"
 
     def _command_context(self) -> str:
         from marius.kernel.compaction import compaction_level, estimate_tokens_from_messages
@@ -431,12 +512,6 @@ class GatewayServer:
             self.session.state.turns = self.session.state.turns[-kept:]
         after = len(self.session.state.turns)
         return f"Compaction effectuée : {before - after} tour(s) supprimé(s), {after} conservé(s)."
-
-    def _watch_dir_for_commands(self) -> Path | None:
-        runner = getattr(self, "_scheduler_runner", None)
-        store = getattr(runner, "watch_store", None)
-        root = getattr(store, "root", None)
-        return Path(root) if root else None
 
     def list_models(self) -> list[str]:
         """Retourne les modèles disponibles pour le provider actuel."""
@@ -486,7 +561,7 @@ class GatewayServer:
                 reason=reason,
                 request_id=req_id,
             ))
-            ev.wait(timeout=30)
+            ev.wait(timeout=_PERMISSION_TIMEOUT_SECONDS)
         finally:
             self._pending_perms.pop(req_id, None)
         return result[0]
@@ -519,6 +594,7 @@ class GatewayServer:
         entry: ProviderEntry | None = None,
         permission_mode: str = "limited",
     ) -> ToolRouter:
+        from marius.tools.call_agent import make_call_agent_tool
         from marius.tools.reminders import make_reminders_tool
         from marius.tools.spawn_agent import make_spawn_agent_tool
 
@@ -544,6 +620,9 @@ class GatewayServer:
                 cwd=cwd,
             )
             base_entries = [*base_entries, spawn_tool]
+
+        if enabled_tools is None or "call_agent" in enabled_tools:
+            base_entries = [*base_entries, make_call_agent_tool()]
 
         return ToolRouter(base_entries, guard=guard)
 
@@ -681,6 +760,7 @@ class GatewayServer:
                 cmd = event.get("cmd", "")
                 if cmd == "/stop" and stop_event:
                     stop_event.set()
+                    self.orchestrator.cancel_current_provider()
                 elif cmd == "/new":
                     if turn_thread is None or not turn_thread.is_alive():
                         self.session.state.turns.clear()
@@ -798,6 +878,7 @@ class GatewayServer:
                     on_text_delta=on_text_delta,
                     on_tool_start=on_tool_start,
                     on_tool_result=on_tool_result,
+                    is_cancelled=stop_event.is_set,
                 )
             if output.assistant_message is not None:
                 content = output.assistant_message.content

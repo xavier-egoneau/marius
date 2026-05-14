@@ -117,6 +117,20 @@ def test_project_set_active_is_guarded_as_runtime_write(cwd: Path, tmp_path: Pat
     assert "Lecture hors du projet" in asked[0][1]
 
 
+def test_project_set_active_create_checks_requested_path_as_write(cwd: Path, tmp_path: Path) -> None:
+    asked = []
+    g = PermissionGuard(mode="limited", cwd=cwd, on_ask=lambda t, a, r: asked.append((t, r)) or True)
+
+    target = tmp_path / "new-project"
+
+    assert g.check("project_set_active", {"path": str(target), "create": True}) is True
+
+    assert [call[0] for call in asked] == ["project_set_active"]
+    assert "Écriture hors du projet" in asked[0][1]
+    assert str(target) in asked[0][1]
+    assert "Lecture hors du projet" not in asked[0][1]
+
+
 def test_security_admin_writes_are_guarded(cwd: Path, tmp_path: Path) -> None:
     asked = []
     g = PermissionGuard(mode="limited", cwd=cwd, on_ask=lambda t, a, r: asked.append((t, r)) or True)
@@ -187,24 +201,6 @@ def test_safe_denies_self_update_writes_outside_cwd(cwd: Path) -> None:
     assert g.check("self_update_propose", {"title": "x"}) is False
     assert g.check("self_update_report_bug", {"title": "x"}) is False
     assert g.check("self_update_apply", {"id": "x", "confirm": True}) is False
-
-
-def test_watch_tools_are_guarded_as_runtime_files(cwd: Path) -> None:
-    asked = []
-    g = PermissionGuard(mode="limited", cwd=cwd, on_ask=lambda t, a, r: asked.append((t, r)) or True)
-
-    assert g.check("watch_add", {"title": "x"}) is True
-    assert g.check("watch_remove", {"id": "x", "confirm": True}) is True
-    assert g.check("watch_run", {}) is True
-    assert g.check("watch_list", {}) is True
-
-    assert [call[0] for call in asked] == ["watch_add", "watch_remove", "watch_run", "watch_list"]
-
-
-def test_safe_denies_watch_writes_outside_cwd(cwd: Path) -> None:
-    g = _guard("safe", cwd)
-    assert g.check("watch_add", {"title": "x"}) is False
-    assert g.check("watch_run", {}) is False
 
 
 def test_skill_create_is_guarded_as_runtime_write(cwd: Path) -> None:
@@ -278,6 +274,36 @@ def test_limited_allows_write_inside_cwd(cwd: Path) -> None:
     g = _guard("limited", cwd)
     assert g.check("write_file", {"path": str(cwd / "output.txt")}) is True
     assert g.check("make_dir", {"path": str(cwd / "nested")}) is True
+
+
+def test_limited_allows_read_and_write_inside_allowed_roots(cwd: Path, tmp_path: Path) -> None:
+    trusted = tmp_path / "trusted-project"
+    asked = []
+    g = PermissionGuard(
+        mode="limited",
+        cwd=cwd,
+        allowed_roots=(trusted,),
+        on_ask=lambda t, a, r: asked.append(r) or False,
+    )
+
+    assert g.check("read_file", {"path": str(trusted / "README.md")}) is True
+    assert g.check("write_file", {"path": str(trusted / "out.txt")}) is True
+    assert g.check("make_dir", {"path": str(trusted / "nested")}) is True
+    assert asked == []
+
+
+def test_limited_refreshes_dynamic_allowed_roots(cwd: Path, tmp_path: Path) -> None:
+    dynamic_root = tmp_path / "active-project"
+    asked = []
+    g = PermissionGuard(
+        mode="limited",
+        cwd=cwd,
+        allowed_roots_provider=lambda: (dynamic_root,),
+        on_ask=lambda t, a, r: asked.append(r) or False,
+    )
+
+    assert g.check("write_file", {"path": str(dynamic_root / "out.txt")}) is True
+    assert asked == []
 
 
 def test_limited_checks_move_source_and_destination(cwd: Path, tmp_path: Path) -> None:

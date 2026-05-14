@@ -1,128 +1,122 @@
-"""Scheduler de jobs périodiques pour Marius.
+"""Scheduler de tâches récurrentes pour Marius.
 
-Brique standalone — dépend uniquement de la stdlib.
-Persiste les jobs dans un fichier JSON. Reprise transparente après redémarrage.
-
-Usage minimal :
-    store = JobStore(path)
-    scheduler = Scheduler(store, handlers={"dreaming": fn, "daily": fn})
-    scheduler.run_forever()   # dans un thread daemon
+Lit directement depuis TaskStore — plus de jobs.json intermédiaire.
 """
 
 from __future__ import annotations
 
-import json
+import re
 import threading
 import time
-from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, Callable
 
 
-@dataclass
-class ScheduledJob:
-    id: str
-    name: str
-    run_at: str            # ISO 8601 UTC
-    interval_seconds: int  # 86400 = daily
-    status: str = "scheduled"     # scheduled | running
-    last_run: str | None = None
-    last_error: str | None = None
-
-
-class JobStore:
-    """Persistance JSON des jobs planifiés. Thread-safe."""
-
-    def __init__(self, path: Path) -> None:
-        self._path = Path(path)
-        self._lock = threading.RLock()
-
-    def load(self) -> list[ScheduledJob]:
-        if not self._path.exists():
-            return []
-        try:
-            data: dict[str, Any] = json.loads(self._path.read_text(encoding="utf-8"))
-            return [
-                ScheduledJob(**{k: v for k, v in j.items() if k in ScheduledJob.__dataclass_fields__})
-                for j in data.get("jobs", [])
-            ]
-        except (json.JSONDecodeError, TypeError, OSError):
-            return []
-
-    def save(self, jobs: list[ScheduledJob]) -> None:
-        with self._lock:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(
-                json.dumps({"jobs": [asdict(j) for j in jobs]}, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-
-    def upsert(self, job: ScheduledJob) -> None:
-        with self._lock:
-            jobs = self.load()
-            jobs = [j for j in jobs if j.id != job.id]
-            jobs.append(job)
-            self.save(jobs)
-
-    def update(self, job: ScheduledJob) -> None:
-        with self._lock:
-            jobs = self.load()
-            self.save([j if j.id != job.id else job for j in jobs])
-
-    def due(self, now: datetime | None = None) -> list[ScheduledJob]:
-        """Retourne les jobs dont l'heure est passée."""
-        t = now or datetime.now(timezone.utc)
-        return [
-            j for j in self.load()
-            if j.status == "scheduled" and _parse_dt(j.run_at) <= t
-        ]
-
-    def list_all(self) -> list[ScheduledJob]:
-        return self.load()
-
-
-class Scheduler:
-    """Exécute les jobs dus et les replanifie pour le lendemain."""
+class TaskScheduler:
+    """Exécute les tâches récurrentes en lisant task_store à chaque tick."""
 
     def __init__(
         self,
-        store: JobStore,
         handlers: dict[str, Callable[[], None]],
         before_tick: Callable[[], None] | None = None,
+        poll_seconds: float = 60.0,
     ) -> None:
-        self._store = store
-        self._handlers = handlers
+        self._handlers   = handlers
         self._before_tick = before_tick
-        self._stop = threading.Event()
+        self._poll       = poll_seconds
+        self._stop       = threading.Event()
 
-    def tick(self, now: datetime | None = None) -> list[str]:
-        """Exécute les jobs dus. Retourne les noms des jobs lancés."""
+    def tick(self) -> list[str]:
+        """Exécute les tâches dues. Retourne les IDs lancés."""
         if self._before_tick is not None:
             self._before_tick()
+
+        from marius.storage.task_store import TaskStore
+        ts  = TaskStore()
+        now = datetime.now(timezone.utc)
         fired: list[str] = []
-        for job in self._store.due(now):
-            handler = self._handlers.get(job.name)
+
+        for task in ts.load():
+            if task.status in ("paused", "archived", "running", "failed"):
+                continue
+            if not task.recurring:
+                if task.status != "queued":
+                    continue
+                if _queue_locked(task, now):
+                    continue
+                scheduled_for = _parse_datetime(task.scheduled_for)
+                next_attempt_at = _parse_datetime(task.next_attempt_at)
+                due_scheduled = bool(scheduled_for and now >= scheduled_for)
+                due_retry = bool(next_attempt_at and now >= next_attempt_at)
+                if not due_scheduled and not due_retry:
+                    continue
+                handler = self._handlers.get(task.id)
+                if handler is None:
+                    continue
+                ts.update(task.id, {
+                    "locked_at": now.isoformat(),
+                    "locked_by": "scheduler",
+                })
+                try:
+                    handler()
+                    ts.update(task.id, {
+                        "status": "running",
+                        "scheduled_for": "",
+                        "next_attempt_at": "",
+                        "locked_at": "",
+                        "locked_by": "",
+                        "attempts": 0,
+                        "last_run": now.isoformat(),
+                        "last_error": "",
+                    })
+                    fired.append(task.id)
+                except Exception as exc:
+                    _mark_queue_failure(ts, task, str(exc), now=now)
+                continue
+            if not task.cadence:
+                continue
+
+            # initialize next_run_at on first encounter
+            if not task.next_run_at:
+                nxt = next_run_from_cadence(task.cadence)
+                ts.update(task.id, {"next_run_at": nxt.isoformat()})
+                continue
+
+            try:
+                next_run = _parse_datetime(task.next_run_at)
+                if next_run is None:
+                    raise ValueError("invalid datetime")
+            except (ValueError, TypeError):
+                nxt = next_run_from_cadence(task.cadence)
+                ts.update(task.id, {"next_run_at": nxt.isoformat()})
+                continue
+
+            if now < next_run:
+                continue
+
+            handler = self._handlers.get(task.id)
             if handler is None:
                 continue
-            job.status = "running"
-            self._store.update(job)
-            fired.append(job.name)
+
+            nxt = _advance(next_run, task.cadence)
+            ts.update(task.id, {
+                "next_run_at": nxt.isoformat(),
+                "last_run":    now.isoformat(),
+                "last_error":  "",
+                "status":      "running",
+            })
+            fired.append(task.id)
             try:
                 handler()
-                job.last_error = None
+                ts.update(task.id, {"status": "queued"})
             except Exception as exc:
-                job.last_error = str(exc)
-            finally:
-                job.status = "scheduled"
-                job.last_run = datetime.now(timezone.utc).isoformat()
-                job.run_at = _advance_daily(_parse_dt(job.run_at), job.interval_seconds).isoformat()
-                self._store.update(job)
+                ts.update(task.id, {"status": "queued", "last_error": str(exc)[:300]})
+
         return fired
 
-    def run_forever(self, poll_seconds: float = 60.0) -> None:
+    def run_forever(self) -> None:
         """Boucle de polling. À lancer dans un thread daemon."""
-        while not self._stop.wait(poll_seconds):
+        while not self._stop.wait(self._poll):
             try:
                 self.tick()
             except Exception:
@@ -135,94 +129,20 @@ class Scheduler:
 # ── helpers publics ───────────────────────────────────────────────────────────
 
 
-def next_run_for_time(hhmm: str) -> datetime:
-    """Calcule le prochain datetime UTC pour une heure HH:MM locale.
-
-    L'heure est interprétée dans le fuseau horaire de la machine (comme
-    l'utilisateur la lit sur son horloge), puis convertie en UTC pour stockage.
-    Si l'heure est déjà passée aujourd'hui, planifie pour demain.
-    """
-    h, m = _parse_hhmm(hhmm)
-    now_local = datetime.now().astimezone()   # heure locale avec tz de la machine
-    candidate = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
-    if candidate <= now_local:
-        candidate += timedelta(days=1)
-    return candidate.astimezone(timezone.utc)
-
-
-def ensure_jobs(
-    store: JobStore,
-    *,
-    dream_time: str = "",
-    daily_time: str = "",
-) -> None:
-    """Crée les jobs dreaming/daily s'ils n'existent pas encore."""
-    existing = {j.id for j in store.list_all()}
-
-    if dream_time and "dreaming" not in existing:
-        store.upsert(ScheduledJob(
-            id="dreaming",
-            name="dreaming",
-            run_at=next_run_for_time(dream_time).isoformat(),
-            interval_seconds=86400,
-        ))
-
-    if daily_time and "daily" not in existing:
-        store.upsert(ScheduledJob(
-            id="daily",
-            name="daily",
-            run_at=next_run_for_time(daily_time).isoformat(),
-            interval_seconds=86400,
-        ))
-
-
-def ensure_watch_jobs(store: JobStore, topics: list[Any]) -> None:
-    """Synchronise les jobs watch à partir de topics avec cadence.
-
-    Un topic avec cadence `manual` ou disabled n'est pas planifié. Les jobs
-    obsolètes `watch:<id>` sont retirés pour éviter les runs fantômes.
-    """
-    jobs = store.list_all()
-    next_jobs = [job for job in jobs if not job.id.startswith("watch:")]
-    existing = {job.id: job for job in jobs if job.id.startswith("watch:")}
-
-    for topic in topics:
-        topic_id = str(getattr(topic, "id", "") or "")
-        if not topic_id or not bool(getattr(topic, "enabled", True)):
-            continue
-        cadence = str(getattr(topic, "cadence", "") or "manual")
-        interval = cadence_to_seconds(cadence)
-        if interval is None:
-            continue
-        job_id = f"watch:{topic_id}"
-        previous = existing.get(job_id)
-        if previous and previous.interval_seconds == interval:
-            next_jobs.append(previous)
-            continue
-        next_jobs.append(ScheduledJob(
-            id=job_id,
-            name=job_id,
-            run_at=(datetime.now(timezone.utc) + timedelta(seconds=interval)).isoformat(),
-            interval_seconds=interval,
-        ))
-
-    store.save(next_jobs)
-
-
 def cadence_to_seconds(cadence: str) -> int | None:
-    """Convertit une cadence watch en secondes, None = manuel/non planifié."""
+    """Convertit une cadence en secondes, None = manuel/non planifié."""
     raw = (cadence or "manual").strip().lower().replace(" ", "")
     aliases = {
-        "manual": None,
-        "off": None,
+        "manual":   None,
+        "off":      None,
         "disabled": None,
-        "hourly": 3600,
-        "daily": 86400,
-        "weekly": 7 * 86400,
+        "hourly":   3600,
+        "daily":    86400,
+        "weekly":   7 * 86400,
     }
     if raw in aliases:
         return aliases[raw]
-    unit = raw[-1:] if raw else ""
+    unit   = raw[-1:] if raw else ""
     number = raw[:-1]
     if unit in ("m", "h", "d") and number.isdigit():
         value = int(number)
@@ -235,20 +155,30 @@ def cadence_to_seconds(cadence: str) -> int | None:
         return value * 86400
     return None
 
-# ── helpers privés ────────────────────────────────────────────────────────────
+
+def next_run_for_time(hhmm: str) -> datetime:
+    """Prochain datetime UTC pour une heure HH:MM en heure locale machine."""
+    h, m = _parse_hhmm(hhmm)
+    now_local = datetime.now().astimezone()
+    candidate = now_local.replace(hour=h, minute=m, second=0, microsecond=0)
+    if candidate <= now_local:
+        candidate += timedelta(days=1)
+    return candidate.astimezone(timezone.utc)
 
 
-def _parse_hhmm(hhmm: str) -> tuple[int, int]:
-    """Parse HH:MM ou HHhMM. Lève ValueError si le format est invalide."""
-    raw = hhmm.strip().replace("h", ":")
-    try:
-        parts = raw.split(":")
-        h, m = int(parts[0]), int(parts[1])
-    except (ValueError, IndexError, AttributeError):
-        raise ValueError(f"Format d'heure invalide : {hhmm!r} — attendu HH:MM (ex: 09:00)")
-    if not (0 <= h <= 23 and 0 <= m <= 59):
-        raise ValueError(f"Heure hors limites : {hhmm!r}")
-    return h, m
+def next_run_from_cadence(cadence: str, after: datetime | None = None) -> datetime:
+    """Calcule le prochain datetime d'exécution depuis une cadence."""
+    now = after or datetime.now(timezone.utc)
+    cadence = (cadence or "").strip()
+
+    # HH:MM → daily at specific local time
+    if re.match(r"^\d{1,2}:\d{2}$", cadence):
+        return next_run_for_time(cadence)
+
+    secs = cadence_to_seconds(cadence)
+    if secs is None:
+        return now + timedelta(days=365)   # manual = very far future
+    return now + timedelta(seconds=secs)
 
 
 def validate_hhmm(hhmm: str) -> str:
@@ -257,16 +187,94 @@ def validate_hhmm(hhmm: str) -> str:
     return f"{h:02d}:{m:02d}"
 
 
-def _parse_dt(iso: str) -> datetime:
-    from marius.kernel.time_utils import parse_stored_dt
-    return parse_stored_dt(iso)
+# ── helpers privés ────────────────────────────────────────────────────────────
 
 
-def _advance_daily(last: datetime, interval_seconds: int) -> datetime:
-    """Avance au prochain slot sans accumulation de retard."""
-    now = datetime.now(timezone.utc)
-    next_run = last + timedelta(seconds=interval_seconds)
-    # Si on a beaucoup de retard, sauter les slots manqués
-    while next_run <= now:
-        next_run += timedelta(seconds=interval_seconds)
-    return next_run
+def _parse_hhmm(hhmm: str) -> tuple[int, int]:
+    raw = hhmm.strip().replace("h", ":")
+    try:
+        parts = raw.split(":")
+        h, m = int(parts[0]), int(parts[1])
+    except (ValueError, IndexError, AttributeError):
+        raise ValueError(f"Format d'heure invalide : {hhmm!r}")
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError(f"Heure hors limites : {hhmm!r}")
+    return h, m
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat((value or "").replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.astimezone(timezone.utc)
+
+
+def _queue_locked(task: Any, now: datetime) -> bool:
+    locked_at = _parse_datetime(getattr(task, "locked_at", ""))
+    return bool(locked_at and now - locked_at < timedelta(minutes=5))
+
+
+def _retry_delay_seconds(attempts: int) -> int:
+    return min(300, 10 * (2 ** max(0, attempts - 1)))
+
+
+def _mark_queue_failure(ts: Any, task: Any, error: str, *, now: datetime) -> None:
+    attempts = int(getattr(task, "attempts", 0) or 0) + 1
+    max_attempts = max(1, int(getattr(task, "max_attempts", 5) or 5))
+    short_error = str(error or "send_failed")[:300]
+    if attempts >= max_attempts:
+        ts.update(task.id, {
+            "status": "failed",
+            "attempts": attempts,
+            "last_error": short_error,
+            "scheduled_for": "",
+            "next_attempt_at": "",
+            "locked_at": "",
+            "locked_by": "",
+        })
+        ts.add_event(task.id, {
+            "kind": "launch_failed",
+            "runner": "scheduler",
+            "attempts": attempts,
+            "error": short_error,
+        })
+        return
+
+    retry_at = now + timedelta(seconds=_retry_delay_seconds(attempts))
+    ts.update(task.id, {
+        "status": "queued",
+        "attempts": attempts,
+        "last_error": short_error,
+        "scheduled_for": "",
+        "next_attempt_at": retry_at.isoformat(),
+        "locked_at": "",
+        "locked_by": "",
+    })
+    ts.add_event(task.id, {
+        "kind": "retry_scheduled",
+        "runner": "scheduler",
+        "attempts": attempts,
+        "next_attempt_at": retry_at.isoformat(),
+        "error": short_error,
+    })
+
+
+def _advance(last: datetime, cadence: str) -> datetime:
+    """Calcule le prochain slot sans accumulation de retard."""
+    now  = datetime.now(timezone.utc)
+
+    # HH:MM → daily at that local time, starting tomorrow
+    if re.match(r"^\d{1,2}:\d{2}$", cadence.strip()):
+        return next_run_for_time(cadence)
+
+    secs = cadence_to_seconds(cadence)
+    if secs is None:
+        return now + timedelta(days=365)
+
+    nxt = last + timedelta(seconds=secs)
+    while nxt <= now:
+        nxt += timedelta(seconds=secs)
+    return nxt

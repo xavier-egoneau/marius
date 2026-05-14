@@ -77,6 +77,14 @@ def main() -> None:
     doctor_p = subs.add_parser("doctor", help="Diagnostic de l'installation")
     doctor_p.add_argument("--agent", metavar="NOM", default=None, help="Agent à diagnostiquer")
 
+    # marius dashboard — interface web de pilotage
+    dash_p = subs.add_parser("dashboard", help="Démarrer le dashboard de pilotage")
+    dash_p.add_argument("--port", metavar="PORT", type=int, default=8766,
+                        help="Port HTTP (défaut : 8766)")
+    dash_p.add_argument("--host", metavar="HOST", default="127.0.0.1")
+    dash_p.add_argument("--static-dir", metavar="PATH", default=None)
+    dash_p.add_argument("--no-open", action="store_true", help="Ne pas ouvrir le navigateur")
+
     # marius web [--port N] — alias pour gateway start --web-port
     web_p = subs.add_parser("web", help="Démarrer le gateway avec le canal web activé")
     web_p.add_argument("--agent", metavar="NOM", default=None)
@@ -162,6 +170,10 @@ def main() -> None:
 
     if args.command == "gateway":
         _cmd_gateway(args)
+        return
+
+    if args.command == "dashboard":
+        _cmd_dashboard(args)
         return
 
     if args.command == "web":
@@ -294,7 +306,7 @@ def _cmd_config_show(agent_name: str | None = None) -> None:
     from rich.console import Console
     from rich.table import Table
 
-    from marius.config.contracts import ALL_TOOLS
+    from marius.config.contracts import ALL_TOOLS, ADMIN_ONLY_TOOLS, effective_tools_for_role
     from marius.config.store import ConfigStore
     from marius.kernel.posture import ASSISTANT_SKILL
     from marius.provider_config.store import ProviderStore
@@ -330,9 +342,7 @@ def _cmd_config_show(agent_name: str | None = None) -> None:
     meta.add_row("provider",    provider_label)
     meta.add_row("modèle",      agent_cfg.model)
     meta.add_row("permissions", config.permission_mode)
-    if getattr(agent_cfg, "scheduler_enabled", False):
-        meta.add_row("dreaming",  getattr(agent_cfg, "dream_time", "—"))
-        meta.add_row("daily",     getattr(agent_cfg, "daily_time", "—"))
+    meta.add_row("scheduler",  "on" if getattr(agent_cfg, "scheduler_enabled", False) else "off")
     console.print(meta)
 
     # Skills
@@ -409,6 +419,12 @@ def _cmd_config_tool(change: str, agent_name: str | None = None) -> None:
     if agent_cfg is None:
         console.print(f"\n[bold color(208)]Agent inconnu :[/] {name}\n")
         return
+    if tool_name in ADMIN_ONLY_TOOLS and not agent_cfg.is_admin:
+        console.print(
+            f"\n[bold color(208)]Tool réservé à l'admin :[/] {tool_name}\n"
+            f"  L'agent '{name}' a le rôle '{agent_cfg.role}'.\n"
+        )
+        return
 
     tools = list(agent_cfg.tools or [])
     if action == "+":
@@ -425,7 +441,7 @@ def _cmd_config_tool(change: str, agent_name: str | None = None) -> None:
         verb = "désactivé"
 
     # Préserver l'ordre de ALL_TOOLS
-    ordered = [t for t in ALL_TOOLS if t in set(tools)]
+    ordered = effective_tools_for_role([t for t in ALL_TOOLS if t in set(tools)], agent_cfg.role)
     updated = replace(agent_cfg, tools=ordered)
     config.agents[name] = updated
     config_store.save(config)
@@ -918,6 +934,38 @@ def _cmd_web(args) -> None:
         server.shutdown()
 
 
+def _cmd_dashboard(args) -> None:
+    """Lance le dashboard de pilotage (interface web statique + API REST)."""
+    from pathlib import Path
+    from marius.channels.dashboard.server import DashboardServer
+
+    port       = getattr(args, "port", 8766)
+    host       = getattr(args, "host", "127.0.0.1")
+    no_open    = getattr(args, "no_open", False)
+    static_arg = getattr(args, "static_dir", None)
+
+    _stop_dashboard_instances_sync()
+
+    if static_arg:
+        static_dir = Path(static_arg)
+    else:
+        candidate = Path(__file__).parent.parent / "front"
+        static_dir = candidate if candidate.exists() else Path(__file__).parent / "channels" / "dashboard" / "static"
+
+    if not static_dir.exists():
+        import sys
+        sys.stderr.write(f"Dashboard: dossier static introuvable : {static_dir}\n")
+        sys.stderr.write("Lancez depuis la racine du projet ou passez --static-dir\n")
+        sys.exit(1)
+
+    if not no_open:
+        import threading, webbrowser
+        threading.Timer(0.5, lambda: webbrowser.open(f"http://{host}:{port}")).start()
+
+    server = DashboardServer(static_dir=static_dir, port=port, host=host)
+    server.serve()
+
+
 def _marius_web_available(port: int, *, expected_agent: str | None = None) -> bool:
     import json
     from urllib.error import URLError
@@ -954,12 +1002,62 @@ def _stop_web_sync(agent_name: str, port: int) -> bool:
             continue
         stopped = _terminate_pid(pid) or stopped
 
+    # fallback : tuer tout processus qui écoute sur ce port (cmdline parfois tronqué)
+    for pid in _pids_on_port(port):
+        if pid in protected_pids:
+            continue
+        stopped = _terminate_pid(pid) or stopped
+
     deadline = time.monotonic() + 3.0
     while time.monotonic() < deadline:
         if not _marius_web_available(port, expected_agent=agent_name):
             return stopped
         time.sleep(0.1)
     return stopped
+
+
+def _stop_dashboard_instances_sync() -> bool:
+    import time
+
+    stopped = False
+    protected_pids = _current_process_family_pids()
+    for pid in _find_marius_dashboard_pids():
+        if pid in protected_pids:
+            continue
+        stopped = _terminate_pid(pid) or stopped
+
+    if not stopped:
+        return False
+
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        remaining = [
+            pid for pid in _find_marius_dashboard_pids()
+            if pid not in protected_pids
+        ]
+        if not remaining:
+            return True
+        time.sleep(0.1)
+    return True
+
+
+def _pids_on_port(port: int) -> list[int]:
+    """Retourne les PIDs qui écoutent sur le port TCP donné via ss."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ss", "-tlnpH", f"sport = :{port}"],
+            text=True, capture_output=True, timeout=2, check=False,
+        )
+        pids: list[int] = []
+        for line in result.stdout.splitlines():
+            # format: users:(("python3",pid=10309,fd=4))
+            import re
+            for m in re.finditer(r"pid=(\d+)", line):
+                pids.append(int(m.group(1)))
+        return pids
+    except Exception:
+        return []
 
 
 def _read_pid_file(path) -> int | None:
@@ -1058,6 +1156,37 @@ def _find_marius_web_pids(agent_name: str, port: int) -> list[int]:
         if not has_port_arg and int(port) != 8765:
             continue
         pids.append(pid)
+    return pids
+
+
+def _find_marius_dashboard_pids() -> list[int]:
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            text=True,
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, args = stripped.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if "marius.channels.dashboard" in args:
+            pids.append(pid)
+            continue
+        if "marius" in args and " dashboard" in args:
+            pids.append(pid)
     return pids
 
 

@@ -138,6 +138,115 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
 - Toute décision d’architecture durable doit être ajoutée ici.
 - Si une règle devient fausse, on la corrige explicitement plutôt que de la laisser dériver.
 
+## 2026-05-14 — Zone de confiance runtime en mode limited
+
+En mode `limited`, la zone de confiance effective d'un gateway est composée du
+workspace interne de l'agent et des roots explicitement validées par le gardien.
+Le projet actif est une root candidate : il n'est ajouté à l'allow-list
+persistante qu'après décision `allow` de `guardian_policy`.
+
+Conséquences :
+- les lectures/écritures de base sous le projet actif ne déclenchent pas une
+  demande d'autorisation à chaque fichier une fois la root validée ;
+- le projet actif est relu au moment de la vérification, mais il passe par le
+  détecteur de projet et la politique d'expansion avant d'être trusted ;
+- les roots validées sont persistées dans `~/.marius/allowed_roots.json` ;
+- le mode `safe` reste plus strict et ne promeut pas le projet actif en zone
+  d'écriture libre ;
+- les dossiers trop larges comme `~`, les chemins système ou les grands dossiers
+  utilisateur (`~/Documents`, `~/Downloads`, etc.) ne sont pas promus ;
+- les chemins système et fichiers sensibles restent filtrés par le gardien.
+
+## 2026-05-14 — Création de projet depuis le Task Board
+
+Le Task Board peut marquer une tâche avec `project_path: "nouveau"` pour
+signaler qu'elle crée un nouveau projet plutôt qu'elle ne travaille dans un
+projet existant.
+
+Au lancement, le dashboard résout le nom/chemin du projet depuis le titre ou le
+prompt, limite la création à `~/Documents/projets`, crée le dossier, l'ajoute
+aux projets connus et l'ajoute à l'allow-list persistante avant d'envoyer la
+tâche au gateway.
+
+Conséquences :
+- le LLM reçoit une task déjà attachée au vrai chemin projet ;
+- la création du dossier et la promotion en zone de confiance ne dépendent pas
+  d'une formulation implicite du modèle ;
+- un projet créé via le board apparaît ensuite comme projet normal dans le
+  filtre du dashboard.
+
+## 2026-05-14 — Activation directe d'un nouveau projet
+
+Le workflow conversationnel/CLI doit pouvoir couvrir "crée un nouveau projet X
+dans le dossier de projets" sans dépendre d'une séquence implicite
+`make_dir` puis `project_set_active`.
+
+`project_set_active` accepte donc `create=true` :
+- le gardien demande l'autorisation d'écrire le nouveau dossier et les fichiers
+  de registre Marius ;
+- l'outil crée le dossier si nécessaire ;
+- il définit ce dossier comme projet actif ;
+- il ajoute la root à l'allow-list persistante quand le tool est construit dans
+  le runtime Marius.
+
+Ce flux garde le modèle responsable de choisir l'outil, mais rend l'opération
+atomique côté système une fois l'autorisation donnée.
+
+## 2026-05-13 — call_agent : délégation vers agents nommés persistants
+
+`call_agent` permet à l'agent orchestrateur (admin) de déléguer une tâche à un
+agent nommé persistant via son gateway Unix, et de récupérer sa réponse complète.
+
+**Différence avec `spawn_agent`** :
+- `spawn_agent` crée des workers éphémères anonymes à partir de la config du parent.
+- `call_agent` route une tâche vers un agent existant et persistant (avec sa propre
+  mémoire, ses propres skills, son historique de session).
+
+**Implémentation** :
+- Connexion au socket `~/.marius/run/<agent>.sock`.
+- Handshake WelcomeEvent → envoi InputEvent → collecte DeltaEvents → DoneEvent.
+- Les `permission_request` de l'agent cible sont auto-refusés (pas d'interactivité).
+- Timeout configurable (défaut 120s, max 300s).
+- Non disponible pour les agents nommés par défaut (`AGENT_DEFAULT_DISABLED_TOOLS`),
+  activable explicitement si un agent doit lui-même orchestrer d'autres agents.
+
+## 2026-05-12 — Hiérarchie à trois niveaux : admin, agent, spawned
+
+Trois niveaux d’agent, règles explicites et non négociables.
+
+**Admin** (`role = "admin"`) :
+- Créé une seule fois à `marius setup` ; c’est le premier agent configuré.
+- Ne peut jamais être supprimé (`host_agent_delete` et dashboard le refusent).
+- Peut créer des agents nommés et spawner des subagents à runtime.
+- Dispose d’un gateway complet : CLI, web, Telegram, scheduler.
+
+**Agent nommé** (`role = "agent"`) :
+- Créé par l’admin via config (`host_agent_save` ou dashboard).
+- Peut être supprimé par l’admin.
+- Dispose de son propre gateway : CLI, web, Telegram, scheduler.
+- Ne spawne pas de subagents par défaut — `spawn_agent` n’est pas dans son toolset initial.
+- Peut recevoir explicitement `spawn_agent` si l’usage devient pertinent pour cet agent.
+- Ne reçoit pas les outils de mutation host/admin globale par défaut ; la création,
+  suppression, configuration Telegram, providers/secrets sensibles et apply/rollback
+  self-update restent du côté admin.
+
+**Subagent spawné** (éphémère, pas dans `config.json`) :
+- Créé à runtime par l’admin pour une tâche bornée (développement, délégation).
+- Disparaît à la fin de la tâche, aucun état persistant.
+- Pas de gateway, pas de Telegram.
+- **Ne peut pas spawner d’autres subagents** — depth = 1, déjà appliqué par `spawn_agent` qui filtre lui-même du toolset worker.
+
+Implémentation :
+- `AgentConfig` reçoit `role: str = "agent"`.
+- À `marius setup`, l’agent initial est créé avec `role = "admin"`.
+- Migration transparente : si `role` est absent dans `config.json`, `_from_dict` l’infère à `"admin"` pour `main_agent`, `"agent"` pour les autres.
+- `host_agent_delete` et le dashboard bloquent la suppression si `role == "admin"` (ou `name == main_agent` pour compat legacy).
+- Les agents nommés n’ont pas `spawn_agent` dans leur toolset par défaut, mais
+  l’outil reste activable explicitement dans leur config.
+- Le toolset effectif est aussi filtré au runtime par rôle, pour neutraliser les
+  anciennes configs ou ajouts manuels qui remettraient un outil admin-only
+  global à un agent nommé. `spawn_agent` n’est pas admin-only.
+
 ## 2026-05-11 — Sortie de tour rendue en commun
 - Décision : ajouter un rendu de fin de tour commun qui agrège réponse assistant, artefacts d'outils et notice de compaction.
 - Principe : les outils restent des producteurs d'observations ; ils ne court-circuitent pas la réponse du LLM.

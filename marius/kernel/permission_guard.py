@@ -5,7 +5,8 @@ Inspiré de Maurice kernel/permissions.py, simplifié pour Marius.
 
 Trois modes :
   safe    → lecture seule dans CWD, écriture sur demande, shell interdit
-  limited → lecture + écriture dans CWD, shell autorisé, sortie CWD sur demande
+  limited → lecture + écriture dans CWD et racines autorisées, shell autorisé,
+            sortie zone autorisée sur demande
   power   → tout autorisé (hormis chemins système)
 
 Le callback on_ask est fourni par le REPL pour les décisions interactives.
@@ -36,7 +37,6 @@ _SKILLS_DIR = Path.home() / ".marius" / "skills"
 _MARIUS_CONFIG_PATH = Path.home() / ".marius" / "config.json"
 _TELEGRAM_CONFIG_PATH = Path.home() / ".marius" / "telegram.json"
 _SELF_UPDATE_DIR = Path.home() / ".marius" / "self_updates"
-_WATCH_DIR = Path.home() / ".marius" / "watch"
 _RAG_DIR = Path.home() / ".marius" / "workspace"
 _PROJECTS_PATH = Path.home() / ".marius" / "projects.json"
 _ACTIVE_PROJECT_PATH = Path.home() / ".marius" / "active_project.json"
@@ -87,6 +87,8 @@ class PermissionGuard:
     on_ask: Callable[[str, dict, str], bool] | None = None
     approval_lookup: Callable[[str], bool | None] | None = None
     approval_recorder: Callable[[dict[str, Any]], None] | None = None
+    allowed_roots: tuple[Path, ...] = field(default_factory=tuple)
+    allowed_roots_provider: Callable[[], tuple[Path, ...]] | None = None
 
     # Cache des approbations de la session (fingerprint → bool)
     _approvals: dict[str, bool] = field(default_factory=dict, repr=False)
@@ -144,6 +146,7 @@ class PermissionGuard:
                 "reason": reason,
                 "mode": self.mode,
                 "cwd": str(self.cwd),
+                "allowed_roots": [str(root) for root in self._current_allowed_roots()],
                 "approved": bool(approved),
             })
         except Exception:
@@ -157,7 +160,7 @@ class PermissionGuard:
             "web_fetch", "web_search", "memory",
             "host_status", "host_doctor", "host_logs", "host_agent_list",
             "project_list", "approval_list", "secret_ref_list", "provider_list",
-            "daily_digest", "caldav_doctor",
+            "caldav_doctor",
             "caldav_agenda", "sentinelle_scan",
             "rag_source_list", "rag_search", "rag_get",
         ):
@@ -201,10 +204,6 @@ class PermissionGuard:
                 self._check_write({"path": repo_path}),
                 self._check_write({"path": str(_SELF_UPDATE_DIR)}),
             ])
-        if tool_name == "watch_list":
-            return self._check_read({"path": str(_WATCH_DIR)})
-        if tool_name in ("watch_add", "watch_remove", "watch_run"):
-            return self._check_write({"path": str(_WATCH_DIR)})
         if tool_name == "rag_source_add":
             decisions = [self._check_write({"path": str(_RAG_DIR)})]
             source_path = str(arguments.get("path") or arguments.get("uri") or "")
@@ -229,7 +228,10 @@ class PermissionGuard:
             ]
             requested = arguments.get("path")
             if isinstance(requested, str) and requested.strip():
-                decisions.append(self._check_read({"path": requested}))
+                if bool(arguments.get("create", False)):
+                    decisions.append(self._check_write({"path": requested}))
+                else:
+                    decisions.append(self._check_read({"path": requested}))
             return _combine_decisions(decisions)
         if tool_name in ("approval_decide", "approval_forget"):
             return self._check_write({"path": str(_APPROVALS_PATH)})
@@ -282,7 +284,7 @@ class PermissionGuard:
             return PermissionDecision("ask", f"Fichier sensible : {path}")
         if self.mode == "safe" and not _is_under(path, self.cwd):
             return PermissionDecision("ask", f"Lecture hors du projet ({path})")
-        if self.mode == "limited" and not _is_under(path, self.cwd):
+        if self.mode == "limited" and not self._is_allowed_path(path):
             return PermissionDecision("ask", f"Lecture hors du projet ({path})")
         return _ALLOW
 
@@ -298,7 +300,7 @@ class PermissionGuard:
             if _is_under(path, self.cwd):
                 return PermissionDecision("ask", f"Écriture dans le projet : {path}")
             return _DENY_WRITE
-        if self.mode == "limited" and not _is_under(path, self.cwd):
+        if self.mode == "limited" and not self._is_allowed_path(path):
             return PermissionDecision("ask", f"Écriture hors du projet ({path})")
         return _ALLOW
 
@@ -319,6 +321,21 @@ class PermissionGuard:
         if _DANGEROUS_SHELL_RE.search(cmd):
             return PermissionDecision("ask", f"Commande potentiellement destructrice :\n  {cmd}")
         return _ALLOW
+
+    def _is_allowed_path(self, path: str) -> bool:
+        if _is_under(path, self.cwd):
+            return True
+        return any(_is_under(path, root) for root in self._current_allowed_roots())
+
+    def _current_allowed_roots(self) -> tuple[Path, ...]:
+        roots = tuple(self.allowed_roots)
+        if self.allowed_roots_provider is None:
+            return roots
+        try:
+            dynamic_roots = tuple(self.allowed_roots_provider())
+        except Exception:
+            return roots
+        return roots + tuple(root for root in dynamic_roots if root not in roots)
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

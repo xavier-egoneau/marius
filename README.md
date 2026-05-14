@@ -2,7 +2,7 @@
 
 Marius est un assistant agentique local, modulaire et extensible. Il sait discuter,
 utiliser des outils, travailler dans un projet, mémoriser des informations utiles,
-lancer des sous-agents, exposer une interface web et se connecter à Telegram.
+exposer une interface web et se connecter à Telegram.
 
 Le projet est encore en alpha, mais le socle est déjà utilisable en local :
 CLI, gateway persistant, providers OpenAI/Ollama, outils fichier/shell/web/mémoire,
@@ -17,7 +17,7 @@ skills, dreaming/daily, interface web et canal Telegram.
 - Garde une mémoire locale SQLite.
 - Charge des skills depuis `~/.marius/skills`.
 - Peut planifier et implémenter des tâches avec le skill `dev`.
-- Peut déléguer à des subagents isolés avec `spawn_agent`.
+- L'agent admin peut déléguer à des subagents isolés avec `spawn_agent`; les agents nommés peuvent aussi recevoir cet outil si besoin.
 - Peut tourner comme gateway persistant et servir CLI, web et Telegram.
 
 ## Installation
@@ -50,7 +50,7 @@ marius setup
 Le setup configure :
 
 - un provider LLM ;
-- un agent principal ;
+- un agent admin principal ;
 - le modèle utilisé ;
 - les outils actifs ;
 - les skills actifs ;
@@ -306,6 +306,11 @@ Les outils configurables incluent notamment :
 - `memory` : gérer la mémoire durable ;
 - `reminders` : créer, lister ou annuler des rappels via le gateway.
 
+Les outils de mutation host/admin globale sont réservés au rôle `admin`. Les
+agents nommés gardent leurs surfaces CLI/web/Telegram ; `spawn_agent` est
+désactivé par défaut pour eux, mais peut être activé explicitement comme un
+outil configurable.
+
 Activer ou désactiver un outil :
 
 ```bash
@@ -415,7 +420,7 @@ L'agent peut aussi consulter ces informations via les outils `host_status`,
 outils sont read-only : ils donnent des observations au modèle, qui garde la
 réponse finale.
 
-Les actions host disponibles côté agent sont atomiques et passent par le
+Les actions host disponibles côté agent admin sont atomiques et passent par le
 gardien de permissions : `host_agent_save`, `host_agent_delete` et
 `host_telegram_configure`. Pour Telegram, le modèle ne doit jamais recevoir le
 token brut ; l'outil accepte uniquement `token_ref` au format `env:NOM`,

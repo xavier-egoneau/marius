@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from marius.config.contracts import ALL_TOOLS, AgentConfig, MariusConfig
+from marius.config.contracts import ALL_TOOLS, DEFAULT_AGENT_TOOLS, AgentConfig, MariusConfig
 from marius.config.store import ConfigStore
 
 
@@ -31,6 +31,28 @@ def test_config_store_roundtrip(tmp_path):
     assert loaded.agents["main"].daily_model == "gemma4-mini"
     assert loaded.agents["main"].tools == ["read_file", "vision"]
     assert loaded.agents["main"].skills == ["assistant"]
+
+
+def test_agent_config_defaults_follow_role():
+    admin = AgentConfig(name="main", provider_id="provider-1", model="gemma4", role="admin")
+    named = AgentConfig(name="worker", provider_id="provider-1", model="gemma4", role="agent")
+
+    assert admin.tools == ALL_TOOLS
+    assert named.tools == DEFAULT_AGENT_TOOLS
+    assert "spawn_agent" not in named.tools
+    assert "host_agent_save" not in named.tools
+
+
+def test_named_agent_can_keep_spawn_agent_when_explicitly_enabled():
+    named = AgentConfig(
+        name="worker",
+        provider_id="provider-1",
+        model="gemma4",
+        role="agent",
+        tools=["read_file", "spawn_agent", "host_agent_save"],
+    )
+
+    assert named.tools == ["read_file", "spawn_agent"]
 
 
 def test_config_store_migrates_pre_vision_default_tools(tmp_path):
@@ -66,6 +88,79 @@ def test_config_store_migrates_pre_vision_default_tools(tmp_path):
 
     assert loaded is not None
     assert loaded.agents["main"].tools == ALL_TOOLS
+    assert loaded.agents["main"].role == "admin"
+
+
+def test_config_store_migrates_named_agent_to_agent_toolset(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "permission_mode": "limited",
+                "main_agent": "main",
+                "agents": {
+                    "main": {
+                        "name": "main",
+                        "provider_id": "provider-1",
+                        "model": "gemma4",
+                        "tools": ALL_TOOLS,
+                        "skills": [],
+                    },
+                    "worker": {
+                        "name": "worker",
+                        "provider_id": "provider-1",
+                        "model": "gemma4",
+                        "tools": ALL_TOOLS,
+                        "skills": [],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = ConfigStore(path=path).load()
+
+    assert loaded is not None
+    assert loaded.agents["main"].role == "admin"
+    assert loaded.agents["main"].tools == ALL_TOOLS
+    assert loaded.agents["worker"].role == "agent"
+    assert loaded.agents["worker"].tools == DEFAULT_AGENT_TOOLS
+
+
+def test_config_store_preserves_explicit_spawn_agent_for_named_agent(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "permission_mode": "limited",
+                "main_agent": "main",
+                "agents": {
+                    "main": {
+                        "name": "main",
+                        "provider_id": "provider-1",
+                        "model": "gemma4",
+                        "tools": ALL_TOOLS,
+                        "skills": [],
+                    },
+                    "worker": {
+                        "name": "worker",
+                        "provider_id": "provider-1",
+                        "model": "gemma4",
+                        "role": "agent",
+                        "tools": ["read_file", "spawn_agent", "host_agent_save"],
+                        "skills": [],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = ConfigStore(path=path).load()
+
+    assert loaded is not None
+    assert loaded.agents["worker"].tools == ["read_file", "spawn_agent"]
 
 
 def test_config_store_migrates_pre_marius_web_default_tools(tmp_path):
@@ -145,10 +240,6 @@ def test_config_store_migrates_pre_project_default_tools(tmp_path):
                             "self_update_report_bug",
                             "self_update_list",
                             "self_update_show",
-                            "watch_add",
-                            "watch_list",
-                            "watch_remove",
-                            "watch_run",
                             "open_marius_web",
                             "spawn_agent",
                         ],
@@ -208,10 +299,6 @@ def test_config_store_migrates_pre_security_default_tools(tmp_path):
                             "self_update_report_bug",
                             "self_update_list",
                             "self_update_show",
-                            "watch_add",
-                            "watch_list",
-                            "watch_remove",
-                            "watch_run",
                             "open_marius_web",
                             "spawn_agent",
                         ],
@@ -305,10 +392,6 @@ def test_config_store_migrates_pre_provider_admin_default_tools(tmp_path):
                             "self_update_report_bug",
                             "self_update_list",
                             "self_update_show",
-                            "watch_add",
-                            "watch_list",
-                            "watch_remove",
-                            "watch_run",
                             "open_marius_web",
                             "spawn_agent",
                         ],
@@ -378,10 +461,6 @@ def test_config_store_migrates_pre_dreaming_tools_default_tools(tmp_path):
                             "self_update_report_bug",
                             "self_update_list",
                             "self_update_show",
-                            "watch_add",
-                            "watch_list",
-                            "watch_remove",
-                            "watch_run",
                             "open_marius_web",
                             "spawn_agent",
                         ],
@@ -651,63 +730,6 @@ def test_config_store_migrates_pre_self_update_default_tools(tmp_path):
                             "host_status",
                             "host_doctor",
                             "host_logs",
-                            "open_marius_web",
-                            "spawn_agent",
-                        ],
-                        "skills": [],
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    loaded = ConfigStore(path=path).load()
-
-    assert loaded is not None
-    assert loaded.agents["main"].tools == ALL_TOOLS
-
-
-def test_config_store_migrates_pre_watch_default_tools(tmp_path):
-    path = tmp_path / "config.json"
-    path.write_text(
-        json.dumps(
-            {
-                "permission_mode": "limited",
-                "main_agent": "main",
-                "agents": {
-                    "main": {
-                        "name": "main",
-                        "provider_id": "provider-1",
-                        "model": "gemma4",
-                        "tools": [
-                            "read_file",
-                            "list_dir",
-                            "write_file",
-                            "make_dir",
-                            "move_path",
-                            "explore_tree",
-                            "explore_grep",
-                            "explore_summary",
-                            "run_bash",
-                            "web_fetch",
-                            "web_search",
-                            "vision",
-                            "skill_view",
-                            "skill_create",
-                            "skill_list",
-                            "skill_reload",
-                            "host_agent_list",
-                            "host_agent_save",
-                            "host_agent_delete",
-                            "host_telegram_configure",
-                            "host_status",
-                            "host_doctor",
-                            "host_logs",
-                            "self_update_propose",
-                            "self_update_report_bug",
-                            "self_update_list",
-                            "self_update_show",
                             "open_marius_web",
                             "spawn_agent",
                         ],

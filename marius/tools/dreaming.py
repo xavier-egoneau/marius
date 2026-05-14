@@ -10,8 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from marius.dreaming.engine import run_daily, run_dreaming
-from marius.kernel.contracts import Artifact, ArtifactType, ToolResult
+from marius.dreaming.engine import run_dreaming
+from marius.kernel.contracts import ToolResult
 from marius.kernel.tool_router import ToolDefinition, ToolEntry
 from marius.provider_config.contracts import ProviderEntry
 from marius.storage.memory_store import MemoryStore
@@ -26,8 +26,6 @@ def make_dreaming_tools(
     sessions_dir: Path | None = None,
     dreams_dir: Path | None = None,
     skills_dir: Path | None = None,
-    watch_dir: Path | None = None,
-    daily_model: str = "",
 ) -> dict[str, ToolEntry]:
     root = Path(project_root)
 
@@ -41,7 +39,6 @@ def make_dreaming_tools(
             sessions_dir=sessions_dir,
             dreams_dir=dreams_dir,
             skills_dir=skills_dir,
-            watch_dir=watch_dir,
             archive_sessions=archive_sessions,
         )
         return ToolResult(
@@ -58,41 +55,6 @@ def make_dreaming_tools(
                 "project_root": str(root),
             },
             error="dreaming_failed" if result.errors else None,
-        )
-
-    def daily_digest(arguments: dict[str, Any]) -> ToolResult:
-        requested_model = _optional_text(arguments.get("model")) or daily_model
-        briefing = run_daily(
-            memory_store=memory_store,
-            entry=entry,
-            active_skills=active_skills,
-            project_root=root,
-            dreams_dir=dreams_dir,
-            skills_dir=skills_dir,
-            watch_dir=watch_dir,
-            model=requested_model or None,
-        )
-        footer = _extract_daily_usage_footer(briefing)
-        summary = _markdown_summary(briefing)
-        if footer and footer not in summary:
-            summary = f"{summary}\n\n{footer}"
-        return ToolResult(
-            tool_call_id="",
-            ok=not briefing.startswith("# Briefing\n\nErreur provider"),
-            summary=summary,
-            data={
-                "markdown": briefing,
-                "project_root": str(root),
-                "model": requested_model or entry.model,
-                "usage_footer": footer,
-            },
-            artifacts=[
-                Artifact(
-                    type=ArtifactType.REPORT,
-                    data={"format": "markdown", "content": briefing, "display": False},
-                )
-            ],
-            error="daily_failed" if briefing.startswith("# Briefing\n\nErreur provider") else None,
         )
 
     return {
@@ -112,23 +74,6 @@ def make_dreaming_tools(
                 },
             ),
             handler=dreaming_run,
-        ),
-        "daily_digest": ToolEntry(
-            definition=ToolDefinition(
-                name="daily_digest",
-                description="Generate the daily briefing markdown from memories, skill daily contracts and watch reports.",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "model": {
-                            "type": "string",
-                            "description": "Optional model override for this daily only.",
-                        },
-                    },
-                    "required": [],
-                },
-            ),
-            handler=daily_digest,
         ),
     }
 
@@ -154,9 +99,3 @@ def _markdown_summary(markdown: str, *, limit: int = 400) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
-def _extract_daily_usage_footer(markdown: str) -> str:
-    for line in reversed(markdown.splitlines()):
-        text = line.strip()
-        if text.startswith("_Tokens daily :") and text.endswith("_"):
-            return text
-    return ""

@@ -115,6 +115,11 @@ def test_home_dir_is_denied():
     assert result.signal is ProjectSignal.DENIED
 
 
+def test_broad_home_documents_dir_is_denied():
+    result = detect_project(Path.home() / "Documents")
+    assert result.signal is ProjectSignal.DENIED
+
+
 def test_shallow_path_is_denied():
     result = detect_project(Path("/home"))
     assert result.signal is ProjectSignal.DENIED

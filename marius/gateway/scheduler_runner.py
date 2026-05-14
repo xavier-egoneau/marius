@@ -15,8 +15,6 @@ from marius.provider_config.contracts import ProviderEntry
 from marius.storage.log_store import log_event
 from marius.storage.memory_store import MemoryStore
 from marius.storage.reminders_store import RemindersStore
-from marius.storage.watch_store import WatchStore
-from marius.tools.watch import WatchSummarizer, make_watch_tools, should_notify_topic
 
 _REMINDERS_POLL_SECONDS = 30.0
 
@@ -34,9 +32,6 @@ class GatewayScheduler:
         agent_config: Any,
         reminders_store: RemindersStore,
         get_telegram_chat_id: Callable[[], int | None],
-        watch_store: WatchStore | None = None,
-        watch_search_handler: Callable[[dict[str, Any]], Any] | None = None,
-        watch_summarizer: WatchSummarizer | None = None,
     ) -> None:
         self.agent_name     = agent_name
         self.workspace      = workspace
@@ -44,10 +39,6 @@ class GatewayScheduler:
         self.entry          = entry
         self.active_skills  = active_skills
         self.reminders_store = reminders_store
-        self.watch_store    = watch_store if watch_store is not None else WatchStore()
-        self.watch_search_handler = watch_search_handler
-        self.watch_summarizer = watch_summarizer
-        self.daily_model    = str(getattr(agent_config, "daily_model", "") or "").strip()
         self._get_chat_id   = get_telegram_chat_id
         self._scheduler     = None
 
@@ -59,35 +50,95 @@ class GatewayScheduler:
     # ── scheduler dream / daily ───────────────────────────────────────────────
 
     def _start_scheduler(self, agent_config: Any) -> None:
-        from marius.kernel.scheduler import JobStore, Scheduler, cadence_to_seconds, ensure_jobs, ensure_watch_jobs
-        from marius.gateway.workspace import jobs_path
+        from marius.kernel.scheduler import TaskScheduler
 
-        store = JobStore(jobs_path(self.agent_name))
-        ensure_jobs(
-            store,
-            dream_time=getattr(agent_config, "dream_time", ""),
-            daily_time=getattr(agent_config, "daily_time", ""),
-        )
+        enabled_tools = set(getattr(agent_config, "tools", []) or [])
+        has_dreaming  = "dreaming_run" in enabled_tools
+
+        self._seed_system_tasks(has_dreaming)
+
         handlers: dict[str, Any] = {}
-        if getattr(agent_config, "dream_time", ""):
-            handlers["dreaming"] = self._run_scheduled_dream
-        if getattr(agent_config, "daily_time", ""):
-            handlers["daily"] = self._run_scheduled_daily
+        if has_dreaming:
+            handlers[f"sys_dream_{self.agent_name}"] = self._run_scheduled_dream
 
-        def sync_watch_jobs() -> None:
-            watch_topics = self.watch_store.list_topics(include_disabled=False)
-            ensure_watch_jobs(store, watch_topics)
-            for name in [name for name in handlers if name.startswith("watch:")]:
-                del handlers[name]
-            for topic in watch_topics:
-                if cadence_to_seconds(str(getattr(topic, "cadence", "") or "manual")) is not None:
-                    handlers[f"watch:{topic.id}"] = lambda topic_id=topic.id: self._run_scheduled_watch(topic_id)
+        def before_tick() -> None:
+            from marius.storage.task_store import TaskStore
 
-        sync_watch_jobs()
+            # ── user recurring tasks ───────────────────────────────────────
+            for task in TaskStore().list_all(agent=self.agent_name, recurring_only=True):
+                if not task.system and task.cadence and task.id not in handlers:
+                    handlers[task.id] = lambda tid=task.id: self._run_user_task(tid)
+            for task in TaskStore().list_all(agent=self.agent_name, non_recurring_only=True):
+                if (
+                    not task.system
+                    and task.status == "queued"
+                    and (task.scheduled_for or task.next_attempt_at)
+                    and task.id not in handlers
+                ):
+                    handlers[task.id] = lambda tid=task.id: self._run_user_task(tid)
 
-        self._scheduler = Scheduler(store, handlers, before_tick=sync_watch_jobs)
+        self._scheduler = TaskScheduler(handlers, before_tick=before_tick)
         t = threading.Thread(target=self._scheduler.run_forever, daemon=True)
         t.start()
+
+    def _seed_system_tasks(
+        self,
+        has_dreaming: bool,
+    ) -> None:
+        """Crée les tâches système récurrentes dans task_store si elles n'existent pas."""
+        from marius.storage.task_store import seed_agent_system_tasks
+
+        tools: list[str] = []
+        if has_dreaming:
+            tools.append("dreaming_run")
+        seed_agent_system_tasks(self.agent_name, tools)
+
+    def _run_user_task(self, task_id: str) -> None:
+        """Exécute une tâche utilisateur récurrente en envoyant son prompt au gateway."""
+        import socket as _socket
+        from marius.storage.task_store import TaskStore
+        from marius.gateway.workspace import socket_path
+        from marius.gateway.protocol import InputEvent, encode
+
+        ts = TaskStore()
+        task = next((t for t in ts.load() if t.id == task_id), None)
+        if task is None:
+            return
+
+        if task.recurring:
+            prompt = task.prompt.strip() or task.title
+        else:
+            prompt = task.prompt.strip() or task.title
+        agent  = task.agent or self.agent_name
+        sock   = socket_path(agent)
+        if not sock.exists():
+            raise OSError(f"Gateway '{agent}' non actif.")
+
+        try:
+            conn = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            conn.settimeout(5.0)
+            conn.connect(str(sock))
+            buf = b""
+            while b"\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            conn.sendall(encode(InputEvent(text=prompt)))
+            conn.close()
+        except OSError:
+            raise
+
+        ts.add_event(task_id, {
+            "kind": "launched",
+            "agent": agent,
+            "cmd":   prompt[:200],
+        })
+        log_event("task_scheduled_run", {
+            "agent":   self.agent_name,
+            "task_id": task_id,
+            "prompt":  prompt[:100],
+        })
 
     def _run_scheduled_dream(self) -> None:
         from marius.tools.dreaming import make_dreaming_tools
@@ -96,8 +147,6 @@ class GatewayScheduler:
             entry=self.entry,
             active_skills=self.active_skills or None,
             project_root=self.workspace,
-            watch_dir=self.watch_store.root,
-            daily_model=self.daily_model,
         )
         result = tools["dreaming_run"].handler({})
         log_event("dreaming_run", {
@@ -105,52 +154,6 @@ class GatewayScheduler:
             "ok": result.ok,
             "summary": result.summary,
         })
-
-    def _run_scheduled_daily(self) -> None:
-        from marius.gateway.workspace import daily_cache_path
-        from marius.tools.dreaming import make_dreaming_tools
-
-        tools = make_dreaming_tools(
-            memory_store=self.memory_store,
-            entry=self.entry,
-            active_skills=self.active_skills or None,
-            project_root=self.workspace,
-            watch_dir=self.watch_store.root,
-            daily_model=self.daily_model,
-        )
-        result = tools["daily_digest"].handler({})
-        briefing = str(result.data.get("markdown") or result.summary)
-        try:
-            daily_cache_path(self.agent_name).write_text(briefing, encoding="utf-8")
-        except OSError:
-            pass
-        log_event("daily_digest", {
-            "agent": self.agent_name,
-            "ok": result.ok,
-            "summary": result.summary,
-        })
-        self._push_daily_telegram(briefing)
-
-    def _run_scheduled_watch(self, topic_id: str) -> None:
-        tools = make_watch_tools(
-            store=self.watch_store,
-            search_handler=self.watch_search_handler,
-            summarizer=self.watch_summarizer,
-        )
-        result = tools["watch_run"].handler({"id": topic_id})
-        log_event("watch_run", {
-            "agent": self.agent_name,
-            "topic_id": topic_id,
-            "ok": result.ok,
-            "summary": result.summary,
-        })
-        topic = self.watch_store.get(topic_id)
-        reports = result.data.get("reports", []) if isinstance(result.data, dict) else []
-        report_data = (reports[0].get("report") if reports and isinstance(reports[0], dict) else {}) or {}
-        notify = topic is not None and should_notify_topic(topic, report_data)
-        chat_id = self._get_chat_id()
-        if notify and chat_id is not None and result.ok:
-            self._send_telegram(chat_id, result.summary)
 
     # ── reminders ─────────────────────────────────────────────────────────────
 
@@ -180,11 +183,6 @@ class GatewayScheduler:
             })
 
     # ── push Telegram ─────────────────────────────────────────────────────────
-
-    def _push_daily_telegram(self, briefing: str) -> None:
-        chat_id = self._get_chat_id()
-        if chat_id is not None:
-            self._send_telegram(chat_id, briefing)
 
     def _send_telegram(self, chat_id: int, text: str) -> None:
         try:

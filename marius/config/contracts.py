@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+ROLE_ADMIN = "admin"
+ROLE_AGENT = "agent"
+
 # Outils disponibles dans le registre
 ALL_TOOLS: list[str] = [
     "read_file",
@@ -44,17 +47,12 @@ ALL_TOOLS: list[str] = [
     "provider_delete",
     "provider_models",
     "dreaming_run",
-    "daily_digest",
     "self_update_propose",
     "self_update_report_bug",
     "self_update_list",
     "self_update_show",
     "self_update_apply",
     "self_update_rollback",
-    "watch_add",
-    "watch_list",
-    "watch_remove",
-    "watch_run",
     "open_marius_web",
     "rag_source_add",
     "rag_source_list",
@@ -68,10 +66,56 @@ ALL_TOOLS: list[str] = [
     "caldav_maintenance",
     "sentinelle_scan",
     "spawn_agent",
+    "call_agent",
+    "task_create",
+    "task_list",
+    "task_update",
 ]
 
-# Outils actifs par défaut pour un nouvel agent
+# Outils actifs par défaut pour l'admin.
 DEFAULT_TOOLS: list[str] = list(ALL_TOOLS)
+
+ADMIN_ONLY_TOOLS: set[str] = {
+    "host_agent_save",
+    "host_agent_delete",
+    "host_telegram_configure",
+    "host_gateway_restart",
+    "approval_decide",
+    "approval_forget",
+    "secret_ref_save",
+    "secret_ref_delete",
+    "secret_ref_prepare_file",
+    "provider_save",
+    "provider_delete",
+    "self_update_apply",
+    "self_update_rollback",
+}
+
+AGENT_DEFAULT_DISABLED_TOOLS: set[str] = {
+    *ADMIN_ONLY_TOOLS,
+    "spawn_agent",
+    "call_agent",
+}
+
+DEFAULT_AGENT_TOOLS: list[str] = [
+    tool for tool in ALL_TOOLS
+    if tool not in AGENT_DEFAULT_DISABLED_TOOLS
+]
+
+
+def normalize_role(role: str | None) -> str:
+    return ROLE_ADMIN if role == ROLE_ADMIN else ROLE_AGENT
+
+
+def default_tools_for_role(role: str | None) -> list[str]:
+    return list(DEFAULT_TOOLS if normalize_role(role) == ROLE_ADMIN else DEFAULT_AGENT_TOOLS)
+
+
+def effective_tools_for_role(tools: list[str] | None, role: str | None) -> list[str]:
+    selected = list(tools) if tools is not None else default_tools_for_role(role)
+    if normalize_role(role) == ROLE_ADMIN:
+        return selected
+    return [tool for tool in selected if tool not in ADMIN_ONLY_TOOLS]
 
 
 @dataclass
@@ -79,12 +123,21 @@ class AgentConfig:
     name: str
     provider_id: str        # référence un ProviderEntry.id
     model: str
-    daily_model: str = ""        # modèle optionnel dédié au daily
-    tools: list[str] = field(default_factory=lambda: list(DEFAULT_TOOLS))
+    role: str = "agent"          # "admin" | "agent"
+    tools: list[str] | None = None
     skills: list[str] = field(default_factory=list)
-    dream_time: str = "02:00"        # HH:MM UTC — vide = désactivé
-    daily_time: str = "08:00"        # HH:MM UTC — vide = désactivé
     scheduler_enabled: bool = True
+
+    def __post_init__(self) -> None:
+        self.role = normalize_role(self.role)
+        if self.tools is None:
+            self.tools = default_tools_for_role(self.role)
+        else:
+            self.tools = effective_tools_for_role(self.tools, self.role)
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == ROLE_ADMIN
 
 
 @dataclass

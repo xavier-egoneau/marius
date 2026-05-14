@@ -19,9 +19,10 @@ from rich.text import Text
 
 from marius.config.contracts import (
     ALL_TOOLS,
-    DEFAULT_TOOLS,
     AgentConfig,
     MariusConfig,
+    default_tools_for_role,
+    effective_tools_for_role,
 )
 from marius.kernel.scheduler import validate_hhmm
 from marius.config.store import ConfigStore
@@ -93,23 +94,24 @@ def run_setup(console: Console | None = None) -> MariusConfig | None:
     agents: dict[str, AgentConfig] = dict(existing_agents)
 
     if not agents:
-        c.print("\n[bold]Agent principal[/]\n")
+        c.print("\n[bold]Agent admin[/]\n")
         agent_cfg = _configure_agent(
-            c, providers=providers, existing=None, default_name="main",
+            c, providers=providers, existing=None, default_name="main", role="admin",
         )
         if agent_cfg:
             agents[agent_cfg.name] = agent_cfg
         main_agent = agent_cfg.name if agent_cfg else "main"
     else:
         main_agent = existing.main_agent if existing else next(iter(agents))
-        c.print(f"\n[bold]Agents[/]  [dim]{len(agents)} configuré(s), principal : {main_agent}[/]\n")
+        c.print(f"\n[bold]Agents[/]  [dim]{len(agents)} configuré(s), admin : {main_agent}[/]\n")
         for name, ag in agents.items():
             marker = "[color(208)]★[/]" if name == main_agent else " "
-            c.print(f"  {marker} {name}  [dim]{ag.model}[/]")
+            role_label = f"[dim] [{ag.role}][/]" if ag.role else ""
+            c.print(f"  {marker} {name}  [dim]{ag.model}[/]{role_label}")
         c.print()
-        raw = c.input("  Ajouter ou modifier un agent ? [[dim]n[/]]: ").strip().lower()
+        raw = c.input("  Ajouter un agent ? [[dim]n[/]]: ").strip().lower()
         if raw in ("o", "oui", "y", "yes"):
-            agent_cfg = _configure_agent(c, providers=providers, existing=None)
+            agent_cfg = _configure_agent(c, providers=providers, existing=None, role="agent")
             if agent_cfg:
                 agents[agent_cfg.name] = agent_cfg
 
@@ -121,6 +123,10 @@ def run_setup(console: Console | None = None) -> MariusConfig | None:
         agents=agents,
     )
     store.save(config)
+
+    from marius.storage.task_store import seed_agent_system_tasks
+    for ag in agents.values():
+        seed_agent_system_tasks(ag.name, ag.tools or [])
 
     c.print()
     c.print("  [dim]✓ Configuration sauvegardée.[/]")
@@ -152,12 +158,16 @@ def run_agent_config(
     ))
     c.print()
 
+    # préserver le role existant si on reconfigure un agent
+    existing_role = existing_agent.role if existing_agent else "agent"
     agent_cfg = _configure_agent(
-        c, providers=providers, existing=existing_agent, default_name=name,
+        c, providers=providers, existing=existing_agent, default_name=name, role=existing_role,
     )
     if agent_cfg:
         config.agents[agent_cfg.name] = agent_cfg
         config_store.save(config)
+        from marius.storage.task_store import seed_agent_system_tasks
+        seed_agent_system_tasks(agent_cfg.name, agent_cfg.tools or [])
         c.print(f"\n  [dim]✓ Agent[/] {agent_cfg.name} [dim]sauvegardé.[/]\n")
 
 
@@ -170,6 +180,7 @@ def _configure_agent(
     providers: list,
     existing: AgentConfig | None,
     default_name: str = "main",
+    role: str = "agent",
 ) -> AgentConfig | None:
     if not providers:
         c.print("  [dim]Aucun provider disponible.[/]\n")
@@ -199,26 +210,31 @@ def _configure_agent(
     model = c.input(f"  Modèle [[dim]{model_default}[/]]: ").strip() or model_default
 
     # ── tools ─────────────────────────────────────────────────────────────────
-    current_tools = set(existing.tools if existing else DEFAULT_TOOLS)
+    available_tools = default_tools_for_role(role)
+    current_tools = set(
+        effective_tools_for_role(existing.tools, role)
+        if existing
+        else available_tools
+    )
     c.print("\n  Tools actifs :\n")
-    for i, tool in enumerate(ALL_TOOLS, 1):
+    for i, tool in enumerate(available_tools, 1):
         mark = "[green]✓[/]" if tool in current_tools else "[dim]○[/]"
         c.print(f"    [color(208)][{i:2}][/] {mark} {tool}")
     c.print()
     active_tool_idx = ", ".join(
-        str(i) for i, t in enumerate(ALL_TOOLS, 1) if t in current_tools
+        str(i) for i, t in enumerate(available_tools, 1) if t in current_tools
     )
     raw = c.input(f"  Numéros actifs [[dim]{active_tool_idx}[/]]: ").strip()
     if raw:
         chosen = {s.strip() for s in raw.split(",")}
         new_tools = [
-            ALL_TOOLS[int(n) - 1]
+            available_tools[int(n) - 1]
             for n in chosen
-            if n.isdigit() and 1 <= int(n) <= len(ALL_TOOLS)
+            if n.isdigit() and 1 <= int(n) <= len(available_tools)
         ]
-        new_tools = [t for t in ALL_TOOLS if t in set(new_tools)]   # ordre canonique
+        new_tools = [t for t in available_tools if t in set(new_tools)]   # ordre canonique
     else:
-        new_tools = [t for t in ALL_TOOLS if t in current_tools]
+        new_tools = [t for t in available_tools if t in current_tools]
 
     # ── skills ────────────────────────────────────────────────────────────────
     skills_default = list(existing.skills) if existing else []
@@ -259,41 +275,23 @@ def _configure_agent(
         scheduler_enabled = True
     else:
         scheduler_enabled = getattr(existing, "scheduler_enabled", True)
-    dream_time = getattr(existing, "dream_time", "02:00")
-    daily_time  = getattr(existing, "daily_time",  "08:00")
 
     if ASSISTANT_SKILL in set(skills):
-        c.print("\n  [bold]Scheduler[/]  [dim](dreaming/daily automatiques)[/]\n")
+        c.print("\n  [bold]Scheduler[/]  [dim](dreaming/daily — horaires configurables dans Routines)[/]\n")
         raw_enabled = c.input(
             f"  Activer le scheduler ? [[dim]{'O' if scheduler_enabled else 'n'}[/]]: "
         ).strip().lower()
         if raw_enabled:
             scheduler_enabled = raw_enabled in ("o", "oui", "y", "yes", "1", "true")
 
-        if scheduler_enabled:
-            raw_dream = c.input(f"  Heure dreaming HH:MM [[dim]{dream_time}[/]]: ").strip()
-            if raw_dream:
-                try:
-                    dream_time = validate_hhmm(raw_dream)
-                except ValueError as e:
-                    c.print(f"  [dim]Format invalide ({e}) — conservé : {dream_time}[/]")
-
-            raw_daily = c.input(f"  Heure daily   HH:MM [[dim]{daily_time}[/]]: ").strip()
-            if raw_daily:
-                try:
-                    daily_time = validate_hhmm(raw_daily)
-                except ValueError as e:
-                    c.print(f"  [dim]Format invalide ({e}) — conservé : {daily_time}[/]")
-
     return AgentConfig(
         name=name,
         provider_id=selected.id,
         model=model,
+        role=role,
         tools=new_tools,
         skills=skills,
         scheduler_enabled=scheduler_enabled,
-        dream_time=dream_time,
-        daily_time=daily_time,
     )
 
 

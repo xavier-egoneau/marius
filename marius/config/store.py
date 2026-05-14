@@ -6,7 +6,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .contracts import AgentConfig, DEFAULT_TOOLS, MariusConfig
+from .contracts import (
+    DEFAULT_TOOLS,
+    AgentConfig,
+    MariusConfig,
+    default_tools_for_role,
+    effective_tools_for_role,
+)
 
 _MARIUS_HOME = Path.home() / ".marius"
 DEFAULT_CONFIG_PATH = _MARIUS_HOME / "config.json"
@@ -143,37 +149,6 @@ _PRE_SELF_UPDATE_DEFAULT_TOOLS = [
     "open_marius_web",
     "spawn_agent",
 ]
-_PRE_WATCH_DEFAULT_TOOLS = [
-    "read_file",
-    "list_dir",
-    "write_file",
-    "make_dir",
-    "move_path",
-    "explore_tree",
-    "explore_grep",
-    "explore_summary",
-    "run_bash",
-    "web_fetch",
-    "web_search",
-    "vision",
-    "skill_view",
-    "skill_create",
-    "skill_list",
-    "skill_reload",
-    "host_agent_list",
-    "host_agent_save",
-    "host_agent_delete",
-    "host_telegram_configure",
-    "host_status",
-    "host_doctor",
-    "host_logs",
-    "self_update_propose",
-    "self_update_report_bug",
-    "self_update_list",
-    "self_update_show",
-    "open_marius_web",
-    "spawn_agent",
-]
 _PRE_PROJECT_DEFAULT_TOOLS = [
     "read_file",
     "list_dir",
@@ -202,10 +177,6 @@ _PRE_PROJECT_DEFAULT_TOOLS = [
     "self_update_report_bug",
     "self_update_list",
     "self_update_show",
-    "watch_add",
-    "watch_list",
-    "watch_remove",
-    "watch_run",
     "open_marius_web",
     "spawn_agent",
 ]
@@ -239,10 +210,6 @@ _PRE_SECURITY_DEFAULT_TOOLS = [
     "self_update_report_bug",
     "self_update_list",
     "self_update_show",
-    "watch_add",
-    "watch_list",
-    "watch_remove",
-    "watch_run",
     "open_marius_web",
     "spawn_agent",
 ]
@@ -282,10 +249,6 @@ _PRE_PROVIDER_ADMIN_DEFAULT_TOOLS = [
     "self_update_report_bug",
     "self_update_list",
     "self_update_show",
-    "watch_add",
-    "watch_list",
-    "watch_remove",
-    "watch_run",
     "open_marius_web",
     "spawn_agent",
 ]
@@ -329,10 +292,6 @@ _PRE_DREAMING_TOOLS_DEFAULT_TOOLS = [
     "self_update_report_bug",
     "self_update_list",
     "self_update_show",
-    "watch_add",
-    "watch_list",
-    "watch_remove",
-    "watch_run",
     "open_marius_web",
     "spawn_agent",
 ]
@@ -340,7 +299,6 @@ _SELF_UPDATE_INDEX = _PRE_DREAMING_TOOLS_DEFAULT_TOOLS.index("self_update_propos
 _PRE_HOST_RESTART_SECRET_FILE_DEFAULT_TOOLS = [
     *_PRE_DREAMING_TOOLS_DEFAULT_TOOLS[:_SELF_UPDATE_INDEX],
     "dreaming_run",
-    "daily_digest",
     *_PRE_DREAMING_TOOLS_DEFAULT_TOOLS[_SELF_UPDATE_INDEX:],
 ]
 _PRE_SELF_UPDATE_APPLY_DEFAULT_TOOLS = [
@@ -395,11 +353,9 @@ def _to_dict(config: MariusConfig) -> dict[str, Any]:
                 "name": agent.name,
                 "provider_id": agent.provider_id,
                 "model": agent.model,
-                "daily_model": agent.daily_model,
+                "role": agent.role,
                 "tools": agent.tools,
                 "skills": agent.skills,
-                "dream_time": agent.dream_time,
-                "daily_time": agent.daily_time,
                 "scheduler_enabled": agent.scheduler_enabled,
             }
             for name, agent in config.agents.items()
@@ -408,20 +364,20 @@ def _to_dict(config: MariusConfig) -> dict[str, Any]:
 
 
 def _from_dict(raw: dict[str, Any]) -> MariusConfig:
-    agents = {
-        name: AgentConfig(
+    agents: dict[str, AgentConfig] = {}
+    for name, data in raw.get("agents", {}).items():
+        role = data.get("role") or ("admin" if name == raw.get("main_agent") else "agent")
+        agents[name] = AgentConfig(
             name=data["name"],
             provider_id=data["provider_id"],
             model=data["model"],
-            daily_model=data.get("daily_model", ""),
-            tools=_normalize_tools(data.get("tools")),
+            # migration : si role absent, l'agent principal est admin
+            role=role,
+            tools=_normalize_tools(data.get("tools"), role=role),
             skills=data.get("skills", []),
-            dream_time=data.get("dream_time", "02:00"),
-            daily_time=data.get("daily_time", "08:00"),
             scheduler_enabled=bool(data.get("scheduler_enabled", True)),
+            # dream_time/daily_time ignorés — gérés dans les tâches récurrentes (routines)
         )
-        for name, data in raw.get("agents", {}).items()
-    }
     return MariusConfig(
         permission_mode=raw.get("permission_mode", "limited"),
         main_agent=raw.get("main_agent", "main"),
@@ -429,11 +385,12 @@ def _from_dict(raw: dict[str, Any]) -> MariusConfig:
     )
 
 
-def _normalize_tools(raw_tools: Any) -> list[str]:
+def _normalize_tools(raw_tools: Any, *, role: str) -> list[str]:
     if not isinstance(raw_tools, list):
-        return list(DEFAULT_TOOLS)
+        return default_tools_for_role(role)
     tools = [str(tool) for tool in raw_tools]
     if tools in (
+        DEFAULT_TOOLS,
         _PRE_VISION_DEFAULT_TOOLS,
         _PRE_MARIUS_WEB_DEFAULT_TOOLS,
         _PRE_FILESYSTEM_COMPLETION_DEFAULT_TOOLS,
@@ -442,7 +399,6 @@ def _normalize_tools(raw_tools: Any) -> list[str]:
         _PRE_HOST_ADMIN_DEFAULT_TOOLS,
         _PRE_HOST_ACTIONS_DEFAULT_TOOLS,
         _PRE_SELF_UPDATE_DEFAULT_TOOLS,
-        _PRE_WATCH_DEFAULT_TOOLS,
         _PRE_PROJECT_DEFAULT_TOOLS,
         _PRE_SECURITY_DEFAULT_TOOLS,
         _PRE_PROVIDER_ADMIN_DEFAULT_TOOLS,
@@ -452,5 +408,5 @@ def _normalize_tools(raw_tools: Any) -> list[str]:
         _PRE_HOST_RESTART_SECRET_FILE_SELF_UPDATE_APPLY_DEFAULT_TOOLS,
         _PRE_RAG_DEFAULT_TOOLS,
     ):
-        return list(DEFAULT_TOOLS)
-    return tools
+        return default_tools_for_role(role)
+    return effective_tools_for_role(tools, role)

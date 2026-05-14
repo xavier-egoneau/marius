@@ -15,7 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from marius.channels.telegram.config import TelegramChannelConfig
-from marius.config.contracts import ALL_TOOLS, DEFAULT_TOOLS, AgentConfig, MariusConfig
+from marius.config.contracts import (
+    ADMIN_ONLY_TOOLS,
+    ALL_TOOLS,
+    AgentConfig,
+    MariusConfig,
+    default_tools_for_role,
+    effective_tools_for_role,
+)
 from marius.config.doctor import Section, format_report_text, run_doctor
 from marius.config.store import ConfigStore
 from marius.gateway.launcher import is_running as gateway_is_running
@@ -73,8 +80,7 @@ def make_host_admin_tools(
         for name in sorted(cfg.agents):
             agent = cfg.agents[name]
             suffix = " (main)" if name == cfg.main_agent else ""
-            daily = f", daily={agent.daily_model}" if agent.daily_model else ""
-            lines.append(f"- {name}{suffix}: {agent.provider_id} / {agent.model}{daily}, {len(agent.skills)} skill(s)")
+            lines.append(f"- {name}{suffix}: {agent.provider_id} / {agent.model}, {len(agent.skills)} skill(s)")
             row = _agent_config_data(agent)
             if not include_tools:
                 row.pop("tools", None)
@@ -108,33 +114,29 @@ def make_host_admin_tools(
         model = _optional_text(arguments.get("model")) or (existing.model if existing else provider_model)
         if not model:
             return ToolResult(tool_call_id="", ok=False, summary="Argument `model` is required when creating an agent.", error="missing_arg:model")
-        daily_model = _optional_text(arguments.get("daily_model"))
-        if not daily_model and existing:
-            daily_model = existing.daily_model
-
         try:
-            tools = _resolve_toolset(existing.tools if existing else list(DEFAULT_TOOLS), arguments)
+            role = existing.role if existing else "agent"
+            tools = _resolve_toolset(
+                existing.tools if existing else default_tools_for_role(role),
+                arguments,
+                role=role,
+            )
         except ValueError as exc:
             return ToolResult(tool_call_id="", ok=False, summary=str(exc), error="invalid_tools")
 
         skills = _resolve_string_list(existing.skills if existing else [], arguments, replace_key="skills", add_key="add_skills", remove_key="remove_skills")
         scheduler_enabled = _optional_bool(arguments.get("scheduler_enabled"), existing.scheduler_enabled if existing else True)
-        try:
-            dream_time = _optional_hhmm(arguments.get("dream_time"), existing.dream_time if existing else "02:00")
-            daily_time = _optional_hhmm(arguments.get("daily_time"), existing.daily_time if existing else "08:00")
-        except ValueError as exc:
-            return ToolResult(tool_call_id="", ok=False, summary=str(exc), error="invalid_time")
 
+        # role : préserver si existant, sinon "agent" (l'admin ne se crée pas via ce tool)
+        role = existing.role if existing else "agent"
         agent = AgentConfig(
             name=name,
             provider_id=provider_id,
             model=model,
-            daily_model=daily_model,
+            role=role,
             tools=tools,
             skills=skills,
             scheduler_enabled=scheduler_enabled,
-            dream_time=dream_time,
-            daily_time=daily_time,
         )
         cfg.agents[name] = agent
         if bool(arguments.get("set_main", False)):
@@ -160,17 +162,19 @@ def make_host_admin_tools(
             return ToolResult(tool_call_id="", ok=False, summary=f"Agent not found: {name}", error="agent_not_found")
         if not bool(arguments.get("confirm", False)):
             return ToolResult(tool_call_id="", ok=False, summary="Deletion requires `confirm: true`.", error="confirmation_required")
-        if len(cfg.agents) == 1:
-            return ToolResult(tool_call_id="", ok=False, summary="Cannot delete the last configured agent.", error="last_agent")
-        if cfg.main_agent == name:
+        if name == cfg.main_agent:
             return ToolResult(
                 tool_call_id="",
                 ok=False,
-                summary=(
-                    "Cannot delete the main agent. It anchors default CLI, gateway, "
-                    "web, Telegram and scheduler behavior."
-                ),
+                summary="Cannot delete the main agent.",
                 error="main_agent_delete_forbidden",
+            )
+        if cfg.agents[name].is_admin:
+            return ToolResult(
+                tool_call_id="",
+                ok=False,
+                summary="Cannot delete the admin agent.",
+                error="admin_delete_forbidden",
             )
 
         del cfg.agents[name]
@@ -367,7 +371,6 @@ def make_host_admin_tools(
                         "name": {"type": "string"},
                         "provider_id": {"type": "string"},
                         "model": {"type": "string"},
-                        "daily_model": {"type": "string", "description": "Optional model used only for daily generation."},
                         "tools": {"type": "array", "items": {"type": "string"}},
                         "add_tools": {"type": "array", "items": {"type": "string"}},
                         "remove_tools": {"type": "array", "items": {"type": "string"}},
@@ -375,8 +378,6 @@ def make_host_admin_tools(
                         "add_skills": {"type": "array", "items": {"type": "string"}},
                         "remove_skills": {"type": "array", "items": {"type": "string"}},
                         "scheduler_enabled": {"type": "boolean"},
-                        "dream_time": {"type": "string", "description": "HH:MM UTC."},
-                        "daily_time": {"type": "string", "description": "HH:MM UTC."},
                         "set_main": {"type": "boolean"},
                     },
                     "required": ["name"],
@@ -501,14 +502,13 @@ def _agent_status(cfg: MariusConfig, name: str, is_running: StatusRunner) -> dic
         "configured": True,
         "provider_id": agent.provider_id,
         "model": agent.model,
+        "role": agent.role,
         "daily_model": agent.daily_model,
         "tool_count": len(agent.tools),
         "tools": list(agent.tools),
         "skill_count": len(agent.skills),
         "skills": list(agent.skills),
         "scheduler_enabled": agent.scheduler_enabled,
-        "dream_time": agent.dream_time,
-        "daily_time": agent.daily_time,
         "gateway_running": bool(is_running(name)),
         "systemd_active": _safe_systemd_state(agent_active_state, name),
         "systemd_enabled": _safe_systemd_state(agent_enabled_state, name),
@@ -520,12 +520,11 @@ def _agent_config_data(agent: AgentConfig) -> dict[str, Any]:
         "name": agent.name,
         "provider_id": agent.provider_id,
         "model": agent.model,
+        "role": agent.role,
         "daily_model": agent.daily_model,
         "tools": list(agent.tools),
         "skills": list(agent.skills),
         "scheduler_enabled": agent.scheduler_enabled,
-        "dream_time": agent.dream_time,
-        "daily_time": agent.daily_time,
     }
 
 
@@ -614,7 +613,7 @@ def _valid_agent_name(name: str) -> bool:
     return bool(_AGENT_NAME_RE.fullmatch(name))
 
 
-def _resolve_toolset(base: list[str], arguments: dict[str, Any]) -> list[str]:
+def _resolve_toolset(base: list[str], arguments: dict[str, Any], *, role: str) -> list[str]:
     raw_tools = arguments.get("tools")
     if raw_tools is None:
         tools = list(base)
@@ -624,7 +623,10 @@ def _resolve_toolset(base: list[str], arguments: dict[str, Any]) -> list[str]:
     unknown = [tool for tool in tools if tool not in ALL_TOOLS]
     if unknown:
         raise ValueError(f"Unknown tool(s): {', '.join(unknown)}")
-    return [tool for tool in ALL_TOOLS if tool in set(tools)]
+    forbidden = sorted(set(tools).intersection(ADMIN_ONLY_TOOLS)) if role != "admin" else []
+    if forbidden:
+        raise ValueError(f"Admin-only tool(s) for role '{role}': {', '.join(forbidden)}")
+    return effective_tools_for_role([tool for tool in ALL_TOOLS if tool in set(tools)], role)
 
 
 def _resolve_string_list(base: list[str], arguments: dict[str, Any], *, replace_key: str, add_key: str, remove_key: str) -> list[str]:

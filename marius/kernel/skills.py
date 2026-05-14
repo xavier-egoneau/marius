@@ -9,7 +9,6 @@ Structure d'un skill :
     <skills_dir>/<nom>/
         ├── SKILL.md      ← instructions + frontmatter YAML (requis)
         ├── DREAM.md      ← contrat données pour le dreaming (optionnel)
-        ├── DAILY.md      ← contrat données pour le daily (optionnel)
         └── core/         ← fichiers additionnels + prompts des commandes (optionnel)
             ├── plan.md   ← prompt pour la commande /plan
             └── ...
@@ -71,7 +70,6 @@ class Skill:
     meta: SkillMeta
     content: str                                    # corps de SKILL.md sans le frontmatter
     dream_content: str = ""                         # contenu de DREAM.md si présent
-    daily_content: str = ""                         # contenu de DAILY.md si présent
     core_files: dict[str, str] = field(default_factory=dict)    # core/<nom> → contenu brut
     commands: dict[str, SkillCommand] = field(default_factory=dict)  # nom → commande
 
@@ -193,7 +191,6 @@ def _load_skill(meta: SkillMeta) -> Skill:
     fm, body = _parse_frontmatter(raw)
 
     dream_content = _read_optional(meta.skill_dir / "DREAM.md")
-    daily_content = _read_optional(meta.skill_dir / "DAILY.md")
     core_files    = _read_core_dir(meta.skill_dir / "core")
     commands      = _parse_commands(fm, meta.skill_dir / "core", meta.name)
 
@@ -201,7 +198,6 @@ def _load_skill(meta: SkillMeta) -> Skill:
         meta=meta,
         content=body.strip(),
         dream_content=dream_content,
-        daily_content=daily_content,
         core_files=core_files,
         commands=commands,
     )

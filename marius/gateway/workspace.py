@@ -57,10 +57,6 @@ def reminders_path(agent_name: str) -> Path:
     return workspace_dir(agent_name) / "reminders.json"
 
 
-def daily_cache_path(agent_name: str) -> Path:
-    return workspace_dir(agent_name) / "daily_latest.md"
-
-
 def ensure_workspace(agent_name: str) -> Path:
     """Crée les dossiers du workspace si nécessaires. Retourne le workspace dir."""
     ws = workspace_dir(agent_name)

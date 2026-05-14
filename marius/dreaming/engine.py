@@ -15,8 +15,8 @@ from marius.storage.session_corpus import archive_session_file, list_unprocessed
 
 from .context import DreamingContext, build_dreaming_context
 from .operations import DreamingResult, apply_operations, parse_response
-from .prompt import build_daily_prompt, build_dreaming_prompt
-from .report import DreamReport, load_last_dream_report, save_dream_report
+from .prompt import build_dreaming_prompt
+from .report import DreamReport, save_dream_report
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,6 @@ def run_dreaming(
     sessions_dir: Path | None = None,
     dreams_dir: Path | None = None,
     skills_dir: Path | None = None,
-    watch_dir: Path | None = None,
     archive_sessions: bool = True,
 ) -> DreamingResult:
     """Cycle complet de dreaming.
@@ -52,7 +51,6 @@ def run_dreaming(
         project_root=project_root,
         sessions_dir=sessions_dir,
         skills_dir=skills_dir,
-        watch_dir=watch_dir,
     )
 
     if ctx.is_empty:
@@ -94,49 +92,6 @@ def run_dreaming(
                 pass
 
     return result
-
-
-def run_daily(
-    memory_store: MemoryStore,
-    entry: ProviderEntry,
-    *,
-    active_skills: list[str] | None = None,
-    project_root: Path | None = None,
-    dreams_dir: Path | None = None,
-    skills_dir: Path | None = None,
-    watch_dir: Path | None = None,
-    model: str | None = None,
-) -> str:
-    """Génère le briefing quotidien en Markdown.
-
-    1. Collecte mémoires + contrats daily + dernier rapport de dream
-    2. Appel LLM unique
-    3. Retourne le Markdown brut
-    """
-    ctx = build_dreaming_context(
-        memory_store=memory_store,
-        active_skills=active_skills,
-        project_root=project_root,
-        skills_dir=skills_dir,
-        watch_dir=watch_dir,
-    )
-
-    if not ctx.memories and not ctx.daily_contracts:
-        return (
-            "# Briefing\n\n"
-            "Aucune mémoire ni contrat daily actif.\n"
-            "Lancez `/dream` d'abord pour consolider la mémoire, "
-            "ou ajoutez un skill avec un `DAILY.md`."
-        )
-
-    last_report = load_last_dream_report(dreams_dir)
-    system_prompt = build_daily_prompt(ctx, last_dream_report=last_report)
-    daily_entry = _with_model(entry, model) if model else entry
-    try:
-        result = _call_llm_with_usage(daily_entry, system_prompt, "Génère mon briefing du jour.")
-        return _with_daily_usage_footer(result.text, result.usage, result.model or daily_entry.model)
-    except ProviderError as exc:
-        return f"# Briefing\n\nErreur provider : {exc}"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -192,20 +147,3 @@ def _chunk_usage(chunk: ProviderChunk, current: ContextUsage) -> ContextUsage:
     return current
 
 
-def _with_daily_usage_footer(markdown: str, usage: ContextUsage, model: str) -> str:
-    input_tokens = usage.provider_input_tokens or usage.estimated_input_tokens
-    output_tokens = usage.provider_output_tokens
-    if not input_tokens and output_tokens is None and not model:
-        return markdown
-    parts: list[str] = []
-    if input_tokens:
-        parts.append(f"entrée {input_tokens:,}".replace(",", " "))
-    if output_tokens is not None:
-        parts.append(f"sortie {output_tokens:,}".replace(",", " "))
-    if input_tokens and output_tokens is not None:
-        parts.append(f"total {(input_tokens + output_tokens):,}".replace(",", " "))
-    if model:
-        parts.append(f"modèle `{model}`")
-    if not parts:
-        return markdown
-    return markdown.rstrip() + "\n\n---\n_Tokens daily : " + " · ".join(parts) + "_"

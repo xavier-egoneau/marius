@@ -19,6 +19,7 @@ def make_project_tools(
     cwd: Path | None = None,
     store_path: Path | None = None,
     active_path: Path | None = None,
+    allow_store_path: Path | None = None,
 ) -> dict[str, ToolEntry]:
     store = ProjectStore(store_path=store_path, active_path=active_path)
     base_cwd = Path(cwd).expanduser().resolve() if cwd is not None else Path.cwd()
@@ -50,6 +51,7 @@ def make_project_tools(
     def project_set_active(arguments: dict[str, Any]) -> ToolResult:
         raw_path = _optional_text(arguments.get("path"))
         name = _optional_text(arguments.get("name"))
+        create = bool(arguments.get("create", False))
         project_path = _resolve_project_path(store, path=raw_path, name=name, cwd=base_cwd)
         if project_path is None:
             return ToolResult(
@@ -59,12 +61,23 @@ def make_project_tools(
                 error="project_not_found",
             )
         if not project_path.exists():
-            return ToolResult(
-                tool_call_id="",
-                ok=False,
-                summary=f"Project path does not exist: {project_path}",
-                error="project_path_missing",
-            )
+            if create:
+                try:
+                    project_path.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    return ToolResult(
+                        tool_call_id="",
+                        ok=False,
+                        summary=f"Project path could not be created: {project_path}",
+                        error=str(exc),
+                    )
+            else:
+                return ToolResult(
+                    tool_call_id="",
+                    ok=False,
+                    summary=f"Project path does not exist: {project_path}",
+                    error="project_path_missing",
+                )
         if not project_path.is_dir():
             return ToolResult(
                 tool_call_id="",
@@ -73,6 +86,10 @@ def make_project_tools(
                 error="project_path_not_directory",
             )
         active = store.set_active(project_path)
+        if allow_store_path is not None:
+            from marius.storage.allow_root_store import AllowRootStore
+
+            AllowRootStore(allow_store_path).add(project_path, reason="project_set_active")
         return ToolResult(
             tool_call_id="",
             ok=True,
@@ -104,6 +121,7 @@ def make_project_tools(
                     "properties": {
                         "path": {"type": "string", "description": "Project root path."},
                         "name": {"type": "string", "description": "Known project name."},
+                        "create": {"type": "boolean", "description": "If true, create the project directory before setting it active."},
                     },
                     "required": [],
                 },

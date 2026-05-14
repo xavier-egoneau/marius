@@ -47,8 +47,8 @@ from marius.tools.self_update import (
 from marius.tools.skill_authoring import SKILL_CREATE, SKILL_LIST, SKILL_RELOAD
 from marius.tools.skills import SKILL_VIEW
 from marius.tools.sentinelle import make_sentinelle_tool
+from marius.tools.tasks import make_task_tools
 from marius.tools.vision import VISION
-from marius.tools.watch import WATCH_ADD, WATCH_LIST, WATCH_REMOVE, WATCH_RUN, make_provider_watch_summarizer, make_watch_tools
 from marius.tools.web import WEB_FETCH, WEB_SEARCH
 
 if TYPE_CHECKING:
@@ -99,10 +99,6 @@ STATIC_ENTRIES: dict[str, "ToolEntry"] = {
     "self_update_show": SELF_UPDATE_SHOW,
     "self_update_apply": SELF_UPDATE_APPLY,
     "self_update_rollback": SELF_UPDATE_ROLLBACK,
-    "watch_add": WATCH_ADD,
-    "watch_list": WATCH_LIST,
-    "watch_remove": WATCH_REMOVE,
-    "watch_run": WATCH_RUN,
     "open_marius_web": OPEN_MARIUS_WEB,
     "caldav_doctor": CALDAV_DOCTOR,
     "caldav_agenda": CALDAV_AGENDA,
@@ -134,7 +130,11 @@ def build_tool_entries(
     workspace_root = Path.home() / ".marius" / "workspace" / (agent_name or "main")
     rag_tools = make_rag_tools(workspace_root / "skills" / "rag", memory_store=memory_store, cwd=cwd)
     sentinelle_tool = make_sentinelle_tool(workspace_root / "sentinelle")
-    project_tools = make_project_tools(cwd=cwd)
+    project_tools = make_project_tools(
+        cwd=cwd,
+        allow_store_path=Path.home() / ".marius" / "allowed_roots.json",
+    )
+    task_tools = make_task_tools()
     dreaming_tools: dict[str, ToolEntry] = {}
     if entry is not None:
         from marius.tools.dreaming import make_dreaming_tools
@@ -144,19 +144,14 @@ def build_tool_entries(
             project_root=cwd,
             active_skills=active_skills,
         )
-    watch_tools = (
-        make_watch_tools(summarizer=make_provider_watch_summarizer(entry))
-        if entry is not None
-        else {}
-    )
     _extras: dict[str, ToolEntry] = extras or {}
     registry = {
         **STATIC_ENTRIES,
         **rag_tools,
+        **task_tools,
         "sentinelle_scan": sentinelle_tool,
         **project_tools,
         **dreaming_tools,
-        **watch_tools,
         "memory": memory_tool,
         **_extras,
     }

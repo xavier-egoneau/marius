@@ -175,9 +175,8 @@ body {
 
 /* ── upload preview ──────────────────────────────────────────────── */
 #upload-preview {
-  display: none; padding: 8px 18px 0;
+  display: none; width: 100%; padding: 0 0 2px;
   font-size: 12px; color: var(--soft);
-  background: var(--panel); border-top: 1px solid var(--line);
   gap: 8px; flex-wrap: wrap;
 }
 #upload-preview.show { display: flex; }
@@ -259,7 +258,7 @@ body {
 #footer {
   border-top: 1px solid var(--line); padding: 12px 18px;
   display: flex; gap: 10px; align-items: flex-end; flex-shrink: 0;
-  background: var(--panel);
+  background: var(--panel); flex-wrap: wrap;
 }
 #input {
   flex: 1; background: #1e1a16; border: 1px solid #2e2a24; color: var(--bright);
@@ -269,9 +268,12 @@ body {
 #input:focus { border-color: #6b4b2b; }
 #btn-upload {
   background: none; border: 1px solid #2e2a24; border-radius: 8px;
-  color: var(--soft); padding: 10px 12px; cursor: pointer; flex-shrink: 0; align-self: flex-end;
+  color: var(--soft); width: 46px; height: 44px; padding: 0; cursor: pointer;
+  flex-shrink: 0; align-self: flex-end; display: inline-flex; align-items: center;
+  justify-content: center;
 }
 #btn-upload:hover { color: var(--bright); border-color: #6b4b2b; }
+#btn-upload svg { width: 19px; height: 19px; stroke: currentColor; }
 #btn-send {
   background: var(--accent); color: #1a0e00; border: none; border-radius: 8px;
   padding: 10px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
@@ -320,7 +322,6 @@ body {
   <div id="history-list"></div>
 </div>
 
-<div id="upload-preview"></div>
 <div id="archive-bar">
   <span>Archive</span>
   <span id="archive-title"></span>
@@ -341,8 +342,15 @@ body {
 
 <div id="footer">
   <div id="cmd-suggestions"></div>
+  <div id="upload-preview"></div>
   <input type="file" id="file-input" multiple accept="image/*,.pdf,.txt,.md,.py,.js,.ts,.json,.csv" style="display:none" onchange="onFiles(this)">
-  <button id="btn-upload" title="Joindre un fichier" onclick="document.getElementById('file-input').click()">📎</button>
+  <button id="btn-upload" title="Joindre une image" aria-label="Joindre une image" onclick="document.getElementById('file-input').click()">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+      <circle cx="8.5" cy="8.5" r="1.5"></circle>
+      <path d="M21 15l-5-5L5 21"></path>
+    </svg>
+  </button>
   <textarea id="input" placeholder="Envoie un message…" rows="1"
     onkeydown="onKey(event)" oninput="autoResize(this); onInputChange()"></textarea>
   <button id="btn-stop" onclick="sendStop()">⏹ Stop</button>
@@ -360,6 +368,7 @@ let viewingArchive = false;
 
 // ── init ──────────────────────────────────────────────────────────
 async function init() {
+  ensureUploadPreviewPlacement();
   // Info agent + skill commands
   try {
     const d = await fetch('/api/info').then(r => r.json());
@@ -385,8 +394,52 @@ async function init() {
     }
   } catch {}
 
+  setDraftFromLocation();
   openSSE();
 }
+
+function ensureUploadPreviewPlacement() {
+  const footer = document.getElementById('footer');
+  const preview = document.getElementById('upload-preview');
+  const fileInput = document.getElementById('file-input');
+  if (!footer || !preview || !fileInput) return;
+  if (preview.parentElement !== footer || preview.nextElementSibling !== fileInput) {
+    footer.insertBefore(preview, fileInput);
+  }
+}
+
+function setDraftText(text) {
+  const inp = document.getElementById('input');
+  if (!inp || inp.disabled) return;
+  inp.value = String(text || '');
+  autoResize(inp);
+  onInputChange();
+  inp.focus();
+}
+
+function setDraftFromLocation() {
+  const hash = window.location.hash || '';
+  if (!hash.startsWith('#draft=')) return;
+  setDraftText(decodeURIComponent(hash.slice('#draft='.length)));
+}
+
+window.addEventListener('message', (event) => {
+  const data = event.data || {};
+  if (data.type !== 'marius:setDraft') return;
+  setDraftText(data.text);
+});
+
+document.addEventListener('paste', (event) => {
+  if (viewingArchive || busy) return;
+  const items = Array.from(event.clipboardData?.items || []);
+  const files = items
+    .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+    .map(item => item.getAsFile())
+    .filter(Boolean);
+  if (!files.length) return;
+  event.preventDefault();
+  uploadFiles(files);
+});
 
 // ── SSE (connexion persistante) ───────────────────────────────────
 function openSSE() {
@@ -408,10 +461,14 @@ function handleSSE(ev) {
     appendDelta(ev.delta);
   } else if (ev.type === 'done_turn') {
     finishTurn();
+    window.parent?.postMessage({ type: 'marius:turnDone' }, '*');
   } else if (ev.type === 'tool_start') {
     addToolLine(ev.tool, ev.target, 'run');
   } else if (ev.type === 'tool_result') {
     updateToolLine(ev.tool, ev.ok ? 'ok' : 'fail');
+    if (ev.tool && ev.tool.startsWith('task_')) {
+      window.parent?.postMessage({ type: 'marius:tasksChanged' }, '*');
+    }
     const _FILE_TOOLS = ['write_file', 'edit_file', 'bash', 'run_bash', 'str_replace_based_edit_tool'];
     if (_FILE_TOOLS.includes(ev.tool) && document.getElementById('git-panel').classList.contains('show')) {
       loadGitChanges();
@@ -419,6 +476,7 @@ function handleSSE(ev) {
     }
   } else if (ev.type === 'permission_request') {
     showPermission(ev);
+    window.parent?.postMessage({ type: 'marius:tasksChanged' }, '*');
   } else if (ev.type === 'error') {
     appendError(ev.error);
     finishTurn();
@@ -653,7 +711,15 @@ function appendStatus(msg) {
 
 // ── /stop ─────────────────────────────────────────────────────────
 async function sendStop() {
-  await postCommand('/stop');
+  if (!busy) return;
+  const btn = document.getElementById('btn-stop');
+  btn.disabled = true;
+  appendStatus('Arrêt demandé…');
+  const ok = await postCommand('/stop');
+  if (!ok) {
+    btn.disabled = false;
+    appendError('Stop non envoyé');
+  }
 }
 
 // ── /new ──────────────────────────────────────────────────────────
@@ -821,19 +887,26 @@ async function answerPerm(approved) {
     body: JSON.stringify({request_id: pendingPermId, approved}),
   });
   pendingPermId = null;
+  window.parent?.postMessage({ type: 'marius:tasksChanged' }, '*');
 }
 
 // ── uploads ───────────────────────────────────────────────────────
 async function onFiles(input) {
-  for (const file of Array.from(input.files)) {
+  await uploadFiles(Array.from(input.files || []));
+  input.value = '';
+}
+
+async function uploadFiles(files) {
+  for (const file of Array.from(files || [])) {
     const isImg = file.type.startsWith('image/');
     const preview = isImg ? URL.createObjectURL(file) : null;
+    const filename = file.name || `image-collee-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
     const data = await toBase64(file);
     try {
       const r = await fetch('/api/upload', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({filename: file.name, data, mime_type: file.type}),
+        body: JSON.stringify({filename, data, mime_type: file.type || 'image/png'}),
       });
       const d = await r.json();
       if (d.ok) {
@@ -843,7 +916,6 @@ async function onFiles(input) {
       }
     } catch { if (preview) URL.revokeObjectURL(preview); }
   }
-  input.value = '';
   updateUploadPreview();
 }
 
@@ -1025,6 +1097,7 @@ function setBusy(val) {
   document.getElementById('input').disabled = val || viewingArchive;
   document.getElementById('btn-upload').disabled = val || viewingArchive;
   document.getElementById('btn-stop').className = val ? 'show' : '';
+  document.getElementById('btn-stop').disabled = false;
   if (!val) {
     Object.keys(_toolLines).forEach(k => delete _toolLines[k]);
     document.getElementById('input').focus();

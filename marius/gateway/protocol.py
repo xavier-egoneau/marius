@@ -139,17 +139,12 @@ _TOOL_TARGET_KEYS: dict[str, str] = {
     "provider_delete": "id",
     "provider_models": "name",
     "dreaming_run": "archive_sessions",
-    "daily_digest": "project_root",
     "self_update_propose": "title",
     "self_update_report_bug": "title",
     "self_update_list": "kind",
     "self_update_show": "id",
     "self_update_apply": "id",
     "self_update_rollback": "id",
-    "watch_add": "title",
-    "watch_list": "include_disabled",
-    "watch_remove": "id",
-    "watch_run": "id",
     "open_marius_web": "port",
     "rag_source_add": "name",
     "rag_source_sync": "source_id",
@@ -159,6 +154,7 @@ _TOOL_TARGET_KEYS: dict[str, str] = {
     "rag_checklist_add": "list_name",
     "caldav_agenda": "days",
     "caldav_maintenance": "operation",
+    "call_agent": "agent",
 }
 
 

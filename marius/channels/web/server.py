@@ -41,6 +41,7 @@ from marius.storage.log_store import log_event
 from marius.storage.ui_history import FileVisibleConversationStore
 
 _SSE_KEEPALIVE = 25   # secondes entre deux keep-alive SSE
+_PERMISSION_TIMEOUT_SECONDS = 300
 
 
 # ── WebServer ─────────────────────────────────────────────────────────────────
@@ -66,8 +67,8 @@ class WebServer:
         self._sse_queues: dict[str, queue.Queue] = {}
         self._queues_lock = threading.Lock()
 
-        # Permissions en attente : request_id → (Event, [bool])
-        self._pending_perms: dict[str, tuple[threading.Event, list[bool]]] = {}
+        # Permissions en attente : request_id → {event, result, tool, reason, ...}
+        self._pending_perms: dict[str, dict[str, Any]] = {}
         self._perms_lock = threading.Lock()
 
         # Socket gateway
@@ -167,7 +168,8 @@ class WebServer:
         with self._perms_lock:
             entry = self._pending_perms.get(request_id)
         if entry:
-            ev, result = entry
+            ev = entry["event"]
+            result = entry["result"]
             result[0] = approved
             ev.set()
 
@@ -177,11 +179,34 @@ class WebServer:
         q: queue.Queue = queue.Queue(maxsize=500)
         with self._queues_lock:
             self._sse_queues[session_id] = q
+        for pending in self.pending_permissions():
+            try:
+                q.put_nowait({
+                    "type": "permission_request",
+                    "tool": pending.get("tool", ""),
+                    "reason": pending.get("reason", ""),
+                    "request_id": pending.get("request_id", ""),
+                })
+            except queue.Full:
+                break
         return q
 
     def close_sse(self, session_id: str) -> None:
         with self._queues_lock:
             self._sse_queues.pop(session_id, None)
+
+    def pending_permissions(self) -> list[dict[str, Any]]:
+        with self._perms_lock:
+            return [
+                {
+                    "request_id": req_id,
+                    "tool": str(entry.get("tool") or ""),
+                    "reason": str(entry.get("reason") or ""),
+                    "session_id": str(entry.get("session_id") or ""),
+                    "created_at": str(entry.get("created_at") or ""),
+                }
+                for req_id, entry in self._pending_perms.items()
+            ]
 
     # ── reader loop ───────────────────────────────────────────────────────────
 
@@ -225,14 +250,21 @@ class WebServer:
             ev = threading.Event()
             result: list[bool] = [False]
             with self._perms_lock:
-                self._pending_perms[req_id] = (ev, result)
-            self._push(sid, {
+                self._pending_perms[req_id] = {
+                    "event": ev,
+                    "result": result,
+                    "tool": event.get("tool_name", ""),
+                    "reason": event.get("reason", ""),
+                    "session_id": sid,
+                    "created_at": _now_iso(),
+                }
+            self._broadcast({
                 "type": "permission_request",
                 "tool": event.get("tool_name", ""),
                 "reason": event.get("reason", ""),
                 "request_id": req_id,
             })
-            ev.wait(timeout=30)
+            ev.wait(timeout=_PERMISSION_TIMEOUT_SECONDS)
             with self._perms_lock:
                 self._pending_perms.pop(req_id, None)
             with self._send_lock:
@@ -405,6 +437,10 @@ def _make_handler(ws: WebServer):
                 self._json({"ok": True, "messages": ws._history})
                 return
 
+            if parsed.path == "/api/permissions":
+                self._json({"ok": True, "permissions": ws.pending_permissions()})
+                return
+
             if parsed.path == "/api/conversations":
                 self._json({"ok": True, "conversations": ws.list_conversations()})
                 return
@@ -565,6 +601,7 @@ def _make_handler(ws: WebServer):
             body = html.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

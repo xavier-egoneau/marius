@@ -15,7 +15,6 @@ from marius.kernel.session import SessionRuntime
 from marius.kernel.skills import SkillCommand
 from marius.kernel.tool_router import ToolRouter
 from marius.storage.memory_store import MemoryStore
-from marius.tools.watch import make_watch_tools
 
 
 class _SilentOrchestrator:
@@ -163,81 +162,6 @@ def test_gateway_streaming_appends_artifacts_without_repeating_answer(tmp_path) 
     assert deltas[0] == "streamed answer"
     assert deltas[1].startswith("\n\n**Diff — `README.md`**")
     assert "streamed answer" not in deltas[1]
-
-
-def test_gateway_agentic_watch_run_streams_events_and_report_artifact(tmp_path) -> None:
-    def fake_search(args):
-        return ToolResult(
-            tool_call_id="",
-            ok=True,
-            summary="ok",
-            data={
-                "results": [
-                    {
-                        "title": "Marius release",
-                        "url": "https://example.com/marius-release",
-                        "content": f"Fresh result for {args['query']}",
-                    }
-                ]
-            },
-        )
-
-    def fake_summary(_topic, _results, _metadata):
-        return "Résumé veille: une nouveauté utile à suivre."
-
-    server = _server(tmp_path, TurnOutput())
-    tools = make_watch_tools(
-        root=tmp_path / "watch",
-        search_handler=fake_search,
-        summarizer=fake_summary,
-    )
-    provider = InMemoryProviderAdapter(
-        config=ProviderConfig(provider_name="fake", model="fake"),
-        completion_text="J’ai lancé la veille et je te fais le récap.",
-        tool_call_sequence=[
-            [
-                ToolCall(
-                    id="call_add",
-                    name="watch_add",
-                    arguments={
-                        "title": "Marius",
-                        "query": "Marius updates",
-                        "notify": "new",
-                        "notify_min_score": 0.1,
-                    },
-                )
-            ],
-            [
-                ToolCall(
-                    id="call_run",
-                    name="watch_run",
-                    arguments={"id": "marius", "max_results": 1},
-                )
-            ],
-        ],
-    )
-    server.orchestrator = RuntimeOrchestrator(
-        provider=provider,
-        tool_router=ToolRouter(list(tools.values())),
-    )
-
-    events = _events_from_run(server, "surveille Marius")
-
-    assert [event["type"] for event in events] == [
-        "tool_start",
-        "tool_result",
-        "tool_start",
-        "tool_result",
-        "delta",
-        "done",
-    ]
-    assert events[0]["name"] == "watch_add"
-    assert events[2]["name"] == "watch_run"
-    deltas = [event["text"] for event in events if event["type"] == "delta"]
-    assert deltas[0] == "J’ai lancé la veille et je te fais le récap."
-    assert not any("**Rapport — `watch-run.md`**" in delta for delta in deltas)
-    assert "novelty max" in server.session.state.turns[-1].tool_results[-1].summary
-    assert "Résumé veille" in server.session.state.turns[-1].tool_results[-1].summary
 
 
 def test_gateway_builtin_memories_command_returns_direct_response(tmp_path) -> None:

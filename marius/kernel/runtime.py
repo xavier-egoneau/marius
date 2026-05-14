@@ -6,6 +6,7 @@ Gère la boucle agentique : appel provider → outils → appel provider → …
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -13,6 +14,7 @@ from typing import Any
 
 from .compaction import (
     CompactionConfig,
+    CompactionLevel,
     compaction_level,
     estimate_tokens_from_messages,
     resolve_token_count,
@@ -24,11 +26,29 @@ from .tool_result_context import format_tool_result_for_context
 from .tool_router import ToolRouter
 
 _MAX_TOOL_ITERATIONS = 20
+_MAX_PROVIDER_RETRIES = 2          # retries for transient ProviderErrors (non-streaming)
+
 _FINAL_RESPONSE_INSTRUCTION = (
     "La limite d'appels outils de ce tour est atteinte. "
     "N'appelle plus aucun outil. Produis maintenant la réponse finale pour l'utilisateur : "
     "résume ce qui a été fait, signale ce qui reste incertain ou non vérifié, "
     "et propose une prochaine étape utile si elle existe."
+)
+
+_EMPTY_RESPONSE_NUDGE = (
+    "Tu as reçu les résultats des outils. "
+    "Produis maintenant la réponse finale pour l'utilisateur sans appeler d'outils supplémentaires."
+)
+
+_COMPACTION_SUMMARY = (
+    "[Contexte compacté automatiquement — les tours les plus anciens ont été retirés "
+    "du contexte actif. La conversation continue depuis les tours récents conservés.]"
+)
+
+_COMPACTION_CONTINUATION_HINT = (
+    "Le contexte de cette conversation vient d'être compacté pour libérer de la place. "
+    "Ne répète pas le travail déjà effectué et ne relance pas des outils "
+    "dont les résultats sont déjà visibles dans le contexte."
 )
 
 
@@ -72,22 +92,76 @@ class RuntimeOrchestrator:
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_start: Callable[[ToolCall], None] | None = None,
         on_tool_result: Callable[[ToolCall, ToolResult], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> TurnOutput:
-        # Capturer le contexte des tours précédents AVANT de démarrer le nouveau tour.
+        # ── [1] Snapshot du contexte AVANT de démarrer le nouveau tour ──────────
         prior_messages = turn_input.session.internal_messages(
             include_summary=True,
             include_tool_results=True,
         )
 
+        # ── [2] Évaluation du niveau de compaction ───────────────────────────────
+        # On estime sur prior_messages + user_message pour anticiper la pression
+        # réelle que ce tour va ajouter.
+        probe_messages = list(prior_messages) + [turn_input.user_message]
+        usage = self._build_usage(probe_messages, turn_input.usage)
+        level = compaction_level(
+            resolve_token_count(usage),
+            self._effective_compaction_config(usage),
+        )
+
+        compaction_notice: CompactionNotice | None = None
+        _compacted = False
+
+        # ── [3] Auto-compaction pré-tour (SUMMARIZE / RESET) ─────────────────────
+        # Pour TRIM on laisse passer — le contexte est sous les 75%, c'est gérable.
+        # Pour SUMMARIZE/RESET on tronque les tours anciens AVANT de démarrer
+        # le nouveau tour, pour ne pas dépasser la fenêtre provider.
+        if level in (CompactionLevel.SUMMARIZE, CompactionLevel.RESET):
+            compaction_notice = CompactionNotice(
+                level=level.value,
+                metadata={
+                    "session_id": turn_input.session.session_id,
+                    "auto": True,
+                    "visible_history_untouched": True,
+                },
+            )
+            kept = self.compaction_config.keep_recent_turns
+            # Pour RESET on est encore plus agressif
+            if level == CompactionLevel.RESET:
+                kept = max(1, kept // 2)
+
+            if len(turn_input.session.state.turns) > kept:
+                turn_input.session.state.turns = turn_input.session.state.turns[-kept:]
+                turn_input.session.register_compaction_summary(
+                    _COMPACTION_SUMMARY,
+                    notice=compaction_notice,
+                )
+                # Reconstruire prior_messages depuis la session tronquée
+                prior_messages = turn_input.session.internal_messages(
+                    include_summary=True,
+                    include_tool_results=True,
+                )
+                _compacted = True
+
+        elif level == CompactionLevel.TRIM and not compaction_notice:
+            compaction_notice = CompactionNotice(
+                level=level.value,
+                metadata={
+                    "session_id": turn_input.session.session_id,
+                    "visible_history_untouched": True,
+                },
+            )
+
+        # ── [4] Démarrage du tour ────────────────────────────────────────────────
         turn = turn_input.session.start_turn(
             user_message=turn_input.user_message,
             metadata=turn_input.metadata,
         )
 
-        # La liste de messages envoyée au provider est gérée manuellement
-        # pendant la boucle agentique pour conserver l'ordre précis :
-        # [system?] + prior_messages + user + [asst_tool_calls + tool_results]*
-        provider_messages: list[Message] = list(prior_messages) + [turn_input.user_message]
+        # ── [5] Construction de provider_messages ────────────────────────────────
+        # Ordre : [system?] + prior_messages + [continuation_hint?] + user_message
+        provider_messages: list[Message] = list(prior_messages)
 
         if turn_input.system_prompt:
             system_msg = Message(
@@ -99,21 +173,21 @@ class RuntimeOrchestrator:
             )
             provider_messages = [system_msg, *provider_messages]
 
-        usage = self._build_usage(provider_messages, turn_input.usage)
-        level = compaction_level(
-            resolve_token_count(usage),
-            self._effective_compaction_config(usage),
-        )
-
-        compaction_notice: CompactionNotice | None = None
-        if level.value != "none":
-            compaction_notice = CompactionNotice(
-                level=level.value,
-                metadata={
-                    "session_id": turn_input.session.session_id,
-                    "visible_history_untouched": True,
-                },
+        # Hint de continuation injecté juste avant le message utilisateur
+        if _compacted:
+            hint_msg = Message(
+                role=Role.SYSTEM,
+                content=_COMPACTION_CONTINUATION_HINT,
+                created_at=turn_input.user_message.created_at,
+                visible=False,
+                metadata={"kind": "compaction_continuation_hint"},
             )
+            provider_messages.append(hint_msg)
+
+        provider_messages.append(turn_input.user_message)
+
+        # Recalcul usage post-compaction pour le TurnOutput
+        usage = self._build_usage(provider_messages, turn_input.usage)
 
         output = TurnOutput(
             context_messages=provider_messages,
@@ -125,6 +199,7 @@ class RuntimeOrchestrator:
                 "turn_id": turn.id,
                 "message_count": len(provider_messages),
                 "compaction_level": level.value,
+                "compacted_this_turn": _compacted,
                 "system_prompt": turn_input.system_prompt,
             },
         )
@@ -132,14 +207,17 @@ class RuntimeOrchestrator:
         if self.provider is None:
             return output
 
-        # --- boucle agentique ---
+        # ── [6] Boucle agentique ─────────────────────────────────────────────────
         tools = self.tool_router.definitions() if self.tool_router else []
         all_tool_results: list[ToolResult] = []
         final_message: Message | None = None
         use_streaming = on_text_delta is not None and hasattr(self.provider, "stream")
+        _empty_retry_done = False  # guard: un seul retry sur réponse vide
 
         try:
             for _iteration in range(_MAX_TOOL_ITERATIONS):
+                if is_cancelled is not None and is_cancelled():
+                    raise KeyboardInterrupt
                 request = ProviderRequest(
                     messages=provider_messages,
                     tools=tools,
@@ -150,19 +228,22 @@ class RuntimeOrchestrator:
                     },
                 )
 
-                if use_streaming:
-                    provider_response = self._run_streaming(request, on_text_delta=on_text_delta)
-                else:
-                    provider_response = self.provider.generate(request)
+                # Appel provider avec retry sur erreurs transientes (hors streaming)
+                provider_response = self._call_provider(
+                    request,
+                    use_streaming=use_streaming,
+                    on_text_delta=on_text_delta,
+                    is_cancelled=is_cancelled,
+                )
 
                 usage = self._merge_usage(usage, provider_response.usage)
 
                 if provider_response.finish_reason == "tool_calls" and provider_response.tool_calls:
-                    # Ajouter le message assistant (avec tool_calls) au contexte
                     provider_messages.append(provider_response.message)
 
-                    # Exécuter les outils
                     for tool_call in provider_response.tool_calls:
+                        if is_cancelled is not None and is_cancelled():
+                            raise KeyboardInterrupt
                         if on_tool_start:
                             on_tool_start(tool_call)
 
@@ -177,10 +258,11 @@ class RuntimeOrchestrator:
                         )
                         all_tool_results.append(result)
 
+                        if is_cancelled is not None and is_cancelled():
+                            raise KeyboardInterrupt
                         if on_tool_result:
                             on_tool_result(tool_call, result)
 
-                        # Ajouter le résultat comme message tool dans le contexte
                         tool_msg = Message(
                             role=Role.TOOL,
                             content=format_tool_result_for_context(result),
@@ -192,16 +274,30 @@ class RuntimeOrchestrator:
 
                     continue  # prochain tour provider
 
-                # Réponse finale (texte)
+                # Réponse finale — retry si vide (une seule tentative)
+                if not provider_response.message.content.strip() and not _empty_retry_done:
+                    _empty_retry_done = True
+                    nudge = Message(
+                        role=Role.SYSTEM,
+                        content=_EMPTY_RESPONSE_NUDGE,
+                        created_at=datetime.now(timezone.utc),
+                        visible=False,
+                        metadata={"kind": "empty_response_nudge"},
+                    )
+                    provider_messages.append(nudge)
+                    continue  # relancer sans outils
+
                 final_message = provider_response.message
                 break
 
+            # Limite d'itérations atteinte sans réponse finale
             if final_message is None:
                 provider_response = self._request_final_response(
                     provider_messages,
                     turn_input=turn_input,
                     turn_id=turn.id,
                     on_text_delta=on_text_delta if use_streaming else None,
+                    is_cancelled=is_cancelled,
                 )
                 usage = self._merge_usage(usage, provider_response.usage)
                 final_message = provider_response.message
@@ -225,7 +321,7 @@ class RuntimeOrchestrator:
             )
             raise
 
-        # Enregistrer dans la session
+        # ── [7] Persistance en session ───────────────────────────────────────────
         for result in all_tool_results:
             turn_input.session.attach_tool_result(turn.id, result)
 
@@ -254,7 +350,49 @@ class RuntimeOrchestrator:
             )
         return output
 
-    # --- streaming ---
+    def cancel_current_provider(self) -> None:
+        cancel = getattr(self.provider, "cancel_current_request", None)
+        if callable(cancel):
+            cancel()
+
+    # ── provider call with retry ──────────────────────────────────────────────
+
+    def _call_provider(
+        self,
+        request: ProviderRequest,
+        *,
+        use_streaming: bool,
+        on_text_delta: Callable[[str], None] | None,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> ProviderResponse:
+        """Appel provider avec retry exponentiel sur erreurs transientes.
+
+        Le retry ne s'applique qu'aux appels non-streaming : en streaming les
+        deltas ont potentiellement déjà été envoyés au client, un retry
+        produirait des doublons.
+        """
+        if use_streaming:
+            return self._run_streaming(
+                request,
+                on_text_delta=on_text_delta,
+                is_cancelled=is_cancelled,
+            )
+
+        last_error: ProviderError | None = None
+        for attempt in range(_MAX_PROVIDER_RETRIES + 1):
+            try:
+                if is_cancelled is not None and is_cancelled():
+                    raise KeyboardInterrupt
+                return self.provider.generate(request)  # type: ignore[union-attr]
+            except ProviderError as exc:
+                if not exc.retryable or attempt == _MAX_PROVIDER_RETRIES:
+                    raise
+                last_error = exc
+                time.sleep(2 ** attempt)  # 1s, 2s
+
+        raise last_error  # type: ignore[misc]  # ne peut pas être None ici
+
+    # ── streaming ─────────────────────────────────────────────────────────────
 
     def _request_final_response(
         self,
@@ -263,6 +401,7 @@ class RuntimeOrchestrator:
         turn_input: TurnInput,
         turn_id: str,
         on_text_delta: Callable[[str], None] | None,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> ProviderResponse:
         final_instruction = Message(
             role=Role.SYSTEM,
@@ -282,7 +421,13 @@ class RuntimeOrchestrator:
             },
         )
         if on_text_delta is not None:
-            return self._run_streaming(request, on_text_delta=on_text_delta)
+            return self._run_streaming(
+                request,
+                on_text_delta=on_text_delta,
+                is_cancelled=is_cancelled,
+            )
+        if is_cancelled is not None and is_cancelled():
+            raise KeyboardInterrupt
         return self.provider.generate(request)  # type: ignore[union-attr]
 
     def _fallback_final_response(self, tool_results: list[ToolResult]) -> str:
@@ -310,6 +455,7 @@ class RuntimeOrchestrator:
         request: ProviderRequest,
         *,
         on_text_delta: Callable[[str], None] | None,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> ProviderResponse:
         """Consomme le stream et reconstruit un ProviderResponse complet."""
         from .provider import ProviderChunk
@@ -319,25 +465,32 @@ class RuntimeOrchestrator:
         finish_reason = "stop"
         final_usage = ContextUsage()
 
-        for chunk in self.provider.stream(request):  # type: ignore[union-attr]
-            if chunk.type == "text_delta":
-                text_buf += chunk.delta
-                if on_text_delta:
-                    on_text_delta(chunk.delta)
-            elif chunk.type == "tool_calls":
-                tool_calls = chunk.tool_calls
-                finish_reason = chunk.finish_reason or "tool_calls"
-            elif chunk.type in ("usage", "done"):
-                if chunk.usage and isinstance(chunk.usage, dict):
-                    final_usage = ContextUsage(
-                        estimated_input_tokens=chunk.usage.get("input_tokens", 0),
-                        provider_input_tokens=chunk.usage.get("input_tokens"),
-                        provider_output_tokens=chunk.usage.get("output_tokens"),
-                    )
-                elif chunk.usage and isinstance(chunk.usage, ContextUsage):
-                    final_usage = chunk.usage
-                if chunk.finish_reason and not tool_calls:
-                    finish_reason = chunk.finish_reason
+        try:
+            for chunk in self.provider.stream(request):  # type: ignore[union-attr]
+                if is_cancelled is not None and is_cancelled():
+                    raise KeyboardInterrupt
+                if chunk.type == "text_delta":
+                    text_buf += chunk.delta
+                    if on_text_delta:
+                        on_text_delta(chunk.delta)
+                elif chunk.type == "tool_calls":
+                    tool_calls = chunk.tool_calls
+                    finish_reason = chunk.finish_reason or "tool_calls"
+                elif chunk.type in ("usage", "done"):
+                    if chunk.usage and isinstance(chunk.usage, dict):
+                        final_usage = ContextUsage(
+                            estimated_input_tokens=chunk.usage.get("input_tokens", 0),
+                            provider_input_tokens=chunk.usage.get("input_tokens"),
+                            provider_output_tokens=chunk.usage.get("output_tokens"),
+                        )
+                    elif chunk.usage and isinstance(chunk.usage, ContextUsage):
+                        final_usage = chunk.usage
+                    if chunk.finish_reason and not tool_calls:
+                        finish_reason = chunk.finish_reason
+        except Exception:
+            if is_cancelled is not None and is_cancelled():
+                raise KeyboardInterrupt
+            raise
 
         assistant_msg = Message(
             role=Role.ASSISTANT,
@@ -352,7 +505,7 @@ class RuntimeOrchestrator:
             usage=final_usage,
         )
 
-    # --- helpers ---
+    # ── helpers ───────────────────────────────────────────────────────────────
 
     def _build_usage(
         self,

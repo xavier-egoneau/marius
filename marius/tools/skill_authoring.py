@@ -30,7 +30,6 @@ def make_skill_authoring_tools(skills_dir: Path | None = None) -> dict[str, Tool
         body = (arguments.get("body") or "").strip()
         commands = _command_names(arguments.get("commands"))
         include_dream = bool(arguments.get("include_dream", False))
-        include_daily = bool(arguments.get("include_daily", False))
         overwrite = bool(arguments.get("overwrite", False))
 
         if not _valid_skill_name(name):
@@ -64,11 +63,6 @@ def make_skill_authoring_tools(skills_dir: Path | None = None) -> dict[str, Tool
                 "# Dream contract\n\nDescribe what this skill can surface during memory consolidation.\n",
                 encoding="utf-8",
             )
-        if include_daily:
-            (skill_dir / "DAILY.md").write_text(
-                "# Daily contract\n\nDescribe what this skill can contribute to a daily briefing.\n",
-                encoding="utf-8",
-            )
         if commands:
             core_dir = skill_dir / "core"
             core_dir.mkdir(exist_ok=True)
@@ -81,8 +75,6 @@ def make_skill_authoring_tools(skills_dir: Path | None = None) -> dict[str, Tool
         created = ["SKILL.md"]
         if include_dream:
             created.append("DREAM.md")
-        if include_daily:
-            created.append("DAILY.md")
         created.extend(f"core/{command}.md" for command in commands)
         return ToolResult(
             tool_call_id="",
@@ -156,7 +148,6 @@ def make_skill_authoring_tools(skills_dir: Path | None = None) -> dict[str, Tool
                             "description": "Optional slash command names to scaffold under core/.",
                         },
                         "include_dream": {"type": "boolean", "description": "Create DREAM.md placeholder."},
-                        "include_daily": {"type": "boolean", "description": "Create DAILY.md placeholder."},
                         "overwrite": {"type": "boolean", "description": "Replace an existing skill folder."},
                     },
                     "required": ["name", "description"],
