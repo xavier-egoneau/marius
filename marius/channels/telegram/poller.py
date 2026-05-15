@@ -9,22 +9,31 @@ from __future__ import annotations
 import re
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .api import get_updates, send_chat_action, send_message, set_my_commands
+from .api import download_file, get_file, get_updates, send_chat_action, send_message, set_my_commands
 from .config import TelegramChannelConfig
 
 _POLL_INTERVAL = 1.0   # secondes entre deux polls
 _LONG_POLL_TIMEOUT = 10  # secondes de long polling
+_MAX_MEDIA_BYTES = 20 * 1024 * 1024
+_IMAGE_MIME_EXT: dict[str, str] = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+}
 
 # Commandes built-in (toujours enregistrées en premier)
 _BUILTIN_COMMANDS: list[dict[str, str]] = [
     {"command": "start",  "description": "Démarrer"},
     {"command": "help",   "description": "Aide"},
     {"command": "new",    "description": "Nouvelle conversation"},
-    {"command": "daily",  "description": "Briefing du jour"},
     {"command": "model",  "description": "Afficher ou changer le modèle"},
     {"command": "doctor", "description": "Diagnostic de l'installation"},
     {"command": "status", "description": "Statut du gateway"},
@@ -110,17 +119,55 @@ class TelegramPoller:
 
         chat_id = int(msg["chat"]["id"])
         user_id = int(msg.get("from", {}).get("id", 0))
-        text    = (msg.get("text") or "").strip()
-        if not text:
-            return
 
         if not self._is_allowed(user_id, chat_id):
+            return
+
+        text = self._text_from_message(msg)
+        if not text:
             return
 
         if text.startswith("/"):
             self._handle_command(chat_id, text)
         else:
             self._handle_message(chat_id, text)
+
+    def _text_from_message(self, msg: dict) -> str:
+        text = (msg.get("text") or "").strip()
+        if text:
+            return text
+        caption = (msg.get("caption") or "").strip()
+        attachment = self._download_image_attachment(msg)
+        if not attachment:
+            return caption
+        marker = f"[fichier joint : {attachment}]"
+        return f"{caption}\n\n{marker}".strip() if caption else marker
+
+    def _download_image_attachment(self, msg: dict) -> str:
+        media = _extract_image_media(msg)
+        if media is None:
+            return ""
+        file_size = media.get("file_size")
+        if isinstance(file_size, int) and file_size > _MAX_MEDIA_BYTES:
+            return ""
+        file_id = str(media.get("file_id") or "")
+        if not file_id:
+            return ""
+        info = get_file(self._cfg.token, file_id)
+        if not info:
+            return ""
+        file_path = str(info.get("file_path") or "")
+        if not file_path:
+            return ""
+        data = download_file(self._cfg.token, file_path, max_bytes=_MAX_MEDIA_BYTES)
+        if not data:
+            return ""
+        uploads_dir = _telegram_uploads_dir(self._gw)
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        suffix = _image_suffix(msg, file_path)
+        filename = uploads_dir / f"{uuid.uuid4().hex[:8]}_telegram{suffix}"
+        filename.write_bytes(data)
+        return str(filename)
 
     def _is_allowed(self, user_id: int, chat_id: int) -> bool:
         if self._cfg.allowed_users and user_id not in self._cfg.allowed_users:
@@ -131,6 +178,7 @@ class TelegramPoller:
 
     def _handle_command(self, chat_id: int, text: str) -> None:
         cmd = text.split()[0].lower().lstrip("/").split("@")[0]
+        self._remember_chat(chat_id)
 
         if cmd == "start":
             send_message(self._cfg.token, chat_id,
@@ -143,12 +191,8 @@ class TelegramPoller:
             return
 
         if cmd == "new":
-            self._gw.new_conversation()
+            self._gw.new_conversation(channel="telegram", reason="command")
             send_message(self._cfg.token, chat_id, "Nouvelle conversation démarrée.")
-            return
-
-        if cmd == "daily":
-            self._handle_message(chat_id, "/daily")
             return
 
         if cmd == "status":
@@ -214,8 +258,8 @@ class TelegramPoller:
             send_message(self._cfg.token, chat_id, "Échec du changement de modèle.")
 
     def _handle_message(self, chat_id: int, text: str) -> None:
-        # Mémorise le chat_id pour les pushs non-sollicités (daily)
-        self._gw.telegram_chat_id = chat_id
+        # Mémorise le chat_id pour les notifications non sollicitées
+        self._remember_chat(chat_id)
 
         # Typing indicator
         stop_typing = _start_typing(self._cfg.token, chat_id)
@@ -227,6 +271,12 @@ class TelegramPoller:
 
         if response:
             send_message(self._cfg.token, chat_id, response)
+
+    def _remember_chat(self, chat_id: int) -> None:
+        self._gw.telegram_chat_id = chat_id
+        remember = getattr(self._gw, "remember_telegram_chat_id", None)
+        if callable(remember):
+            remember(chat_id)
 
     # ── offset ────────────────────────────────────────────────────────────────
 
@@ -259,3 +309,37 @@ def _start_typing(token: str, chat_id: int):
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
     return stop.set
+
+
+def _extract_image_media(msg: dict) -> dict[str, Any] | None:
+    photos = msg.get("photo")
+    if isinstance(photos, list) and photos:
+        candidates = [p for p in photos if isinstance(p, dict) and p.get("file_id")]
+        if candidates:
+            return max(candidates, key=lambda p: int(p.get("file_size") or 0))
+    document = msg.get("document")
+    if isinstance(document, dict) and str(document.get("mime_type") or "").startswith("image/"):
+        return document
+    return None
+
+
+def _image_suffix(msg: dict, file_path: str) -> str:
+    document = msg.get("document")
+    if isinstance(document, dict):
+        name = str(document.get("file_name") or "")
+        suffix = Path(name).suffix.lower()
+        if suffix:
+            return suffix
+        mime_type = str(document.get("mime_type") or "")
+        if mime_type in _IMAGE_MIME_EXT:
+            return _IMAGE_MIME_EXT[mime_type]
+    suffix = Path(file_path).suffix.lower()
+    return suffix if suffix else ".jpg"
+
+
+def _telegram_uploads_dir(gateway: Any) -> Path:
+    workspace = getattr(gateway, "workspace", None)
+    if workspace:
+        return Path(workspace).expanduser() / "uploads" / "telegram"
+    agent_name = str(getattr(gateway, "agent_name", "main") or "main")
+    return Path.home() / ".marius" / "workspace" / agent_name / "uploads" / "telegram"

@@ -40,8 +40,7 @@ _KV_RE = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_-]*):\s*(.*)$", re.MULTILINE)
 _MARIUS_HOME = Path.home() / ".marius"
 _SYSTEM_SKILLS: dict[str, tuple[str, str]] = {
     "assistant": (
-        "Bloc assistant durable : IDENTITY.md, USER.md et onboarding conditionnel "
-        "(workspace/gateway/daily à venir).",
+        "Bloc assistant durable : IDENTITY.md, USER.md, workspace et gateway.",
         "system",
     ),
 }

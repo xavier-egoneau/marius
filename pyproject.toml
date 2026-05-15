@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 authors = [{ name = "Egza Gonal" }]
 license = { text = "MIT" }
 dependencies = [
+  "playwright>=1.45",
   "rich>=13.0",
 ]
 keywords = ["agent", "llm", "kernel", "runtime"]

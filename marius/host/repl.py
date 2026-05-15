@@ -45,7 +45,6 @@ from marius.storage.project_store import ProjectStore
 from marius.storage.session_corpus import SessionRecord, build_transcript, write_session_file
 from marius.storage.ui_history import InMemoryVisibleHistoryStore, VisibleHistoryEntry
 from marius.tools.factory import build_tool_entries
-from marius.tools.spawn_agent import make_spawn_agent_tool
 
 
 _THEME = Theme({
@@ -490,30 +489,18 @@ def _build_tool_router(
     agent_name: str | None = None,
     permission_mode: str = "limited",
 ) -> ToolRouter:
-    """Construit le router depuis la liste des tools actifs de l'agent.
-
-    spawn_agent est construit en deux passes : d'abord les entries de base,
-    puis spawn_agent y est ajouté avec cette liste comme contexte workers.
-    """
-    base_entries = build_tool_entries(
+    """Construit le router depuis la liste des tools actifs de l'agent."""
+    entries = build_tool_entries(
         enabled_tools,
         memory_store,
         cwd,
         entry=entry,
         active_skills=active_skills,
         agent_name=agent_name,
+        permission_mode=permission_mode,
     )
 
-    if entry is not None and (enabled_tools is None or "spawn_agent" in enabled_tools):
-        spawn_tool = make_spawn_agent_tool(
-            entry,
-            base_entries,
-            permission_mode=permission_mode,
-            cwd=cwd,
-        )
-        base_entries = [*base_entries, spawn_tool]
-
-    return ToolRouter(base_entries, guard=guard)
+    return ToolRouter(entries, guard=guard)
 
 
 # ── verbes d'affichage pour les outils ───────────────────────────────────────

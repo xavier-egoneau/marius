@@ -1,4 +1,4 @@
-"""Moteur dreaming/daily — appel LLM direct + orchestration du cycle."""
+"""Moteur dreaming — appel LLM direct + orchestration du cycle."""
 
 from __future__ import annotations
 
@@ -145,5 +145,4 @@ def _chunk_usage(chunk: ProviderChunk, current: ContextUsage) -> ContextUsage:
             max_context_tokens=current.max_context_tokens,
         )
     return current
-
 

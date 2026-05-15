@@ -138,6 +138,192 @@ Ce harnais doit rester déclaratif et être porté par les fichiers Markdown, pa
 - Toute décision d’architecture durable doit être ajoutée ici.
 - Si une règle devient fausse, on la corrige explicitement plutôt que de la laisser dériver.
 
+## 2026-05-15 — Synchronisation live canonique des surfaces
+
+Le gateway est la source canonique de l'historique visible et du flux live entre
+CLI, web, routines et Telegram.
+
+Implémentation :
+- chaque entrée visible utilisateur/assistant est écrite par le gateway dans
+  l'historique canonique ;
+- le gateway publie ensuite un événement `visible` aux clients connectés ;
+- `/new` archive et vide l'historique visible côté gateway, puis publie
+  `visible_reset` ;
+- le host web relaie ces événements vers le navigateur via SSE et ne maintient
+  plus sa propre vérité d'historique ;
+- Telegram reçoit les entrées visibles non-Telegram depuis ce même flux, sans
+  miroir de tour reconstitué.
+
+Conséquences :
+- les surfaces doivent converger par événements live, pas par polling périodique ;
+- le fichier d'historique reste une persistance et une source de rattrapage,
+  pas le mécanisme de synchronisation principal ;
+- une compaction (`/compact`) peut modifier le contexte interne sans supprimer
+  l'historique visible utilisateur.
+
+## 2026-05-15 — Prompts de routine non visibles
+
+Les routines envoient bien leur prompt au runtime LLM, mais ce prompt est une
+instruction planifiée et non un message utilisateur à afficher tel quel dans la
+conversation canonique.
+
+Conséquences :
+- le channel `routine` masque l'entrée utilisateur dans l'historique visible ;
+- la réponse assistant de la routine reste visible et synchronisée sur les
+  surfaces canoniques ;
+- le prompt reste conservé dans la définition de la routine et dans le contexte
+  runtime du tour, mais n'encombre pas le chat quotidien.
+
+## 2026-05-15 — Exécution des routines via canal dédié
+
+Le bouton de test du dashboard et le cron des routines doivent utiliser le même
+chemin d'exécution `channel=routine`.
+
+Conséquences :
+- le dashboard ne simule pas un message web utilisateur pour tester une routine ;
+- le client cron/dashboard garde la connexion gateway ouverte jusqu'au `done`
+  du tour, sinon le gateway considère le client parti et annule le tour ;
+- les demandes de permission émises pendant une routine sont refusées par défaut
+  côté exécuteur non interactif.
+
+## 2026-05-15 — Overrides d'identité par agent
+
+`SOUL.md`, `IDENTITY.md` et `USER.md` ont une version globale sous `~/.marius`,
+mais un agent peut les surcharger dans son workspace `~/.marius/workspace/<agent>/`.
+
+Conséquences :
+- au runtime, le fichier agent est utilisé s'il existe ; sinon le fichier global
+  correspondant sert de fallback ;
+- l'existence d'un fichier agent vide masque aussi le global, ce qui permet un
+  bypass explicite ;
+- lors de la création d'un nouvel agent, les documents globaux existants sont
+  copiés dans son workspace sans écraser d'éventuels overrides ;
+- le dashboard, lorsqu'il édite depuis un panneau agent, édite uniquement le
+  fichier agent et affiche un document vide si aucun override n'existe encore.
+
+## 2026-05-15 — Frontière Task Board / Routines / Chat
+
+Le Task Board est la vue des tâches uniques suivies explicitement. Les routines
+sont des définitions récurrentes séparées ; leurs runs ne créent pas de clone
+dans le Task Board.
+
+Conséquences :
+- une task visible dans le Task Board a `recurring=false` ;
+- une routine visible dans `Routines.cron` a `recurring=true` ;
+- un run de routine réutilise l'objet routine, met à jour ses événements /
+  `last_run` / `last_error`, et publie seulement la réponse assistant ;
+- une task unique programmée (`scheduled_for`) reste le même objet du Task Board
+  et passe par le même prompt interne `[Task Board]` qu'un lancement manuel ;
+- les prompts internes `routine` et `task` ne sont pas ajoutés comme messages
+  utilisateur visibles dans la conversation canonique ;
+- une demande de chat immédiate ne crée pas de task sauf si l'utilisateur demande
+  explicitement un suivi, un backlog, une planification ou une routine.
+- une task unique `backlog` est inerte ; une task unique `queued` est consommée
+  par le scheduler, immédiatement si elle n'a pas de `scheduled_for`, à l'heure
+  prévue sinon. Le dashboard ne doit donc pas exposer de bouton "launch" pour les
+  tasks uniques : il permet seulement de cadrer, mettre en queue ou retry.
+- après un run scheduler terminé, une task unique passe `done` automatiquement
+  si l'agent n'a pas explicitement posé un autre statut via `task_update` ;
+- au redémarrage d'un gateway, une task unique restée `running` passe `failed`
+  au lieu d'être rejouée automatiquement. Le retry d'une task unique interrompue
+  doit être explicite.
+
+## 2026-05-15 — Taxonomie des outils côté backend
+
+Le runtime/config backend est la source de vérité des outils disponibles et de
+leur regroupement UX.
+
+Conséquences :
+- `/api/tools` expose la liste des outils, les outils admin-only, les outils
+  toujours inclus et les groupes d'affichage ;
+- le dashboard affiche ces groupes sans maintenir sa propre taxonomie produit ;
+- les skills restent découverts dynamiquement par `/api/skills` ;
+
+## 2026-05-15 — Outils requis par skills actifs
+
+Un skill peut dépendre d'outils runtime natifs. Dans ce cas, l'activation du
+skill doit rendre ces outils accessibles à l'agent, même si une ancienne config
+d'agent avait une liste d'outils explicite antérieure.
+
+Conséquences :
+- le skill `kanban` active automatiquement `task_create`, `task_list` et
+  `task_update` ;
+- les outils requis par skill restent filtrés par les règles de rôle/admin ;
+- le dashboard et le gateway passent par la même résolution effective, afin que
+  l'UI et le runtime ne divergent pas.
+
+## 2026-05-15 — Catalogue d'outils piloté par la factory
+
+La liste des outils exposés par la config et le dashboard ne doit pas être une
+copie manuelle du registre runtime.
+
+Conséquences :
+- `ALL_TOOLS` est dérivé du catalogue de `marius.tools.factory` ;
+- les groupes UX classent cette liste et mettent les outils inconnus en
+  fallback `Other` ;
+- la config ne persiste pas une allowlist `tools` ni un `tools_mode` : elle
+  persiste seulement `disabled_tools` ;
+- les outils actifs sont toujours résolus comme catalogue courant autorisé par
+  rôle, moins `disabled_tools`, plus les outils requis par skills actifs ;
+- les outils liés au runtime (`reminders`, `spawn_agent`, `call_agent`) sont
+  catalogués et construits par la même factory que les autres outils ; leur
+  instanciation peut dépendre du contexte courant, mais pas leur exposition UX ;
+- un nouvel outil du registre est donc visible et actif par défaut, sauf si
+  l'agent désactive explicitement son groupe ou cet outil ;
+- un outil nouveau non classé explicitement tombe dans un groupe `Other` afin
+  d'éviter qu'il existe côté runtime sans être visible dans l'éditeur d'agent.
+
+## 2026-05-15 — Routage vision native / vision locale
+
+Une image jointe par l'utilisateur est un artefact du tour, pas seulement un
+texte contenant un chemin de fichier.
+
+Conséquences :
+- si l'outil `vision` est actif pour l'agent, l'image reste traitée comme un
+  fichier joint local et le modèle peut appeler l'outil `vision` Ollama ;
+- si l'outil `vision` est désactivé, le gateway tente la vision native du
+  modèle courant en transmettant l'image attachée à l'adapter provider ;
+- seuls les fichiers image réellement uploadés dans le workspace de l'agent sont
+  convertis en artefacts natifs, afin d'éviter qu'un prompt texte force l'envoi
+  arbitraire d'un fichier local à un provider cloud ;
+- si le provider/modèle ne supporte pas l'image native, l'erreur provider reste
+  visible et l'utilisateur peut activer l'outil `vision` local.
+
+## 2026-05-15 — Contrôle navigateur comme skill
+
+Le contrôle navigateur Playwright est une capacité agentique complète, pas un
+outil global activé par défaut.
+
+Conséquences :
+- les outils `browser_*` existent dans le catalogue runtime et le dashboard,
+  mais sont des outils gated par le skill `browser` ;
+- un agent sans le skill `browser` ne reçoit pas ces outils, même si sa config
+  ancienne avait une liste d'outils large ;
+- activer le skill `browser` rend disponibles `browser_open`,
+  `browser_extract`, `browser_screenshot`, `browser_click`, `browser_type` et
+  `browser_close` ;
+- les actions de lecture/navigation sont autorisées comme capacités web, tandis
+  que les interactions (`click`, `type`) passent par le gardien en modes non
+  `power` ;
+- l'implémentation Playwright reste optionnelle : si la dépendance ou Chromium
+  manque, l'outil retourne une erreur explicite au lieu de casser le runtime.
+
+## 2026-05-15 — Projet actif lors du cadrage de task
+
+Une action explicite sur une task projetée doit travailler dans le projet de la
+task.
+
+Conséquences :
+- le bouton `Plan` du Task Board active le `project_path` de la task avant
+  d'ouvrir le draft de cadrage dans le chat ;
+- si la task n'a pas encore de `project_path` mais que la vue Task Board est
+  filtrée sur un projet, ce projet est écrit sur la task puis activé ;
+- activer un projet depuis le dashboard peut enregistrer au passage un dossier
+  existant non encore présent dans `projects.json` ;
+- le system prompt rappelle le projet actif explicite et demande de basculer
+  via `project_set_active` seulement quand l'utilisateur veut réellement
+  travailler sur ce projet, pas lorsqu'il le cite comme référence.
+
 ## 2026-05-14 — Zone de confiance runtime en mode limited
 
 En mode `limited`, la zone de confiance effective d'un gateway est composée du
@@ -297,12 +483,12 @@ Implémentation :
 ## 2026-05-10 — Veille persistante explicite
 - Décision : exposer la veille via `watch_add`, `watch_list`, `watch_remove` et `watch_run`.
 - Portée initiale : topics JSON standalone sous `~/.marius/watch/topics.json`, rapports sous `~/.marius/watch/reports/`, exécution manuelle via web search.
-- Principe : `watch_run` persiste des observations ; le modèle reformule et décide quoi faire. Dreaming/daily lisent les rapports existants, sans déclencher de recherche web cachée.
+- Principe : `watch_run` persiste des observations ; le modèle reformule et décide quoi faire. Les routines qui en ont besoin peuvent lire les rapports existants, sans déclencher de recherche web cachée.
 - Impact : cadence automatique, notifications et déduplication de résultats restent une tranche scheduler séparée.
 
 ## 2026-05-10 — Veille automatisée par scheduler
 - Décision : les topics de veille avec cadence non manuelle deviennent des jobs `watch:<topic_id>` dans le scheduler du gateway.
-- Cadences acceptées : `hourly`, `daily`, `weekly`, ou des durées simples `Nm`, `Nh`, `Nd`.
+- Cadences acceptées : `hourly`, `1d`, `weekly`, ou des durées simples `Nm`, `Nh`, `Nd`.
 - Principe : le scheduler déclenche le même pipeline que `watch_run`; les rapports restent persistés dans `~/.marius/watch/reports/`.
 - Notifications : Telegram est opt-in par topic via tag `notify` ou `telegram`.
 - Déduplication : les URLs déjà vues pour un topic sont filtrées avant sauvegarde du rapport.
@@ -315,7 +501,7 @@ Implémentation :
 - Modularité : le store JSON reste autonome ; l'accès provider est injecté depuis les surfaces qui disposent déjà d'un provider courant.
 
 ## 2026-05-11 — Commandes slash gateway alignées
-- Décision : les commandes slash de base (`/help`, `/remember`, `/memories`, `/forget`, `/doctor`, `/dream`, `/daily`, `/context`, `/compact`) sont gérées par le gateway, pas seulement par le REPL local.
+- Décision : les commandes slash de base (`/help`, `/remember`, `/memories`, `/forget`, `/doctor`, `/dream`, `/context`, `/compact`) sont gérées par le gateway, pas seulement par le REPL local.
 - Principe : une commande déclarée dans une surface doit être exécutable de bout en bout sur les surfaces qui l'affichent.
 - Règle : les commandes directes retournent du Markdown visible ; les commandes de skill restent résolues en prompt et passent par le LLM.
 - Impact : web, Telegram et client gateway partagent le même comportement pour ces commandes, au lieu de laisser le modèle répondre "commande inconnue".
@@ -338,28 +524,39 @@ Implémentation :
 - Règle : consulter une archive ne réactive pas une ancienne session ; la conversation courante reste portée par le gateway.
 - Impact : le web conserve la fluidité multi-canal tout en permettant de retrouver les conversations canoniques clôturées.
 
+## 2026-05-15 — Session visible canonique par agent
+- Décision : par défaut, web, CLI gateway, Telegram et routines alimentent la même conversation visible canonique de l'agent courant.
+- Principe : le `SessionRuntime` du gateway reste la source de continuité LLM ; `~/.marius/workspace/<agent>/web_history.json` est la projection visible canonique partagée par les surfaces.
+- Règle : une surface explicitement ouverte sur une archive ou une session secondaire ne devient pas canonique ; elle ne réactive pas le runtime courant.
+- Impact : Telegram et le CLI ne divergent plus silencieusement du web ; `/new` depuis une surface canonique archive puis réinitialise la conversation visible et le runtime.
+
+## 2026-05-15 — Frontière persistante de compaction
+- Décision : `/compact` compacte uniquement le contexte runtime court ; il ne supprime pas l'historique visible.
+- Principe : le gateway écrit une entrée interne `metadata.kind = "compaction_boundary"` dans `web_history.json`.
+- Règle : les surfaces de chat masquent cette entrée, les archives visibles l'ignorent, et la restauration runtime ne réhydrate que les tours postérieurs à la dernière frontière.
+- Impact : une compaction reste effective après redémarrage sans casser la lisibilité de la conversation canonique.
+
 ## 2026-05-11 — Artefacts observationnels non imprimés par défaut
-- Décision : les outils de collecte de contexte (`rag_search`, `watch_run`, `daily_digest`) peuvent retourner des rapports structurés masqués au rendu final.
+- Décision : les outils de collecte de contexte (`rag_search`, `watch_run`) peuvent retourner des rapports structurés masqués au rendu final.
 - Principe : le modèle reçoit les données d'outil et doit produire une synthèse lisible ; le chat ne doit pas recevoir un dump brut après la réponse.
 - Règle : les artefacts d'action utiles comme les diffs restent visibles ; les rapports de sources servent d'observations sauf demande explicite.
-- Impact : le daily et les réponses RAG/veille gagnent en lisibilité sans perdre les données nécessaires au LLM.
+- Impact : les réponses RAG/veille gagnent en lisibilité sans perdre les données nécessaires au LLM.
 
-## 2026-05-11 — Daily coach et veille bornée
-- Décision : le daily est une synthèse coachée, pas un agrégat exhaustif de sources.
-- Principe : les sources RAG, calendrier, veille et dreaming servent à croiser, déduire et prioriser ; elles ne doivent pas être imprimées telles quelles.
+## 2026-05-11 — Briefings récurrents par routines
+- Décision : les briefings récurrents sont de simples routines avec un `prompt` explicite, pas un mécanisme dédié.
+- Principe : les sources RAG, calendrier, veille et dreaming servent à croiser, déduire et prioriser quand la routine le demande ; elles ne doivent pas être imprimées telles quelles.
 - Décision veille : `watch_add` applique une limite douce à 8 sujets planifiés actifs ; au-delà, l'agent demande confirmation puis peut réessayer explicitement.
-- Impact : l'utilisateur garde la main sur le coût et le bruit du daily, sans bloquer les ajouts volontaires.
+- Impact : l'utilisateur garde la main sur le coût et le bruit des routines de briefing, sans bloquer les ajouts volontaires.
 
-## 2026-05-11 — Daily optimisable par modèle dédié
-- Décision : le daily affiche en bas un footer d'usage tokens best-effort, quand le provider expose ces données.
-- Décision : un agent peut déclarer un `daily_model` optionnel, utilisé seulement pour le daily planifié ou `/daily`; `daily_digest` accepte aussi un `model` ponctuel.
-- Principe : changer le modèle du daily ne change pas le modèle conversationnel courant.
-- Impact : les tâches récurrentes peuvent être optimisées en coût/latence sans casser l'expérience du chat principal.
+## 2026-05-11 — Briefings sans moteur dédié
+- Décision : il n'y a pas de commande ni d'outil dédié au briefing quotidien ; une routine ordinaire porte le prompt, la cadence et l'agent.
+- Principe : optimiser un briefing revient à optimiser la routine correspondante, pas à ajouter un second chemin runtime.
+- Impact : les tâches récurrentes restent optimisables en coût/latence sans casser l'expérience du chat principal.
 
-## 2026-05-11 — Veille daily bornée en temps
-- Décision : les recherches de veille déclenchées pour préparer un daily doivent utiliser des timeouts courts et peu de retries.
-- Principe : le daily doit rester un briefing fluide ; les résumés LLM intermédiaires de chaque topic sont désactivés pendant le daily, puisque l'agent synthétise déjà en réponse finale.
-- Impact : plusieurs sujets de veille peuvent enrichir le daily sans bloquer le tour pendant de longues minutes.
+## 2026-05-11 — Veille bornée en temps pour briefings
+- Décision : les recherches de veille déclenchées par une routine de briefing doivent utiliser des timeouts courts et peu de retries.
+- Principe : un briefing doit rester fluide ; les résumés LLM intermédiaires de chaque topic sont évités quand l'agent synthétise déjà en réponse finale.
+- Impact : plusieurs sujets de veille peuvent enrichir un briefing sans bloquer le tour pendant de longues minutes.
 
 ## 2026-05-11 — Migration des skills utilisateur Maurice
 - Décision : porter `caldav_calendar` et `sentinelle` comme skills Marius Markdown-first, avec outils Marius natifs lorsque l'ancien skill avait du code.
@@ -370,9 +567,9 @@ Implémentation :
 ## 2026-05-11 — RAG Markdown comme sources consultables
 - Décision : introduire un skill `rag` pour gérer des sources Markdown indexées, distinctes de la mémoire durable.
 - Principe : les sources RAG sont consultées au besoin via outils ; `memory.db` reste le coeur des faits utiles au quotidien.
-- Format v1 : dossiers/fichiers Markdown façon Obsidian, frontmatter optionnel et tags inline `[always]`, `[important]`, `[daily]`, `[fresh]`, `[archive]`.
+- Format v1 : dossiers/fichiers Markdown façon Obsidian, frontmatter optionnel et tags inline `[always]`, `[important]`, `[routine]`, `[fresh]`, `[archive]`.
 - Règle : `[always]` et `[important]` signalent des candidates à injection/promotion, mais l'agent doit décider ou demander validation ; aucun corpus n'est injecté en bloc.
-- Indexation : `rag_source_sync` catalogue tous les documents, mais n'indexe le contenu détaillé que pour les chunks taggés `[always]`, `[important]`, `[daily]` ou `[fresh]`; les documents non taggés restent localisables par titre/chemin/inventaire.
+- Indexation : `rag_source_sync` catalogue tous les documents, mais n'indexe le contenu détaillé que pour les chunks taggés `[always]`, `[important]`, `[routine]` ou `[fresh]`; les documents non taggés restent localisables par titre/chemin/inventaire.
 - Listes : `rag_checklist_add` remplace l'ancien usage de `todos` pour les ajouts simples en écrivant des entrées Markdown `- [ ] ...` dans une source ou liste RAG.
 - Impact : l'ancien skill `todos` est retiré ; les listes/notes Markdown deviennent des sources RAG.
 
@@ -393,10 +590,10 @@ Implémentation :
 - Règle secret : `provider_save` refuse les clés brutes et accepte seulement `api_key_ref` (`env:`, `file:` ou `secret:`). Les anciennes clés brutes restent compatibles mais sont masquées dans les sorties.
 - Impact : l'agent peut gérer les providers courants sans casser la fluidité du chat ni exposer de secret au modèle.
 
-## 2026-05-11 — Dreaming et daily exposés comme ToolEntry
-- Décision : exposer le moteur mémoire via `dreaming_run` et `daily_digest`, construits dynamiquement par session avec provider, mémoire, skills et projet courant.
+## 2026-05-11 — Dreaming exposé comme ToolEntry
+- Décision : exposer le moteur mémoire via `dreaming_run`, construit dynamiquement par session avec provider, mémoire, skills et projet courant.
 - Principe : les tools retournent des `ToolResult` et artefacts Markdown ; le modèle garde la reformulation finale.
-- Impact : `/dream`, `/daily`, le scheduler et les appels modèle s'appuient sur le même wrapper, sans dupliquer le moteur `marius.dreaming.engine`.
+- Impact : `/dream`, le scheduler et les appels modèle s'appuient sur le même wrapper, sans dupliquer le moteur `marius.dreaming.engine`.
 
 ## 2026-05-09 — Observations courtes de session
 - Décision : ajouter une couche d’observations de session non persistante, dérivée des résultats d’outils vérifiés.
@@ -429,8 +626,8 @@ Implémentation :
 ## 2026-05-08 — Suppression du mode local/global — capacités progressives
 - Décision : pas de distinction local/global. Marius a un seul mode ; les fonctionnalités avancées s'activent via des skills.
 - Règle : `marius` se lance toujours dans le répertoire courant. La mémoire (project_store + memory.db) est active dans tous les cas.
-- Ce qui appartient au skill `assistant` (et non à la config de base) : workspace, USER.md, agents nommés multiples, gateway constant, dreaming planifié, daily planifié.
-- Pourquoi : workspace + gateway + dreaming + daily sont interdépendants — ils forment un bloc cohérent qui n'a de sens que si l'agent tourne en permanence. Les packager comme skill est plus propre que de les cacher derrière un mode.
+- Ce qui appartient au skill `assistant` (et non à la config de base) : workspace, USER.md, agents nommés multiples, gateway constant, dreaming planifié.
+- Pourquoi : workspace + gateway + dreaming sont interdépendants — ils forment un bloc cohérent qui n'a de sens que si l'agent tourne en permanence. Les packager comme skill est plus propre que de les cacher derrière un mode.
 - Impact : `MariusConfig` n'a plus de champ `mode` ni `workspace`. Le wizard `marius setup` ne pose plus la question local/global. USER.md n'est pas créé à l'install de base.
 
 ## 2026-05-08 — Architecture mémoire : store illimité + injection sélective
@@ -440,9 +637,9 @@ Implémentation :
 - Pourquoi : un projet dormant doit conserver sa mémoire sans polluer les autres sessions ; la sélectivité se fait à l’injection, pas au stockage.
 - Impact : `memory_store` reçoit les champs `scope` et `project_path` ; une méthode `get_active_context(cwd)` remplace l’injection par recherche FTS5 par tour.
 
-## 2026-05-08 — Dreaming et daily comme outils agent
-- Décision : dreaming et daily sont des `ToolEntry` dans le toolset de l’agent, pas des scripts externes.
-- Trois points d’entrée identiques : appel par l’agent, commande slash utilisateur (`/dream`, `/daily`), cron qui démarre une session isolée et déclenche le tool.
+## 2026-05-08 — Dreaming comme outil agent
+- Décision : le dreaming est un `ToolEntry` dans le toolset de l’agent, pas un script externe.
+- Trois points d’entrée identiques : appel par l’agent, commande slash utilisateur (`/dream`), cron qui démarre une session isolée et déclenche le tool.
 - Pourquoi : interface unifiée, testable, sans logique dupliquée entre CLI et scheduler.
 - Impact : le cron ne fait pas de magie — il envoie un message à l’agent qui utilise son tool normalement.
 
@@ -451,12 +648,11 @@ Implémentation :
 - Pourquoi : un dreaming sans LLM consoliderait par fréquence de rappel, ce qui éjecterait les projets dormants mais stratégiques. Seule une couche d’inférence distingue "important mais inactif" de "éphémère et révolu".
 - Impact : un appel LLM par dreaming (non par tour) ; le coût est marginal au regard du gain en pertinence sur toutes les sessions futures.
 
-## 2026-05-08 — Skills système avec dream.md et daily.md
-- Décision : chaque skill peut exposer un `dream.md` et un `daily.md` en plus de son `SKILL.md`.
+## 2026-05-08 — Skills système avec dream.md
+- Décision : chaque skill peut exposer un `dream.md` en plus de son `SKILL.md`.
 - `dream.md` : déclare les données que ce skill peut fournir au dreaming.
-- `daily.md` : déclare les données que ce skill peut surfacer dans le briefing quotidien.
-- Les skills `dreaming` et `daily` sont eux-mêmes des skills avec leur `SKILL.md` (config : heure cron, paramètres).
-- Pourquoi : la logique métier du dreaming et du daily vit dans des fichiers Markdown configurables, pas dans le code.
+- Il n'existe pas de skill dédié `dreaming` : le moteur est exposé par l'outil `dreaming_run`, tandis que les skills actifs peuvent contribuer via `DREAM.md`.
+- Pourquoi : la logique de contribution au dreaming vit dans les skills Markdown ; le moteur d'agrégation reste une capacité runtime commune.
 - Impact : le code ne contient que le pipeline d’agrégation ; le comportement est piloté par les skills.
 
 ## 2026-05-08 — Session corpus minimal

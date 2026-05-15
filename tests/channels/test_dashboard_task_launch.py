@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from marius.channels.dashboard import server as dashboard_server
@@ -116,6 +118,56 @@ def test_launch_task_keeps_queued_and_schedules_retry_on_send_failure(monkeypatc
     assert "Resource temporarily unavailable" in updated.last_error
 
 
+def test_launch_recurring_task_uses_routine_channel(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    sent: list[tuple[str, str]] = []
+    done = threading.Event()
+
+    def fake_send(agent: str, prompt: str) -> dict:
+        sent.append((agent, prompt))
+        done.set()
+        return {"ok": True}
+
+    monkeypatch.setattr(dashboard_server, "_send_routine_to_agent", fake_send)
+    monkeypatch.setattr(
+        dashboard_server,
+        "_send_to_agent",
+        lambda _agent, _message: (_ for _ in ()).throw(AssertionError("should not use task channel")),
+    )
+    task = TaskStore().create({
+        "title": "Ping",
+        "prompt": "envois moi un ping",
+        "status": "queued",
+        "agent": "main",
+        "recurring": True,
+        "cadence": "02:30",
+    })
+
+    status, payload = dashboard_server._launch_task(TaskStore(), task.id)
+
+    assert status == 202
+    assert payload["ok"] is True
+    assert payload["routine"] is True
+    assert done.wait(1.0)
+    assert sent == [("main", "envois moi un ping")]
+    deadline = time.monotonic() + 1.0
+    while True:
+        updated = TaskStore().load()[0]
+        if any(event.get("kind") == "launched" for event in updated.events):
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.01)
+    assert updated.status == "queued"
+    assert updated.last_error == ""
+    assert any(
+        event.get("kind") == "launched"
+        and event.get("channel") == "routine"
+        and event.get("manual") is True
+        for event in updated.events
+    )
+
+
 def test_launch_task_prepares_new_project_marker(monkeypatch, tmp_path) -> None:
     marius_home = tmp_path / ".marius"
     projects_root = tmp_path / "Documents" / "projets"
@@ -172,17 +224,3 @@ def test_launch_task_new_project_marker_requires_name(monkeypatch, tmp_path) -> 
     assert payload["ok"] is False
     assert "no project name" in payload["error"]
 
-
-def test_queue_patch_with_agent_should_trigger_launch() -> None:
-    task = type("TaskLike", (), {"recurring": False, "system": False, "agent": "main"})()
-    assert dashboard_server._should_launch_after_queue_patch(task, {"status": "queued"}, previous_status="backlog") is True
-
-
-def test_queue_patch_without_agent_should_not_trigger_launch() -> None:
-    task = type("TaskLike", (), {"recurring": False, "system": False, "agent": ""})()
-    assert dashboard_server._should_launch_after_queue_patch(task, {"status": "queued"}) is False
-
-
-def test_queue_patch_from_running_should_not_trigger_launch() -> None:
-    task = type("TaskLike", (), {"recurring": False, "system": False, "agent": "main"})()
-    assert dashboard_server._should_launch_after_queue_patch(task, {"status": "queued"}, previous_status="running") is False

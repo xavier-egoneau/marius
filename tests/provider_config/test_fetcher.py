@@ -13,6 +13,7 @@ from marius.provider_config.fetcher import (
     fetch_chatgpt_oauth_models,
     fetch_models,
 )
+from marius.provider_config.registry import normalize_base_url, requires_api_key_for_base_url
 
 
 def _openai_entry() -> ProviderEntry:
@@ -61,11 +62,60 @@ def test_parse_openai_response():
     assert "text-embedding-3-large" not in models
 
 
+def test_openai_root_base_url_is_normalized_for_model_fetch():
+    entry = _openai_entry()
+    entry.base_url = "https://api.openai.com"
+    body = {"data": [{"id": "gpt-4o"}]}
+    seen: list[str] = []
+
+    def fake_urlopen(req, timeout=0):
+        seen.append(req.full_url)
+        return _mock_urlopen(body)
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        models = fetch_models(entry)
+
+    assert seen == ["https://api.openai.com/v1/models"]
+    assert models == ["gpt-4o"]
+
+
+def test_normalize_base_url_only_adds_v1_for_official_openai_root():
+    assert normalize_base_url(ProviderKind.OPENAI, "https://api.openai.com") == "https://api.openai.com/v1"
+    assert normalize_base_url(ProviderKind.OPENAI, "https://api.openai.com/v1/") == "https://api.openai.com/v1"
+    assert normalize_base_url(ProviderKind.OPENAI, "https://example.com") == "https://example.com"
+    assert normalize_base_url(ProviderKind.OLLAMA, "http://localhost:11434/") == "http://localhost:11434"
+    assert normalize_base_url(ProviderKind.OLLAMA, "https://ollama.com/api") == "https://ollama.com"
+    assert requires_api_key_for_base_url(ProviderKind.OPENAI, "https://api.openai.com/v1") is True
+    assert requires_api_key_for_base_url(ProviderKind.OLLAMA, "http://localhost:11434") is False
+    assert requires_api_key_for_base_url(ProviderKind.OLLAMA, "https://ollama.com/api") is True
+
+
 def test_parse_ollama_response():
     body = {"models": [{"name": "llama3:latest"}, {"name": "mistral:7b"}]}
     with patch("urllib.request.urlopen", return_value=_mock_urlopen(body)):
         models = fetch_models(_ollama_entry())
     assert models == ["llama3:latest", "mistral:7b"]
+
+
+def test_ollama_cloud_api_base_is_normalized_for_model_fetch():
+    entry = _ollama_entry()
+    entry.base_url = "https://ollama.com/api"
+    entry.api_key = "ollama-test"
+    body = {"models": [{"name": "gpt-oss:120b"}]}
+    seen: list[str] = []
+    auth_headers: list[str] = []
+
+    def fake_urlopen(req, timeout=0):
+        seen.append(req.full_url)
+        auth_headers.append(req.headers.get("Authorization", ""))
+        return _mock_urlopen(body)
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        models = fetch_models(entry)
+
+    assert seen == ["https://ollama.com/api/tags"]
+    assert auth_headers == ["Bearer ollama-test"]
+    assert models == ["gpt-oss:120b"]
 
 
 def test_empty_response_returns_empty_list():

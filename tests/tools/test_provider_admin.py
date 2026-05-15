@@ -27,6 +27,63 @@ def test_provider_save_creates_provider_with_secret_ref(tmp_path):
     assert result.data["provider"]["api_key_ref"] == "secret:openai"
 
 
+def test_provider_save_normalizes_official_openai_root_url(tmp_path):
+    provider_path = tmp_path / "providers.json"
+    tools = make_provider_admin_tools(provider_path=provider_path)
+
+    result = tools["provider_save"].handler(
+        {
+            "name": "openai",
+            "provider": "openai",
+            "auth_type": "api",
+            "base_url": "https://api.openai.com",
+            "api_key_ref": "secret:openai",
+            "model": "gpt-4o",
+        }
+    )
+
+    providers = ProviderStore(path=provider_path).load()
+    assert result.ok is True
+    assert providers[0].base_url == "https://api.openai.com/v1"
+
+
+def test_provider_save_normalizes_ollama_cloud_api_base(tmp_path):
+    provider_path = tmp_path / "providers.json"
+    tools = make_provider_admin_tools(provider_path=provider_path)
+
+    result = tools["provider_save"].handler(
+        {
+            "name": "ollama-cloud",
+            "provider": "ollama",
+            "auth_type": "api",
+            "base_url": "https://ollama.com/api",
+            "api_key_ref": "secret:ollama",
+            "model": "gpt-oss:120b",
+        }
+    )
+
+    providers = ProviderStore(path=provider_path).load()
+    assert result.ok is True
+    assert providers[0].base_url == "https://ollama.com"
+
+
+def test_provider_save_requires_key_ref_for_ollama_cloud(tmp_path):
+    tools = make_provider_admin_tools(provider_path=tmp_path / "providers.json")
+
+    result = tools["provider_save"].handler(
+        {
+            "name": "ollama-cloud",
+            "provider": "ollama",
+            "auth_type": "api",
+            "base_url": "https://ollama.com",
+            "model": "gpt-oss:120b",
+        }
+    )
+
+    assert result.ok is False
+    assert result.error == "missing_api_key_ref"
+
+
 def test_provider_save_refuses_raw_api_key(tmp_path):
     tools = make_provider_admin_tools(provider_path=tmp_path / "providers.json")
 

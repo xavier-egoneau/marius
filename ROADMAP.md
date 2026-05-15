@@ -8,18 +8,17 @@ vision Ollama locale · permissions safe/limited/power · mémoire SQLite+FTS5 a
 session corpus · logs locaux · onboarding skill · config agents · SearxNG auto-hébergé ·
 observations courtes de session · postures agent conditionnelles ·
 skills reader + skill_view + marius skills CLI · gateway (socket Unix, session persistante) ·
-interface web · canal Telegram · service systemd user · dreaming + daily (LLM direct,
-/dream /daily) · skill dev (plan/dev/commit/review/test/resume/pr) · subagents dev ·
+interface web · canal Telegram · service systemd user · dreaming (LLM direct,
+/dream) · skill dev (plan/dev/commit/review/test/resume/pr) · subagents dev ·
 outil `open_marius_web` · host diagnostics/action tools (`host_status`, `host_doctor`,
 `host_logs`, `host_agent_*`, `host_telegram_configure`, `host_gateway_restart`) · self-update proposal tools
 · persistent watch topics avec limite douce · projet actif explicite (`project_list`, `project_set_active`)
 · commandes dev projet (`/projects`, `/project`, `/tasks`, `/decision`, `/check`)
-· approvals/secrets administrables · provider config tools · dreaming/daily ToolEntry
+· approvals/secrets administrables · provider config tools · dreaming ToolEntry
 · artefacts cross-canaux via rendu de sortie de tour commun · skills utilisateur migrés
 `caldav_calendar`, `sentinelle` · RAG Markdown v1 (`rag_source_*`,
 `rag_search`, `rag_get`, `rag_promote_to_memory`) · historique web des conversations
-visibles canoniques · skill `watch` pour sujets de veille daily · daily coaché
-avec footer tokens et modèle dédié optionnel
+visibles canoniques · skill `watch` pour sujets de veille · routines pour briefings récurrents
 
 ---
 
@@ -37,7 +36,7 @@ perd pas de capacités importantes tout en conservant sa logique v2.
 
 - [x] **Parité coeur agentique** — boucle provider/tools, permissions, session courte,
       compaction, filesystem (lecture/liste/écriture/mkdir/move), shell, web fetch/search,
-      vision, mémoire injectée, skills chargés, gateway, web, Telegram, dreaming/daily,
+      vision, mémoire injectée, skills chargés, gateway, web, Telegram, dreaming,
       dev workers.
 - [x] **Host/admin diagnostics** — porter la tranche read-only du skill Maurice `host` :
       `host_status`, `host_doctor`, `host_logs`, en gardant le modèle responsable de la
@@ -69,18 +68,18 @@ perd pas de capacités importantes tout en conservant sa logique v2.
       rollback.
 - [x] **Veille persistante initiale** — porter les watch topics façon Marius :
       `watch_add`, `watch_list`, `watch_remove`, `watch_run`, store JSON standalone,
-      rapports persistés, contribution au dreaming/daily sans recherche web cachée.
+      rapports persistés, contribution aux routines de briefing sans recherche web cachée.
 - [x] **Veille automatisée initiale** — brancher les topics non manuels au scheduler
-      assistant avec cadences (`hourly`, `daily`, `weekly`, `Nm`, `Nh`, `Nd`),
+      assistant avec cadences (`hourly`, `1d`, `weekly`, `Nm`, `Nh`, `Nd`),
       déduplication par URL et notifications Telegram opt-in via tag `notify`/`telegram`.
 - [x] **Veille avancée** — améliorer la qualité des rapports : scoring de nouveauté,
       résumé LLM par topic, configuration fine des notifications et backfill contrôlé.
-- [x] **Skill veille daily** — guider l'agent pour transformer “ajoute X à mes sujets
+- [x] **Skill veille** — guider l'agent pour transformer “ajoute X à mes sujets
       de veille” en `watch_add`, puis utiliser les rapports comme sources de synthèse
       sans imprimer le rapport brut.
 - [x] **Veille bornée UX** — prévenir avant d'ajouter un 9e sujet planifié actif,
       demander confirmation, puis autoriser l'ajout explicite sans bloquer durablement.
-- [x] **Veille daily bornée en temps** — pour un daily, limiter `watch_run`
+- [x] **Veille bornée en temps pour briefings** — pour un briefing, limiter `watch_run`
       à peu de résultats, sans résumé LLM intermédiaire, avec timeout court et
       un seul retry par sujet.
 - [x] **Explore tools** — ajouter des outils standalone `tree`, `grep` et `summary`
@@ -89,11 +88,10 @@ perd pas de capacités importantes tout en conservant sa logique v2.
       `/projects`, `/project`, `/tasks`, `/decision`, `/check` en plus de
       `/plan`, `/dev`, `/test`, `/review`, `/commit`, `/resume`, `/pr`, adossées aux
       tools génériques `project_list` et `project_set_active`.
-- [x] **Daily/dreaming comme ToolEntry optionnels** — exposer `dreaming_run` et
-      `daily_digest` au modèle quand c'est utile, tout en gardant `/dream`, `/daily`
-      et le scheduler comme surfaces directes.
-- [x] **Daily optimisable** — afficher l'usage tokens en bas du daily et permettre
-      un modèle dédié via `daily_model` ou un override ponctuel de `daily_digest`.
+- [x] **Dreaming comme ToolEntry optionnel** — exposer `dreaming_run`
+      au modèle quand c'est utile, tout en gardant `/dream` et le scheduler comme surfaces directes.
+- [x] **Briefings par routines** — traiter les briefings récurrents comme des tasks `recurring=true`
+      avec un prompt explicite, sans commande ni outil dédié.
 - [x] **Rappels complets** — l'outil Marius crée des rappels, mais doit aussi lister
       et annuler les rappels comme Maurice (`reminders.list`, `reminders.cancel`).
 - [x] **Mémoire consultable par outil** — exposer recherche/liste/get mémoire au modèle,
@@ -117,7 +115,7 @@ perd pas de capacités importantes tout en conservant sa logique v2.
 - [x] **Skills reader** — découverte et chargement de `~/.marius/skills/*/SKILL.md`
       dans le contexte système au démarrage REPL
 - [x] **skill_view tool** — l'agent peut lire le contenu d'un skill à la demande
-- [x] **DREAM.md / DAILY.md / core/** — parsing des contrats et commandes par skill
+- [x] **DREAM.md / core/** — parsing des contrats et commandes par skill
 - [x] **`marius skills`** CLI — lister les skills disponibles, les activer par agent
 - [x] **Commandes REPL depuis les skills** — frontmatter `commands:` + `core/<cmd>.md`
 - [ ] **AGENTS.md global** — créer `~/.marius/AGENTS.md` conventions par défaut
@@ -125,23 +123,21 @@ perd pas de capacités importantes tout en conservant sa logique v2.
 
 ---
 
-### 2. Mémoire — Dreaming & Daily
+### 2. Mémoire — Dreaming
 
 - [x] **Observations courtes de session** — faits vérifiés par les outils
       injectés au tour suivant sans persister dans `memory.db`
 - [x] **Dreaming** — agrège memory.db + DREAM.md des skills + DECISIONS/ROADMAP
       → appel LLM unique → opérations JSON appliquées au store
-- [x] **Daily** — mémoires + DAILY.md des skills → briefing Markdown (appel LLM direct)
 - [x] **Archive sessions** — fichiers session archivés après dreaming
-- [x] **Commandes REPL** `/dream`, `/daily` — déclenchement manuel
+- [x] **Commandes REPL** `/dream` — déclenchement manuel
 - [x] **Contenu des sessions dans le corpus** — sauvegarder un transcript lisible
       (user + assistant, sans tool calls) pour que le dreaming puisse analyser les conversations,
       pas seulement le store mémoire
 - [x] **Rapport de dream persisté** — sauvegarder chaque dream en JSON
-      (`~/.marius/dreams/dream_<ts>.json`) ; le daily lit le dernier rapport
-      au lieu de recalculer depuis zéro
+      (`~/.marius/dreams/dream_<ts>.json`)
 - [x] **Cron scheduling** — scheduler dans le gateway (jobs.json persistant, reprise après
-      redémarrage, poll 60s, `dream_time`/`daily_time` dans `AgentConfig`, daily mis en cache)
+      redémarrage, poll 60s, puis tâches récurrentes dans le task store)
 
 ---
 
@@ -200,8 +196,7 @@ Le subagent tourne en isolation, rend son résultat au parent, puis s'arrête.
 - [x] **Host web** — API HTTP mince + interface web minimale (chat)
 - [x] **Canal Telegram** — polling long (stdlib, pas de dépendance externe), thread intégré
       dans le gateway, turn_lock pour sérialiser CLI + Telegram sur la même session.
-      Push daily automatique si chat_id mémorisé.
-- [x] **Commandes Telegram** — `/start` `/help` `/new` `/daily` `/status`
+- [x] **Commandes Telegram** — `/start` `/help` `/new` `/status`
 - [x] **`marius telegram setup`** — wizard (token BotFather, allowed_users, agent)
 - [x] **`marius telegram status`** — affiche bot username, agent, users autorisés
 - [x] **Multi-canal** — même session accessible depuis CLI, web et Telegram
@@ -218,7 +213,7 @@ Le subagent tourne en isolation, rend son résultat au parent, puis s'arrête.
       SearxNG actif ? config valide ? permissions cohérentes ? SOUL.md présent ?
       Affiche un rapport clair avec les correctifs suggérés.
 - [ ] **`marius dashboard`** — vue synthétique de l'état courant : agents configurés,
-      sessions récentes, taille mémoire, dernière exécution dreaming/daily,
+      sessions récentes, taille mémoire, dernière exécution dreaming,
       SearxNG status. Inspiré du dashboard Maurice.
 - [ ] **`marius update`** — mise à jour de Marius lui-même
 

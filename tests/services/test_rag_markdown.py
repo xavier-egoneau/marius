@@ -56,7 +56,7 @@ Old note.
 
 def test_parse_markdown_file_cleans_inline_tags_from_titles(tmp_path):
     path = tmp_path / "courses.md"
-    path.write_text("# Courses [important], [daily]\n\n- Cafe\n", encoding="utf-8")
+    path.write_text("# Courses [important], [routine]\n\n- Cafe\n", encoding="utf-8")
 
     doc = parse_markdown_file(path)
 

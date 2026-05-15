@@ -98,8 +98,7 @@ Après traitement par le dreaming, les fichiers sont archivés (pas supprimés).
 ~/.marius/skills/
 └── agenda/
     ├── SKILL.md     ← instructions d'utilisation + config du skill
-    ├── dream.md     ← données que ce skill fournit au dreaming
-    └── daily.md     ← données que ce skill fournit au daily
+    └── dream.md     ← données que ce skill fournit au dreaming
 ```
 
 ### SKILL.md — frontmatter
@@ -117,21 +116,14 @@ version: 1.0.0
 Déclare au dreaming les sources de données que ce skill peut fournir :
 informations sur les événements passés, récurrences, projets planifiés.
 
-### daily.md — contrat daily
-
-Déclare au daily ce que ce skill peut surfacer aujourd'hui :
-prochains événements, rappels, deadlines.
-
 ### Skills système
 
-Les skills `dreaming` et `daily` sont eux-mêmes des skills avec leur `SKILL.md` :
+Le dreaming est piloté par le runtime et les skills actifs :
 
 ```
 ~/.marius/skills/
-├── dreaming/
-│   └── SKILL.md   ← config (heure cron, nb sessions à digérer, limites)
-└── daily/
-    └── SKILL.md   ← config (heure cron, sources à consulter, format du briefing)
+└── dreaming/
+    └── SKILL.md   ← config (heure cron, nb sessions à digérer, limites)
 ```
 
 ---
@@ -172,7 +164,7 @@ Un seul appel avec :
     { "op": "replace", "memory_id": 42,    "content": "..." },
     { "op": "remove",  "memory_id": 17 }
   ],
-  "daily_handoff": "Résumé synthétique pour le daily de demain..."
+  "notes": "Synthèse utile pour les prochains tours ou routines..."
 }
 ```
 
@@ -191,26 +183,18 @@ Le dreaming **organise** plus qu'il ne compresse :
 
 ---
 
-## Daily tool
+## Briefings par routines
 
-### Déclenchement
+Il n'y a pas de commande ni d'outil dédié au briefing.
 
-- Manuel : `/daily` ou appel direct par l'agent
-- Automatique : cron à l'heure configurée dans `daily/SKILL.md`
+Un briefing est une tâche récurrente ordinaire :
 
-### Pipeline d'entrées
+- le prompt de la routine décrit les sources à consulter et le format attendu ;
+- la cadence de la task déclenche l'envoi au gateway ;
+- l'agent compose la réponse avec les outils disponibles, comme dans une conversation normale.
 
-```
-~/.marius/sessions/dreaming/YYYY-MM-DD.md  ← handoff du dernier dreaming
-daily/SKILL.md                              ← instructions + config
-skills actifs → daily.md de chaque skill   ← données du jour à surfacer
-```
-
-### Sortie
-
-Briefing Markdown affiché au prochain démarrage du REPL ou sur `/daily`.
-Contenu piloté par les instructions de `daily/SKILL.md`.
-Le briefing n'est **pas** stocké dans le memory store — il est éphémère.
+Les données utiles vivent dans la mémoire, les sources RAG, les rapports de veille
+ou les outils métier. La routine ne crée pas de second système de contexte.
 
 ---
 
@@ -255,8 +239,8 @@ plus pertinente et plus stable pour toutes les sessions futures.
 ## Ordre d'implémentation
 
 1. **`project_store`** — persistance des projets récents + écriture auto du fichier session au REPL exit
-2. **Skills reader** — lecture de `~/.marius/skills/*/SKILL.md` + `dream.md` + `daily.md`
+2. **Skills reader** — lecture de `~/.marius/skills/*/SKILL.md` + `dream.md`
 3. **Migration `memory_store`** — ajout des champs `scope` et `project_path`, méthode `get_active_context(cwd)`
 4. **Dreaming tool** — agrège entrées, appel LLM, applique opérations JSON
-5. **Daily tool** — agrège handoff + skills, produit briefing
-6. **Cron** — déclenche dreaming/daily aux heures configurées dans leurs skills
+5. **Routines** — tasks récurrentes avec prompt explicite
+6. **Cron** — déclenche dreaming et routines aux heures configurées

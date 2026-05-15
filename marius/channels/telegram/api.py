@@ -10,7 +10,7 @@ import re
 from html import escape
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 _BASE = "https://api.telegram.org/bot{token}/{method}"
@@ -62,6 +62,29 @@ def get_updates(
     """Long polling. Retourne la liste des updates."""
     resp = _get(token, "getUpdates", {"offset": offset, "timeout": timeout})
     return resp.get("result", []) if resp else []
+
+
+def get_file(token: str, file_id: str) -> dict[str, Any] | None:
+    """Retourne les métadonnées d'un fichier Telegram."""
+    resp = _get(token, "getFile", {"file_id": file_id})
+    return resp.get("result") if resp else None
+
+
+def download_file(token: str, file_path: str, *, max_bytes: int = 20 * 1024 * 1024) -> bytes | None:
+    """Télécharge un fichier Telegram en mémoire, borné en taille."""
+    safe_path = quote(file_path.lstrip("/"), safe="/")
+    url = f"https://api.telegram.org/file/bot{token}/{safe_path}"
+    try:
+        with urlopen(url, timeout=_TIMEOUT) as resp:
+            content_length = resp.headers.get("Content-Length")
+            if content_length and int(content_length) > max_bytes:
+                return None
+            data = resp.read(max_bytes + 1)
+    except (URLError, OSError, ValueError):
+        return None
+    if len(data) > max_bytes:
+        return None
+    return data
 
 
 def send_message(token: str, chat_id: int, text: str) -> bool:

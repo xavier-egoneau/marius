@@ -12,16 +12,70 @@
 
   <!-- ── nav bar ───────────────────────────────────────────────── -->
   <nav id="nav">
-    <span id="nav-logo">M</span>
+    <svg id="nav-logo" viewBox="0 0 30.8 22.4" xmlns="http://www.w3.org/2000/svg" aria-label="Marius">
+      <!-- admin invader pixel art, 11×8 @ px=2.8 -->
+      <rect x="2.6"  y="0"    width="2.6" height="2.6"/>
+      <rect x="24.6" y="0"    width="2.6" height="2.6"/>
+      <rect x="5.2"  y="2.6"  width="2.6" height="2.6"/>
+      <rect x="22.0" y="2.6"  width="2.6" height="2.6"/>
+      <rect x="2.6"  y="5.2"  width="2.6" height="2.6"/>
+      <rect x="5.2"  y="5.2"  width="2.6" height="2.6"/>
+      <rect x="7.8"  y="5.2"  width="2.6" height="2.6"/>
+      <rect x="10.4" y="5.2"  width="2.6" height="2.6"/>
+      <rect x="13.0" y="5.2"  width="2.6" height="2.6"/>
+      <rect x="15.6" y="5.2"  width="2.6" height="2.6"/>
+      <rect x="18.2" y="5.2"  width="2.6" height="2.6"/>
+      <rect x="20.8" y="5.2"  width="2.6" height="2.6"/>
+      <rect x="23.4" y="5.2"  width="2.6" height="2.6"/>
+      <rect x="0"    y="7.8"  width="2.6" height="2.6"/>
+      <rect x="2.6"  y="7.8"  width="2.6" height="2.6"/>
+      <rect x="7.8"  y="7.8"  width="2.6" height="2.6"/>
+      <rect x="10.4" y="7.8"  width="2.6" height="2.6"/>
+      <rect x="13.0" y="7.8"  width="2.6" height="2.6"/>
+      <rect x="15.6" y="7.8"  width="2.6" height="2.6"/>
+      <rect x="18.2" y="7.8"  width="2.6" height="2.6"/>
+      <rect x="23.4" y="7.8"  width="2.6" height="2.6"/>
+      <rect x="26.0" y="7.8"  width="2.6" height="2.6"/>
+      <rect x="0"    y="10.4" width="2.6" height="2.6"/>
+      <rect x="2.6"  y="10.4" width="2.6" height="2.6"/>
+      <rect x="5.2"  y="10.4" width="2.6" height="2.6"/>
+      <rect x="7.8"  y="10.4" width="2.6" height="2.6"/>
+      <rect x="10.4" y="10.4" width="2.6" height="2.6"/>
+      <rect x="13.0" y="10.4" width="2.6" height="2.6"/>
+      <rect x="15.6" y="10.4" width="2.6" height="2.6"/>
+      <rect x="18.2" y="10.4" width="2.6" height="2.6"/>
+      <rect x="20.8" y="10.4" width="2.6" height="2.6"/>
+      <rect x="23.4" y="10.4" width="2.6" height="2.6"/>
+      <rect x="26.0" y="10.4" width="2.6" height="2.6"/>
+      <rect x="28.6" y="10.4" width="2.6" height="2.6"/>
+      <rect x="0"    y="13.0" width="2.6" height="2.6"/>
+      <rect x="5.2"  y="13.0" width="2.6" height="2.6"/>
+      <rect x="7.8"  y="13.0" width="2.6" height="2.6"/>
+      <rect x="10.4" y="13.0" width="2.6" height="2.6"/>
+      <rect x="13.0" y="13.0" width="2.6" height="2.6"/>
+      <rect x="15.6" y="13.0" width="2.6" height="2.6"/>
+      <rect x="18.2" y="13.0" width="2.6" height="2.6"/>
+      <rect x="20.8" y="13.0" width="2.6" height="2.6"/>
+      <rect x="23.4" y="13.0" width="2.6" height="2.6"/>
+      <rect x="28.6" y="13.0" width="2.6" height="2.6"/>
+      <rect x="0"    y="15.6" width="2.6" height="2.6"/>
+      <rect x="5.2"  y="15.6" width="2.6" height="2.6"/>
+      <rect x="28.6" y="15.6" width="2.6" height="2.6"/>
+      <rect x="7.8"  y="19.8" width="2.6" height="2.6"/>
+      <rect x="10.4" y="19.8" width="2.6" height="2.6"/>
+      <rect x="18.2" y="19.8" width="2.6" height="2.6"/>
+      <rect x="20.8" y="19.8" width="2.6" height="2.6"/>
+    </svg>
     <span id="nav-breadcrumb"></span>
     <div id="nav-actions"></div>
+    <button class="nav-btn" id="btn-chat" title="Ouvrir le chat">CHAT</button>
     <button class="nav-btn" id="btn-settings" title="settings">⚙</button>
   </nav>
 
   <!-- ── tab strip ─────────────────────────────────────────────── -->
   <div id="tabs">
     <button class="tab" data-view="agents">AGENTS</button>
-    <button class="tab" data-view="control">CONTROL</button>
+    <button class="tab" data-view="control">SESSIONS</button>
     <button class="tab" data-view="tasks">TASK.BOARD</button>
     <button class="tab" data-view="routines">ROUTINES.CRON</button>
     <button class="tab" data-view="skills">SKILLS</button>
@@ -53,7 +107,6 @@
   <div id="chat-panel">
     <div id="chat-header">
       <span class="dot" id="chat-status-dot"></span>
-      <span id="chat-agent-name"></span>
       <span id="chat-status-msg" style="color:var(--dim);font-size:12px;margin-left:8px"></span>
       <span style="flex:1"></span>
       <button id="chat-close">✕</button>

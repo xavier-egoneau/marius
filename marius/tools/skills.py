@@ -36,8 +36,6 @@ def _skill_view(arguments: dict[str, Any]) -> ToolResult:
     parts = [skill.content]
     if skill.dream_content:
         parts.append(f"## Contrat dreaming\n{skill.dream_content}")
-    if skill.daily_content:
-        parts.append(f"## Contrat daily\n{skill.daily_content}")
     for fname, fcontent in skill.core_files.items():
         parts.append(f"## core/{fname}\n{fcontent}")
     full = "\n\n".join(parts)

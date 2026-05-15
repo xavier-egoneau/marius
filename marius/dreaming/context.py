@@ -1,4 +1,4 @@
-"""Collecte et structure du contexte d'entrée pour le dreaming et le daily."""
+"""Collecte et structure du contexte d'entrée pour le dreaming."""
 
 from __future__ import annotations
 

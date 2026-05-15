@@ -1,4 +1,4 @@
-"""Dreaming and daily tools.
+"""Dreaming tools.
 
 Dynamic ToolEntry wrappers around the existing dreaming engine. They need the
 current provider, memory store and project root, so they are built by the tool
@@ -97,5 +97,4 @@ def _markdown_summary(markdown: str, *, limit: int = 400) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "…"
-
 

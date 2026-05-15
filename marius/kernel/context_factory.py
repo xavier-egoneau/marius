@@ -5,7 +5,9 @@ Brique standalone — utilisée par le REPL et le gateway.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import re
 
 from .context_builder import ContextBuildInput, ContextBuilder, ContextSource
 from .posture import ASSISTANT_SKILL
@@ -34,6 +36,25 @@ def needs_onboarding(marius_home: Path | None = None) -> bool:
     return False
 
 
+def _doc_path_with_agent_override(home: Path, filename: str, agent_name: str | None) -> Path:
+    agent_path = _agent_workspace_doc_path(home, agent_name, filename)
+    if agent_path is not None and agent_path.exists():
+        return agent_path
+    return home / filename
+
+
+def _agent_workspace_doc_path(home: Path, agent_name: str | None, filename: str) -> Path | None:
+    if not agent_name or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,63}", agent_name):
+        return None
+    try:
+        workspace_root = (home / "workspace").resolve(strict=False)
+        path = (workspace_root / agent_name / filename).resolve(strict=False)
+        path.relative_to(workspace_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path
+
+
 def build_system_prompt(
     project_root: Path,
     active_skills: list[str] | None = None,
@@ -55,7 +76,12 @@ def build_system_prompt(
     assistant_enabled = ASSISTANT_SKILL in set(active_skills or [])
     dev_context_active = not assistant_enabled or dev_posture
     sources: list[ContextSource] = [
-        ContextSource(key="soul",   title="Identité philosophique", path=home / "SOUL.md",   required=False),
+        ContextSource(
+            key="soul",
+            title="Identité philosophique",
+            path=_doc_path_with_agent_override(home, "SOUL.md", agent_name),
+            required=False,
+        ),
         ContextSource(key="agents", title="Conventions",            path=home / "AGENTS.md", required=False),
     ]
 
@@ -80,12 +106,22 @@ def build_system_prompt(
 
     if assistant_enabled:
         sources.extend([
-            ContextSource(key="identity", title="Identité opérationnelle", path=home / "IDENTITY.md", required=False),
-            ContextSource(key="user",     title="Profil utilisateur",      path=home / "USER.md",     required=False),
+            ContextSource(
+                key="identity",
+                title="Identité opérationnelle",
+                path=_doc_path_with_agent_override(home, "IDENTITY.md", agent_name),
+                required=False,
+            ),
+            ContextSource(
+                key="user",
+                title="Profil utilisateur",
+                path=_doc_path_with_agent_override(home, "USER.md", agent_name),
+                required=False,
+            ),
         ])
 
     onboarding_skill = home / "skills" / "onboarding" / "SKILL.md"
-    if assistant_enabled and not dev_posture and needs_onboarding(home):
+    if assistant_enabled and not dev_posture and _needs_onboarding_for_agent(home, agent_name):
         sources.append(ContextSource(
             key="onboarding",
             title="Onboarding",
@@ -130,6 +166,10 @@ def build_system_prompt(
             "sauf si l'utilisateur les demande explicitement."
         )
 
+    project_context = _project_context_hint(home)
+    if project_context:
+        preamble = f"{preamble}\n\n{project_context}"
+
     builder = ContextBuilder(reader=_FileReader())
     bundle  = builder.build(ContextBuildInput(preamble=preamble, sources=sources))
     loaded_keys: list[str] = [s.key for s in bundle.loaded_sources]
@@ -150,6 +190,32 @@ def build_system_prompt(
     return markdown, loaded_keys + skill_keys
 
 
+def _project_context_hint(home: Path) -> str:
+    try:
+        raw = json.loads((home / "active_project.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        active = ""
+        name = ""
+    else:
+        active = str(raw.get("path") or "").strip()
+        name = str(raw.get("name") or "").strip()
+
+    active_line = (
+        f"- Projet actif explicite : {name or Path(active).name} ({active})."
+        if active
+        else "- Aucun projet actif explicite n'est défini."
+    )
+    return (
+        "## Contexte projet explicite\n"
+        f"{active_line}\n"
+        "- Si l'utilisateur demande de travailler sur un projet connu différent du projet actif, "
+        "utilise `project_list` pour lever l'ambiguïté puis `project_set_active` quand l'intention "
+        "de basculer le travail est claire.\n"
+        "- Si un autre projet est seulement cité comme comparaison, dépendance ou référence, "
+        "ne change pas le projet actif sans confirmation."
+    )
+
+
 def _agent_posture_path(home: Path, agent_name: str | None, posture: str) -> Path | None:
     if not agent_name:
         return None
@@ -160,3 +226,13 @@ def _agent_posture_path(home: Path, agent_name: str | None, posture: str) -> Pat
     except (OSError, RuntimeError, ValueError):
         return None
     return path
+
+
+def _needs_onboarding_for_agent(home: Path, agent_name: str | None) -> bool:
+    for filename in ("IDENTITY.md", "USER.md"):
+        path = _doc_path_with_agent_override(home, filename, agent_name)
+        if not path.exists():
+            return True
+        if not path.read_text(encoding="utf-8").strip():
+            return True
+    return False

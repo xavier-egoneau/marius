@@ -46,7 +46,7 @@ def main() -> None:
         agent_name=args.agent,
         entry=entry,
         agent_config=agent_cfg,
-        permission_mode=config.permission_mode,
+        permission_mode=agent_cfg.permission_mode,
     )
     server.serve()
 

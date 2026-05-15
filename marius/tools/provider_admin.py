@@ -15,7 +15,7 @@ from marius.kernel.contracts import ToolResult
 from marius.kernel.tool_router import ToolDefinition, ToolEntry
 from marius.provider_config.contracts import AuthType, ProviderEntry
 from marius.provider_config.fetcher import ModelFetchError, fetch_models
-from marius.provider_config.registry import PROVIDER_REGISTRY
+from marius.provider_config.registry import PROVIDER_REGISTRY, normalize_base_url, requires_api_key_for_base_url
 from marius.provider_config.secrets import public_secret_label
 from marius.provider_config.store import ProviderStore
 
@@ -69,11 +69,14 @@ def make_provider_admin_tools(
         if auth_type not in defn.supported_auth_types:
             return ToolResult(tool_call_id="", ok=False, summary=f"Unsupported auth_type for {provider}: {auth_type}", error="unsupported_auth_type")
 
-        base_url = _optional_text(arguments.get("base_url")) or (existing.base_url if existing else defn.default_base_url)
+        base_url = normalize_base_url(
+            provider,
+            _optional_text(arguments.get("base_url")) or (existing.base_url if existing else defn.default_base_url),
+        )
         model = _optional_text(arguments.get("model")) or (existing.model if existing else "")
         api_key_ref = _optional_text(arguments.get("api_key_ref"))
         api_key = api_key_ref if api_key_ref is not None else (existing.api_key if existing else "")
-        if defn.requires_api_key and auth_type == AuthType.API and not api_key:
+        if auth_type == AuthType.API and requires_api_key_for_base_url(provider, base_url) and not api_key:
             return ToolResult(tool_call_id="", ok=False, summary="`api_key_ref` is required for this provider.", error="missing_api_key_ref")
         if api_key_ref is not None and not api_key_ref.startswith(("env:", "file:", "secret:")):
             return ToolResult(tool_call_id="", ok=False, summary="`api_key_ref` must be env:NAME, file:/path or secret:NAME.", error="invalid_api_key_ref")

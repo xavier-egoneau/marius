@@ -8,10 +8,12 @@ from typing import Any
 
 from .contracts import (
     DEFAULT_TOOLS,
+    SKILL_GATED_TOOLS,
     AgentConfig,
     MariusConfig,
+    disabled_tools_for_active_tools,
     default_tools_for_role,
-    effective_tools_for_role,
+    normalize_disabled_tools,
 )
 
 _MARIUS_HOME = Path.home() / ".marius"
@@ -354,9 +356,10 @@ def _to_dict(config: MariusConfig) -> dict[str, Any]:
                 "provider_id": agent.provider_id,
                 "model": agent.model,
                 "role": agent.role,
-                "tools": agent.tools,
+                "disabled_tools": list(agent.disabled_tools or []),
                 "skills": agent.skills,
                 "scheduler_enabled": agent.scheduler_enabled,
+                "permission_mode": agent.permission_mode,
             }
             for name, agent in config.agents.items()
         },
@@ -373,10 +376,15 @@ def _from_dict(raw: dict[str, Any]) -> MariusConfig:
             model=data["model"],
             # migration : si role absent, l'agent principal est admin
             role=role,
-            tools=_normalize_tools(data.get("tools"), role=role),
+            tools=None,
+            disabled_tools=_normalize_disabled_tools(
+                data.get("disabled_tools"),
+                data.get("tools"),
+                role=role,
+            ),
             skills=data.get("skills", []),
             scheduler_enabled=bool(data.get("scheduler_enabled", True)),
-            # dream_time/daily_time ignorés — gérés dans les tâches récurrentes (routines)
+            permission_mode=data.get("permission_mode", raw.get("permission_mode", "limited")),
         )
     return MariusConfig(
         permission_mode=raw.get("permission_mode", "limited"),
@@ -385,10 +393,18 @@ def _from_dict(raw: dict[str, Any]) -> MariusConfig:
     )
 
 
-def _normalize_tools(raw_tools: Any, *, role: str) -> list[str]:
+def _normalize_disabled_tools(raw_disabled: Any, raw_tools: Any, *, role: str) -> list[str]:
+    if isinstance(raw_disabled, list):
+        return normalize_disabled_tools([str(tool) for tool in raw_disabled], role)
     if not isinstance(raw_tools, list):
-        return default_tools_for_role(role)
+        return disabled_tools_for_active_tools(default_tools_for_role(role), role)
     tools = [str(tool) for tool in raw_tools]
+    if _is_default_like_toolset(tools, role):
+        return disabled_tools_for_active_tools(default_tools_for_role(role), role)
+    return disabled_tools_for_active_tools(tools, role)
+
+
+def _is_default_like_toolset(tools: list[str], role: str) -> bool:
     if tools in (
         DEFAULT_TOOLS,
         _PRE_VISION_DEFAULT_TOOLS,
@@ -408,5 +424,12 @@ def _normalize_tools(raw_tools: Any, *, role: str) -> list[str]:
         _PRE_HOST_RESTART_SECRET_FILE_SELF_UPDATE_APPLY_DEFAULT_TOOLS,
         _PRE_RAG_DEFAULT_TOOLS,
     ):
-        return default_tools_for_role(role)
-    return effective_tools_for_role(tools, role)
+        return True
+    default = default_tools_for_role(role)
+    if not tools:
+        return False
+    selected = set(tools) - set(SKILL_GATED_TOOLS)
+    default_set = set(default)
+    if not selected <= default_set:
+        return False
+    return len(selected) >= max(20, int(len(default) * 0.75))

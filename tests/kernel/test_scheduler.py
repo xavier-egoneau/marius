@@ -21,7 +21,7 @@ from marius.storage import task_store as task_store_module
 def test_cadence_to_seconds() -> None:
     assert cadence_to_seconds("manual") is None
     assert cadence_to_seconds("hourly") == 3600
-    assert cadence_to_seconds("daily") == 86400
+    assert cadence_to_seconds("1d") == 86400
     assert cadence_to_seconds("15m") == 900
     assert cadence_to_seconds("2h") == 7200
     assert cadence_to_seconds("3d") == 259200
@@ -70,6 +70,83 @@ def test_validate_hhmm_invalid() -> None:
         validate_hhmm("")
 
 
+def test_recurring_task_create_initializes_next_run(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+
+    task = TaskStore().create({
+        "title": "Routine",
+        "recurring": True,
+        "cadence": "23:58",
+        "agent": "main",
+    })
+
+    assert task.next_run_at
+    local = datetime.fromisoformat(task.next_run_at).astimezone()
+    assert (local.hour, local.minute) == (23, 58)
+
+
+def test_recurring_task_cadence_update_refreshes_next_run(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    old_next_run = "2026-05-15T08:00:00+00:00"
+    task = TaskStore().create({
+        "title": "Routine",
+        "recurring": True,
+        "cadence": "10:00",
+        "next_run_at": old_next_run,
+        "agent": "main",
+    })
+
+    updated = TaskStore().update(task.id, {"cadence": "23:57"})
+    assert updated is not None
+    assert updated.next_run_at != old_next_run
+    local = datetime.fromisoformat(updated.next_run_at).astimezone()
+    assert (local.hour, local.minute) == (23, 57)
+
+
+def test_recurring_task_cadence_update_refreshes_stale_payload_next_run(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    old_next_run = "2026-05-15T08:00:00+00:00"
+    task = TaskStore().create({
+        "title": "Routine",
+        "recurring": True,
+        "cadence": "10:00",
+        "next_run_at": old_next_run,
+        "agent": "main",
+    })
+
+    updated = TaskStore().update(task.id, {
+        "cadence": "23:56",
+        "next_run_at": old_next_run,
+    })
+
+    assert updated is not None
+    assert updated.next_run_at != old_next_run
+    local = datetime.fromisoformat(updated.next_run_at).astimezone()
+    assert (local.hour, local.minute) == (23, 56)
+
+
+def test_recurring_task_same_cadence_refreshes_mismatched_next_run(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    old_next_run = "2026-05-15T08:00:00+00:00"
+    task = TaskStore().create({
+        "title": "Routine",
+        "recurring": True,
+        "cadence": "23:55",
+        "next_run_at": old_next_run,
+        "agent": "main",
+    })
+
+    updated = TaskStore().update(task.id, {
+        "cadence": "23:55",
+        "next_run_at": old_next_run,
+    })
+
+    assert updated is not None
+    assert updated.next_run_at != old_next_run
+    local = datetime.fromisoformat(updated.next_run_at).astimezone()
+    assert (local.hour, local.minute) == (23, 55)
+
+
 def test_scheduler_runs_due_one_shot_task(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
     task = TaskStore().create({
@@ -84,11 +161,11 @@ def test_scheduler_runs_due_one_shot_task(monkeypatch, tmp_path: Path) -> None:
     assert scheduler.tick() == [task.id]
     updated = TaskStore().load()[0]
     assert fired == [task.id]
-    assert updated.status == "running"
+    assert updated.status == "done"
     assert updated.scheduled_for == ""
 
 
-def test_scheduler_ignores_queued_one_shot_without_schedule(monkeypatch, tmp_path: Path) -> None:
+def test_scheduler_runs_queued_one_shot_without_schedule(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
     task = TaskStore().create({
         "title": "Run now",
@@ -98,10 +175,10 @@ def test_scheduler_ignores_queued_one_shot_without_schedule(monkeypatch, tmp_pat
     fired: list[str] = []
     scheduler = TaskScheduler({task.id: lambda: fired.append(task.id)})
 
-    assert scheduler.tick() == []
+    assert scheduler.tick() == [task.id]
     updated = TaskStore().load()[0]
-    assert fired == []
-    assert updated.status == "queued"
+    assert fired == [task.id]
+    assert updated.status == "done"
 
 
 def test_scheduler_ignores_backlog_one_shot_task(monkeypatch, tmp_path: Path) -> None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from urllib.parse import urlparse
 
 from .contracts import AuthType, ProviderKind
 
@@ -77,3 +78,32 @@ PROVIDER_REGISTRY: dict[str, ProviderDefinition] = {
         context_window_api_endpoint="/api/show",
     ),
 }
+
+
+def normalize_base_url(provider: str, base_url: str) -> str:
+    """Normalise l'URL racine d'un provider sans casser les endpoints compatibles.
+
+    Pour l'API officielle OpenAI, l'utilisateur saisit souvent
+    `https://api.openai.com`. Le protocole OpenAI-compatible de Marius attend une
+    base qui inclut `/v1`, sinon `/models` et `/chat/completions` pointent sur un
+    endpoint inexistant.
+    """
+    definition = PROVIDER_REGISTRY.get(provider)
+    raw = str(base_url or (definition.default_base_url if definition else "")).strip().rstrip("/")
+    if not raw:
+        return raw
+    parsed = urlparse(raw)
+    if provider == ProviderKind.OPENAI and parsed.netloc == "api.openai.com" and parsed.path in {"", "/"}:
+        return raw + "/v1"
+    if provider == ProviderKind.OLLAMA and parsed.path.rstrip("/") == "/api":
+        return raw[: -len("/api")]
+    return raw
+
+
+def requires_api_key_for_base_url(provider: str, base_url: str) -> bool:
+    """Retourne si cette configuration nécessite une clé API."""
+    definition = PROVIDER_REGISTRY.get(provider)
+    if definition and definition.requires_api_key:
+        return True
+    parsed = urlparse(normalize_base_url(provider, base_url))
+    return provider == ProviderKind.OLLAMA and parsed.netloc == "ollama.com"

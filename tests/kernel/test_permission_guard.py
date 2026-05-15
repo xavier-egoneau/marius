@@ -54,6 +54,18 @@ def test_safe_allows_web(cwd: Path) -> None:
     g = _guard("safe", cwd)
     assert g.check("web_search", {"query": "python"}) is True
     assert g.check("web_fetch", {"url": "https://example.com"}) is True
+    assert g.check("browser_open", {"url": "https://example.com"}) is True
+    assert g.check("browser_extract", {}) is True
+    assert g.check("browser_close", {}) is True
+
+
+def test_browser_interactions_ask_for_confirmation(cwd: Path) -> None:
+    asked = []
+    g = PermissionGuard(mode="limited", cwd=cwd, on_ask=lambda t, a, r: asked.append((t, r)) or False)
+
+    assert g.check("browser_click", {"text": "Delete"}) is False
+    assert g.check("browser_type", {"selector": "input", "text": "secret"}) is False
+    assert [call[0] for call in asked] == ["browser_click", "browser_type"]
 
 
 def test_safe_allows_memory(cwd: Path) -> None:
@@ -71,7 +83,6 @@ def test_safe_allows_readonly_host_diagnostics(cwd: Path) -> None:
     assert g.check("approval_list", {}) is True
     assert g.check("secret_ref_list", {}) is True
     assert g.check("provider_list", {}) is True
-    assert g.check("daily_digest", {}) is True
 
 
 def test_host_config_writes_are_guarded(cwd: Path) -> None:

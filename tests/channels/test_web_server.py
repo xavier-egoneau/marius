@@ -40,6 +40,12 @@ def _web_server(sock: _Socket) -> WebServer:
     return ws
 
 
+def _web_server_with_history(sock: _Socket, tmp_path) -> WebServer:
+    ws = _web_server(sock)
+    ws._history_path = tmp_path / "web_history.json"
+    return ws
+
+
 def test_send_input_reconnects_once_after_stale_gateway_socket() -> None:
     stale = _Socket(fail=True)
     fresh = _Socket()
@@ -51,7 +57,7 @@ def test_send_input_reconnects_once_after_stale_gateway_socket() -> None:
     assert stale.closed is True
     assert len(fresh.sent) == 1
     assert b'"type": "input"' in fresh.sent[0]
-    assert ws._history == [{"role": "user", "content": "salut", "created_at": ws._history[0]["created_at"]}]
+    assert ws._history == []
 
 
 def test_send_input_reports_gateway_failure_without_persisting_user_message() -> None:
@@ -72,6 +78,71 @@ def test_send_input_reports_gateway_failure_without_persisting_user_message() ->
 
     assert ws._history == []
     assert ws._active_session is None
+
+
+def test_send_input_leaves_visible_history_to_gateway(tmp_path) -> None:
+    ws = _web_server_with_history(_Socket(), tmp_path)
+    ws._history_path.write_text(
+        json.dumps([{"role": "user", "content": "telegram", "created_at": "t1"}]),
+        encoding="utf-8",
+    )
+
+    ws.send_input("web", "main")
+
+    history = json.loads(ws._history_path.read_text(encoding="utf-8"))
+    assert [entry["content"] for entry in history] == ["telegram"]
+
+
+def test_visible_event_broadcasts_history_changed_to_all_chat_sessions() -> None:
+    ws = _web_server(_Socket())
+    q1 = ws.open_sse("default")
+    q2 = ws.open_sse("web-open")
+
+    ws._dispatch(json.dumps({
+        "type": "visible",
+        "role": "assistant",
+        "content": "bonjour",
+        "channel": "telegram",
+        "created_at": "t1",
+    }))
+
+    assert q1.get_nowait() == {
+        "type": "history_changed",
+        "entry": {
+            "role": "assistant",
+            "content": "bonjour",
+            "channel": "telegram",
+            "created_at": "t1",
+            "tools": [],
+        },
+    }
+    assert q2.get_nowait()["type"] == "history_changed"
+
+
+def test_visible_reset_broadcasts_history_reset_to_all_chat_sessions() -> None:
+    ws = _web_server(_Socket())
+    ws._history = [{"role": "user", "content": "ancien"}]
+    ws._current_assistant = "en cours"
+    q = ws.open_sse("default")
+
+    ws._dispatch(json.dumps({"type": "visible_reset", "channel": "telegram"}))
+
+    assert ws._history == []
+    assert ws._current_assistant == ""
+    assert q.get_nowait() == {"type": "history_reset", "channel": "telegram"}
+
+
+def test_visible_chat_messages_hides_internal_markers() -> None:
+    from marius.channels.web.server import _visible_chat_messages
+
+    messages = _visible_chat_messages([
+        {"role": "user", "content": "salut"},
+        {"role": "system", "content": "", "metadata": {"kind": "compaction_boundary"}},
+        {"role": "assistant", "content": "bonjour", "tools": [{"name": "read_file"}]},
+    ])
+
+    assert [message["content"] for message in messages] == ["salut", "bonjour"]
+    assert messages[-1]["tools"] == [{"name": "read_file"}]
 
 
 def test_open_sse_replays_pending_permissions() -> None:

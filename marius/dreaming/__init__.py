@@ -1,1 +1,1 @@
-"""Pipeline de consolidation mémorielle (dreaming) et de briefing (daily)."""
+"""Pipeline de consolidation mémorielle (dreaming)."""

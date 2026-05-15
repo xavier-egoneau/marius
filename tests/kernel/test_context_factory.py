@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from marius.kernel.context_factory import build_system_prompt, needs_onboarding
@@ -76,6 +77,76 @@ def test_build_system_prompt_loads_assistant_context_when_enabled(tmp_path: Path
     assert "identity" in loaded
     assert "user" in loaded
     assert "onboarding" not in loaded
+
+
+def test_build_system_prompt_mentions_explicit_active_project(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / "SOUL.md", "âme")
+    _write(home / "active_project.json", json.dumps({
+        "path": str(project),
+        "name": "projet-test",
+        "set_at": "2026-05-15T10:00:00+00:00",
+    }))
+
+    prompt, _loaded = build_system_prompt(
+        project,
+        active_skills=[],
+        skills_dir=home / "skills",
+        marius_home=home,
+    )
+
+    assert "Projet actif explicite : projet-test" in prompt
+    assert str(project) in prompt
+    assert "project_set_active" in prompt
+
+
+def test_build_system_prompt_prefers_agent_doc_over_global(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / "SOUL.md", "âme globale")
+    _write(home / "IDENTITY.md", "identité globale")
+    _write(home / "USER.md", "profil global")
+    _write(home / "workspace" / "main" / "SOUL.md", "âme agent")
+    _write(home / "workspace" / "main" / "IDENTITY.md", "identité agent")
+
+    prompt, loaded = build_system_prompt(
+        project,
+        active_skills=["assistant"],
+        skills_dir=home / "skills",
+        marius_home=home,
+        agent_name="main",
+    )
+
+    assert "âme agent" in prompt
+    assert "âme globale" not in prompt
+    assert "identité agent" in prompt
+    assert "identité globale" not in prompt
+    assert "profil global" in prompt
+    assert "soul" in loaded
+    assert "identity" in loaded
+    assert "user" in loaded
+
+
+def test_build_system_prompt_empty_agent_doc_masks_global(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / "SOUL.md", "âme globale")
+    _write(home / "workspace" / "main" / "SOUL.md", "")
+
+    prompt, loaded = build_system_prompt(
+        project,
+        active_skills=[],
+        skills_dir=home / "skills",
+        marius_home=home,
+        agent_name="main",
+    )
+
+    assert "âme globale" not in prompt
+    assert "soul" not in loaded
 
 
 def test_build_system_prompt_loads_onboarding_only_for_assistant(tmp_path: Path) -> None:

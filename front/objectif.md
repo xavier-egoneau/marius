@@ -4,71 +4,9 @@ Le front est une brique standalone du system agentic. elle peut être supprimé 
 
 Pas forcément avec la même UX partout, mais avec le même modèle métier.
 
--------------
-Assume la task comme objet canonique
-C’est probablement la bonne direction.
-
-Si la task devient :
-- l’unité de backlog
-- l’unité de planification
-- l’unité de lancement
-- et la base des routines quand recurring=true
-
-alors il faut l’assumer partout :
-- dashboard
-- CLI
-- web conversationnel
-- Telegram
-- tools internes
----------------
-Fais de la home du dashboard le résumé officiel de Marius
-La home devrait incarner la vérité produit.
-
-Elle doit répondre à :
-- est-ce que le système va bien ?
-- qu’est-ce qui demande mon attention ?
-- qu’est-ce qui est bloqué ?
-- qu’est-ce qui tourne sans moi ?
-- quelle est la prochaine action utile ?
-
-------------------
-Vérifie toujours la parité d’intention entre surfaces
-Pour chaque gros usage du dashboard, demande-toi :
-
- est-ce que la même intention existe aussi hors dashboard ?
-
-Exemples :
-- créer une task
-- la planifier
-- l’attacher à un projet
-- créer un projet
-- lancer une routine
-- voir ce qui bloque
-- savoir ce qui tourne
-
-Si une intention n’est naturelle que dans le dashboard, il y a risque de désalignement.
-
-Mon diagnostic court
-
-Aligné
-- task/routine comme base commune
-- idée que le front ne doit pas inventer un autre système
-- volonté de garder le runtime au centre
-
-À surveiller
-- task board qui formalise plus vite que le conversationnel
-- control qui pourrait devenir un produit dans le produit
-- home qui doit devenir une synthèse canonique
-
-Le vrai risque
-Pas que le dashboard soit mauvais.
-
-Le vrai risque, c’est :
-
- que le dashboard pense mieux Marius que Marius hors dashboard.
 
 ---------------------
 
-- revoir les rappel - sheduled
-- pouvoir ajouter un providers dans le dashboard
+- pouvoir ajouter un providers dans le dashboard ( existe deja dans marius> créer un ui visuel plus depuis le dashboard mais branché a la logique existante)
+- pouvoir créer / editer les prompt system (IDENTITY.md et SOUL.md ) pour chaque agent( pour memoire de la règle il n'y a pas forcement ces fichiers dans le dossier de l'agent. par defaut on prend IDENTITY.md et SOUL.md global mais on peut surcoucher en en créant dans le dossier de l'agent - verifi la règle )
 - owsap gen ai securitye

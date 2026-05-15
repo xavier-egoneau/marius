@@ -36,7 +36,7 @@
 - [x] Refuser toute demande d'application automatique dans le tool self-update.
 - [x] Ajouter la veille persistante `watch_add`, `watch_list`, `watch_remove`, `watch_run`.
 - [x] Persister topics et rapports de veille dans `~/.marius/watch/`.
-- [x] Injecter les derniers rapports de veille dans le contexte dreaming/daily.
+- [x] Injecter les derniers rapports de veille dans le contexte dreaming et les routines.
 - [x] Brancher les topics non manuels au scheduler gateway.
 - [x] Ajouter la déduplication par URL et les notifications Telegram opt-in.
 - [x] Ajouter un rendu commun de sortie de tour pour préserver diffs, rapports et notices
@@ -53,7 +53,7 @@
 - [x] Vérifier le chemin agentique gateway/web avec tool calls réels, streaming final,
       rapport Markdown de veille et résumé visible dans l'observation outil.
 - [x] Aligner les commandes slash de base sur le gateway/web/Telegram : `/help`,
-      `/remember`, `/memories`, `/forget`, `/doctor`, `/dream`, `/daily`, `/context`,
+      `/remember`, `/memories`, `/forget`, `/doctor`, `/dream`, `/context`,
       `/compact`.
 - [x] Démarrer SearxNG au lancement de Marius quand `web_search` est actif, avec
       fallback best-effort et logs de diagnostic.

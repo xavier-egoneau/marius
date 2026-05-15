@@ -115,7 +115,11 @@ def make_project_tools(
         "project_set_active": ToolEntry(
             definition=ToolDefinition(
                 name="project_set_active",
-                description="Set the explicit active project by path or known project name.",
+                description=(
+                    "Set the explicit active project by path or known project name. "
+                    "Use it when the user clearly asks to work on a known project; "
+                    "if another project is only mentioned as a reference or comparison, ask before switching."
+                ),
                 parameters={
                     "type": "object",
                     "properties": {

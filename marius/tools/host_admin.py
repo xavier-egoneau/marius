@@ -142,6 +142,12 @@ def make_host_admin_tools(
         if bool(arguments.get("set_main", False)):
             cfg.main_agent = name
         store.save(cfg)
+        if existing is None:
+            from marius.storage.agent_docs import seed_agent_docs_from_global
+            seed_agent_docs_from_global(
+                name,
+                marius_home=(Path(config_path).parent if config_path is not None else None),
+            )
         verb = "updated" if existing else "created"
         main_note = " and set as main agent" if cfg.main_agent == name and bool(arguments.get("set_main", False)) else ""
         return ToolResult(
@@ -503,7 +509,6 @@ def _agent_status(cfg: MariusConfig, name: str, is_running: StatusRunner) -> dic
         "provider_id": agent.provider_id,
         "model": agent.model,
         "role": agent.role,
-        "daily_model": agent.daily_model,
         "tool_count": len(agent.tools),
         "tools": list(agent.tools),
         "skill_count": len(agent.skills),
@@ -521,7 +526,6 @@ def _agent_config_data(agent: AgentConfig) -> dict[str, Any]:
         "provider_id": agent.provider_id,
         "model": agent.model,
         "role": agent.role,
-        "daily_model": agent.daily_model,
         "tools": list(agent.tools),
         "skills": list(agent.skills),
         "scheduler_enabled": agent.scheduler_enabled,

@@ -62,7 +62,6 @@ def test_skill_contracts(store: MemoryStore, tmp_path: Path) -> None:
         "---\nname: test-skill\ndescription: test\n---\nInstructions."
     )
     (skill_dir / "DREAM.md").write_text("Contrat dreaming du skill.")
-    (skill_dir / "DAILY.md").write_text("Contrat daily du skill.")
 
     ctx = build_dreaming_context(
         store,
@@ -72,7 +71,4 @@ def test_skill_contracts(store: MemoryStore, tmp_path: Path) -> None:
     assert len(ctx.dream_contracts) == 1
     assert ctx.dream_contracts[0][0] == "test-skill"
     assert "dreaming" in ctx.dream_contracts[0][1]
-    assert len(ctx.daily_contracts) == 1
-    assert "daily" in ctx.daily_contracts[0][1]
-
 

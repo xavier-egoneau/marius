@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 from marius.dreaming.context import DreamingContext
-from marius.dreaming.prompt import build_daily_prompt
+from marius.dreaming.prompt import build_dreaming_prompt
 
 
-def test_daily_prompt_requires_structured_useful_briefing() -> None:
-    prompt = build_daily_prompt(DreamingContext())
+def test_dreaming_prompt_requires_json_operations() -> None:
+    prompt = build_dreaming_prompt(DreamingContext())
 
-    assert "agenda" in prompt.lower()
-    assert "priorités/listes" in prompt
-    assert "veille utile" in prompt
-    assert "croisements/déductions" in prompt
-    assert "n'a pas été vérifiée" in prompt
+    assert "consolidation mémorielle" in prompt
+    assert "operations" in prompt
+    assert "Réponds UNIQUEMENT avec un objet JSON valide" in prompt

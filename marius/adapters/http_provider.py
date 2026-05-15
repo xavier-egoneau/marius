@@ -7,6 +7,8 @@ Ajouter un protocole = ajouter une classe ici + une valeur dans ProviderProtocol
 from __future__ import annotations
 
 import json
+import base64
+import mimetypes
 import threading
 import urllib.error
 import urllib.request
@@ -14,12 +16,14 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
-from marius.kernel.contracts import ContextUsage, Message, Role, ToolCall
+from marius.kernel.contracts import ArtifactType, ContextUsage, Message, Role, ToolCall
 from marius.kernel.provider import ProviderChunk, ProviderError, ProviderRequest, ProviderResponse
 from marius.kernel.tool_router import ToolDefinition
 from marius.provider_config.contracts import AuthType, ProviderEntry
-from marius.provider_config.registry import PROVIDER_REGISTRY, ProviderProtocol
+from marius.provider_config.registry import PROVIDER_REGISTRY, ProviderProtocol, normalize_base_url
 from marius.provider_config.secrets import resolve_provider_secret
+
+_MAX_NATIVE_IMAGE_BYTES = 20 * 1024 * 1024
 
 
 def make_adapter(
@@ -57,7 +61,7 @@ class OpenAICompatibleAdapter:
                 pass
 
     def generate(self, request: ProviderRequest) -> ProviderResponse:
-        url = self.entry.base_url.rstrip("/") + self.defn.chat_endpoint
+        url = normalize_base_url(self.entry.provider, self.entry.base_url) + self.defn.chat_endpoint
         payload: dict[str, Any] = {
             "model": self.entry.model,
             "messages": _to_openai_messages(request.messages),
@@ -106,7 +110,7 @@ class OpenAICompatibleAdapter:
 
     def stream(self, request: ProviderRequest) -> Iterator[ProviderChunk]:
         """Stream SSE depuis /chat/completions avec stream=true."""
-        url = self.entry.base_url.rstrip("/") + self.defn.chat_endpoint
+        url = normalize_base_url(self.entry.provider, self.entry.base_url) + self.defn.chat_endpoint
         payload: dict[str, Any] = {
             "model": self.entry.model,
             "messages": _to_openai_messages(request.messages),
@@ -191,10 +195,10 @@ class OllamaNativeAdapter:
                 pass
 
     def generate(self, request: ProviderRequest) -> ProviderResponse:
-        url = self.entry.base_url.rstrip("/") + self.defn.chat_endpoint
+        url = normalize_base_url(self.entry.provider, self.entry.base_url) + self.defn.chat_endpoint
         payload: dict[str, Any] = {
             "model": self.entry.model,
-            "messages": _to_openai_messages(request.messages),
+            "messages": _to_ollama_messages(request.messages),
             "stream": False,
             "think": False,
         }
@@ -239,10 +243,10 @@ class OllamaNativeAdapter:
 
     def stream(self, request: ProviderRequest) -> Iterator[ProviderChunk]:
         """Stream NDJSON depuis /api/chat avec stream=true."""
-        url = self.entry.base_url.rstrip("/") + self.defn.chat_endpoint
+        url = normalize_base_url(self.entry.provider, self.entry.base_url) + self.defn.chat_endpoint
         payload: dict[str, Any] = {
             "model": self.entry.model,
-            "messages": _to_openai_messages(request.messages),
+            "messages": _to_ollama_messages(request.messages),
             "stream": True,
             "think": False,
         }
@@ -499,11 +503,17 @@ def _to_chatgpt_input(messages: list[Message]) -> list[dict[str, Any]]:
                 })
         elif msg.role in (Role.USER, Role.ASSISTANT):
             content_type = "output_text" if msg.role == Role.ASSISTANT else "input_text"
+            content = []
             if msg.content:
+                content.append({"type": content_type, "text": msg.content})
+            if msg.role is Role.USER:
+                for image in _message_images(msg):
+                    content.append({"type": "input_image", "image_url": image["data_url"]})
+            if content:
                 result.append({
                     "type": "message",
                     "role": msg.role.value,
-                    "content": [{"type": content_type, "text": msg.content}],
+                    "content": content,
                 })
     return result
 
@@ -637,9 +647,84 @@ def _to_openai_messages(messages: list[Message]) -> list[dict[str, Any]]:
                 ],
             })
         else:
-            result.append({"role": role, "content": msg.content})
+            images = _message_images(msg) if msg.role is Role.USER else []
+            if images:
+                content: list[dict[str, Any]] = []
+                if msg.content:
+                    content.append({"type": "text", "text": msg.content})
+                content.extend(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image["data_url"]},
+                    }
+                    for image in images
+                )
+                result.append({"role": role, "content": content})
+            else:
+                result.append({"role": role, "content": msg.content})
 
     return result
+
+
+def _to_ollama_messages(messages: list[Message]) -> list[dict[str, Any]]:
+    result = []
+    for msg in messages:
+        role = _ROLE_MAP.get(msg.role)
+        if role is None:
+            continue
+
+        if msg.role == Role.TOOL:
+            result.append({
+                "role": "tool",
+                "tool_call_id": msg.correlation_id,
+                "content": msg.content,
+            })
+        elif msg.tool_calls:
+            result.append({
+                "role": "assistant",
+                "content": msg.content or "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments,
+                        },
+                    }
+                    for tc in msg.tool_calls
+                ],
+            })
+        else:
+            item: dict[str, Any] = {"role": role, "content": msg.content}
+            images = _message_images(msg) if msg.role is Role.USER else []
+            if images:
+                item["images"] = [image["base64"] for image in images]
+            result.append(item)
+    return result
+
+
+def _message_images(message: Message) -> list[dict[str, str]]:
+    images: list[dict[str, str]] = []
+    for artifact in message.artifacts:
+        if artifact.type is not ArtifactType.IMAGE or not artifact.path:
+            continue
+        path = str(artifact.path)
+        mime_type = str(artifact.data.get("mime_type") or mimetypes.guess_type(path)[0] or "")
+        if not mime_type.startswith("image/"):
+            continue
+        try:
+            with open(path, "rb") as file:
+                data = file.read(_MAX_NATIVE_IMAGE_BYTES + 1)
+        except OSError:
+            continue
+        if len(data) > _MAX_NATIVE_IMAGE_BYTES:
+            continue
+        raw = base64.b64encode(data).decode("ascii")
+        images.append({
+            "base64": raw,
+            "data_url": f"data:{mime_type};base64,{raw}",
+            "mime_type": mime_type,
+        })
+    return images
 
 
 # ── conversion outils ─────────────────────────────────────────────────────────

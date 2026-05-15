@@ -163,8 +163,14 @@ class PermissionGuard:
             "caldav_doctor",
             "caldav_agenda", "sentinelle_scan",
             "rag_source_list", "rag_search", "rag_get",
+            "browser_open", "browser_extract", "browser_close",
         ):
             return _ALLOW
+        if tool_name == "browser_screenshot":
+            path = str(arguments.get("path") or "")
+            return self._check_write({"path": path}) if path else _ALLOW
+        if tool_name in ("browser_click", "browser_type"):
+            return PermissionDecision("ask", f"Interaction navigateur demandée : {tool_name}.")
 
         if tool_name == "run_bash":
             return self._check_shell(arguments)

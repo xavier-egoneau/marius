@@ -597,7 +597,7 @@ def _merge_tags(tags: list[str]) -> list[str]:
 
 
 def _should_index_chunk(tags: list[str]) -> bool:
-    return bool({"always", "important", "daily", "fresh"} & set(tags))
+    return bool({"always", "important", "routine", "fresh"} & set(tags))
 
 
 _STOPWORDS = {

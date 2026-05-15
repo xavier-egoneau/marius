@@ -18,7 +18,6 @@ def test_skill_create_writes_markdown_first_skill(tmp_path):
             "body": "Write clearly.",
             "commands": ["draft"],
             "include_dream": True,
-            "include_daily": True,
         }
     )
 
@@ -26,7 +25,6 @@ def test_skill_create_writes_markdown_first_skill(tmp_path):
     assert result.ok is True
     assert (skill_dir / "SKILL.md").exists()
     assert (skill_dir / "DREAM.md").exists()
-    assert (skill_dir / "DAILY.md").exists()
     assert (skill_dir / "core" / "draft.md").exists()
 
     skill = SkillReader(tmp_path / "skills").load("writing")

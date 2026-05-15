@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-KNOWN_TAGS = {"always", "important", "daily", "fresh", "archive"}
+KNOWN_TAGS = {"always", "important", "routine", "fresh", "archive"}
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|\Z)", re.DOTALL)
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -175,7 +175,7 @@ def _importance(tags: list[str]) -> int:
         return 80
     if "fresh" in tag_set:
         return 65
-    if "daily" in tag_set:
+    if "routine" in tag_set:
         return 55
     if "archive" in tag_set:
         return 0

@@ -50,6 +50,77 @@ def test_task_create_ignores_description_field(monkeypatch, tmp_path) -> None:
     assert task.prompt == ""
 
 
+def test_task_create_routine_requires_supported_cadence(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+
+    result = make_task_tools()["task_create"].handler({
+        "title": "Daily",
+        "recurring": True,
+        "cadence": "daily",
+    })
+
+    assert result.ok is False
+    assert result.error == "invalid_cadence"
+    assert TaskStore().load() == []
+
+
+def test_task_create_routine_normalizes_time_cadence_and_defaults_queued(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+
+    result = make_task_tools()["task_create"].handler({
+        "title": "Daily",
+        "recurring": True,
+        "cadence": "9h30",
+    })
+
+    assert result.ok is True
+    task = TaskStore().load()[0]
+    assert task.status == "queued"
+    assert task.cadence == "09:30"
+    assert task.scheduled_for == ""
+
+
+def test_task_create_scheduled_unique_task_defaults_queued_and_validates_iso(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+
+    invalid = make_task_tools()["task_create"].handler({
+        "title": "Later",
+        "scheduled_for": "tomorrow at ten",
+    })
+    valid = make_task_tools()["task_create"].handler({
+        "title": "Later",
+        "scheduled_for": "2026-05-15T10:00:00+02:00",
+    })
+
+    assert invalid.ok is False
+    assert invalid.error == "invalid_scheduled_for"
+    assert valid.ok is True
+    task = TaskStore().load()[0]
+    assert task.status == "queued"
+
+
+def test_task_list_defaults_to_unique_tasks(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    TaskStore().create({"title": "Unique"})
+    TaskStore().create({"title": "Routine", "recurring": True, "cadence": "1d"})
+
+    result = make_task_tools()["task_list"].handler({})
+
+    assert result.ok is True
+    assert [task["title"] for task in result.data["tasks"]] == ["Unique"]
+
+
+def test_task_list_can_filter_routines(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    TaskStore().create({"title": "Unique"})
+    TaskStore().create({"title": "Routine", "recurring": True, "cadence": "1d"})
+
+    result = make_task_tools()["task_list"].handler({"recurring": True})
+
+    assert result.ok is True
+    assert [task["title"] for task in result.data["tasks"]] == ["Routine"]
+
+
 def test_task_store_maps_legacy_review_to_done(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
     TaskStore().create({"title": "Legacy review", "status": "review"})
@@ -79,15 +150,17 @@ def test_recover_interrupted_running_tasks_for_agent(monkeypatch, tmp_path) -> N
     monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
     store = TaskStore()
     interrupted = store.create({"title": "Interrupted", "status": "running", "agent": "main"})
+    routine = store.create({"title": "Routine", "status": "running", "agent": "main", "recurring": True})
     store.create({"title": "Other agent", "status": "running", "agent": "codeur"})
     store.create({"title": "Already queued", "status": "queued", "agent": "main"})
 
     recovered = store.recover_interrupted_running("main", reason="gateway restart")
 
     tasks = {task.title: task for task in store.load()}
-    assert [task.id for task in recovered] == [interrupted.id]
-    assert tasks["Interrupted"].status == "queued"
+    assert [task.id for task in recovered] == [interrupted.id, routine.id]
+    assert tasks["Interrupted"].status == "failed"
     assert tasks["Interrupted"].last_error == "gateway restart"
+    assert tasks["Routine"].status == "queued"
     assert tasks["Other agent"].status == "running"
     assert tasks["Already queued"].status == "queued"
     assert any(event["kind"] == "interrupted" for event in tasks["Interrupted"].events)

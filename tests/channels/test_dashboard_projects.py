@@ -45,6 +45,29 @@ def test_api_projects_includes_active_project_when_missing_from_recent(
     assert {p["path"] for p in data["projects"]} == {str(active), str(recent)}
 
 
+def test_api_projects_patch_set_active_records_existing_unknown_project(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / ".marius"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(dashboard_server, "_MARIUS_HOME", home)
+
+    ok, message = dashboard_server._api_projects_patch({
+        "path": str(project),
+        "set_active": True,
+    })
+
+    assert ok is True
+    assert message == "updated"
+    active = json.loads((home / "active_project.json").read_text(encoding="utf-8"))
+    projects = json.loads((home / "projects.json").read_text(encoding="utf-8"))
+    assert active["path"] == str(project.resolve())
+    assert projects[0]["path"] == str(project.resolve())
+
+
 def test_task_payloads_mark_running_agents(monkeypatch) -> None:
     calls: list[str] = []
 

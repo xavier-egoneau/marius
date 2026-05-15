@@ -69,13 +69,15 @@ def test_user_allowed_when_in_list() -> None:
 
 
 def test_start_sends_welcome() -> None:
-    p = _poller()
+    gw = _gw()
+    p = _poller(gw=gw)
     with patch("marius.channels.telegram.poller.send_message") as mock_send:
         p._handle_command(CHAT, "/start")
     mock_send.assert_called_once()
     _, chat_id, text = mock_send.call_args.args
     assert chat_id == CHAT
     assert "Marius" in text or "assistant" in text.lower()
+    assert gw.telegram_chat_id == CHAT
 
 
 # ── /help ─────────────────────────────────────────────────────────────────────
@@ -88,7 +90,7 @@ def test_help_sends_command_list() -> None:
     mock_send.assert_called_once()
     _, _, text = mock_send.call_args.args
     assert "/start" in text
-    assert "/daily" in text
+    assert "/status" in text
 
 
 # ── /new ─────────────────────────────────────────────────────────────────────
@@ -196,13 +198,77 @@ def test_unknown_command_forwarded_as_message() -> None:
     gw.run_turn_for_telegram.assert_called_once_with("/commande_inconnue")
 
 
+def test_photo_message_is_downloaded_and_forwarded(tmp_path: Path) -> None:
+    gw = _gw(workspace=tmp_path, run_turn_for_telegram=MagicMock(return_value="vu"))
+    p = _poller(gw=gw)
+    update = {
+        "update_id": 1,
+        "message": {
+            "chat": {"id": CHAT},
+            "from": {"id": USER},
+            "caption": "regarde ça",
+            "photo": [
+                {"file_id": "small", "file_size": 10},
+                {"file_id": "large", "file_size": 20},
+            ],
+        },
+    }
+    with (
+        patch("marius.channels.telegram.poller.get_file", return_value={"file_path": "photos/file_1.jpg"}) as mock_get,
+        patch("marius.channels.telegram.poller.download_file", return_value=b"jpg-bytes") as mock_download,
+        patch("marius.channels.telegram.poller.send_chat_action"),
+        patch("marius.channels.telegram.poller.send_message"),
+    ):
+        p._handle_update(update)
+
+    mock_get.assert_called_once_with(TOKEN, "large")
+    mock_download.assert_called_once_with(TOKEN, "photos/file_1.jpg", max_bytes=20 * 1024 * 1024)
+    forwarded = gw.run_turn_for_telegram.call_args.args[0]
+    assert forwarded.startswith("regarde ça")
+    assert "[fichier joint : " in forwarded
+    path = forwarded.split("[fichier joint : ", 1)[1].split("]", 1)[0]
+    assert Path(path).read_bytes() == b"jpg-bytes"
+    assert Path(path).parent == tmp_path / "uploads" / "telegram"
+
+
+def test_image_document_message_is_downloaded_and_forwarded(tmp_path: Path) -> None:
+    gw = _gw(workspace=tmp_path, run_turn_for_telegram=MagicMock(return_value="vu"))
+    p = _poller(gw=gw)
+    update = {
+        "update_id": 1,
+        "message": {
+            "chat": {"id": CHAT},
+            "from": {"id": USER},
+            "document": {
+                "file_id": "doc-image",
+                "file_size": 12,
+                "file_name": "capture.png",
+                "mime_type": "image/png",
+            },
+        },
+    }
+    with (
+        patch("marius.channels.telegram.poller.get_file", return_value={"file_path": "documents/capture"}),
+        patch("marius.channels.telegram.poller.download_file", return_value=b"png-bytes"),
+        patch("marius.channels.telegram.poller.send_chat_action"),
+        patch("marius.channels.telegram.poller.send_message"),
+    ):
+        p._handle_update(update)
+
+    forwarded = gw.run_turn_for_telegram.call_args.args[0]
+    path = forwarded.split("[fichier joint : ", 1)[1].split("]", 1)[0]
+    assert Path(path).suffix == ".png"
+    assert Path(path).read_bytes() == b"png-bytes"
+
+
 # ── _build_command_list ───────────────────────────────────────────────────────
 
 
 def test_build_command_list_includes_builtins() -> None:
     cmds = _build_command_list({})
     names = {c["command"] for c in cmds}
-    assert {"start", "help", "new", "daily", "status"} <= names
+    assert {"start", "help", "new", "status"} <= names
+    assert "daily" not in names
 
 
 def test_build_command_list_skill_commands_appended() -> None:

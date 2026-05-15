@@ -6,7 +6,7 @@ exposer une interface web et se connecter à Telegram.
 
 Le projet est encore en alpha, mais le socle est déjà utilisable en local :
 CLI, gateway persistant, providers OpenAI/Ollama, outils fichier/shell/web/mémoire,
-skills, dreaming/daily, interface web et canal Telegram.
+skills, dreaming, routines, interface web et canal Telegram.
 
 ## Ce que fait Marius
 
@@ -101,7 +101,6 @@ Commandes fréquentes dans le REPL et dans les surfaces gateway/web/Telegram :
 /forget     supprimer un souvenir
 /doctor     diagnostiquer l'installation
 /dream      consolider la mémoire
-/daily      générer le briefing du jour
 /stop       interrompre l'inférence en cours
 /exit       quitter
 ```
@@ -217,7 +216,6 @@ Structure typique :
 ```text
 SKILL.md          instructions générales du skill
 DREAM.md          données utiles au dreaming, optionnel
-DAILY.md          données utiles au daily, optionnel
 core/<cmd>.md     prompt d'une commande slash, optionnel
 ```
 
@@ -287,7 +285,6 @@ Les outils configurables incluent notamment :
 - `provider_delete` : supprimer un provider après confirmation ;
 - `provider_models` : récupérer les modèles disponibles d'un provider ;
 - `dreaming_run` : consolider la mémoire via le moteur dreaming ;
-- `daily_digest` : générer un briefing quotidien Markdown ;
 - `self_update_propose` : enregistrer une proposition de mise à jour sans l'appliquer ;
 - `self_update_report_bug` : enregistrer un bug exploitable pour une future mise à jour ;
 - `self_update_list` : lister les propositions et bugs self-update ;
@@ -465,10 +462,10 @@ bornées (`pytest`, `python -m pytest`, `git diff --check`) et écrit un rapport
 
 La veille persistante repose sur des topics explicites stockés dans
 `~/.marius/watch/`. `watch_run` lance une recherche web pour un topic ou tous les
-topics actifs, puis enregistre un rapport. Le dreaming et le daily lisent les
-rapports existants ; ils ne lancent pas de recherche web cachée.
+topics actifs, puis enregistre un rapport. Le dreaming et les routines de
+briefing lisent les rapports existants ; ils ne lancent pas de recherche web cachée.
 
-Les cadences non manuelles (`hourly`, `daily`, `weekly`, `15m`, `2h`, `3d`, etc.)
+Les cadences non manuelles (`hourly`, `1d`, `weekly`, `15m`, `2h`, `3d`, etc.)
 sont reprises par le scheduler du gateway. Chaque résultat reçoit un score de
 nouveauté (`novelty_score`) et des raisons simples (`new_url`, `new_domain`,
 `query_match`, etc.). Les résultats déjà vus par URL sont dédupliqués par défaut.
@@ -525,5 +522,5 @@ Marius est expérimental. Il vise une expérience plus fluide que rigide, plus
 modulaire que monolithique, et plus lisible qu'intelligente à tout prix.
 
 Les surfaces les plus stables aujourd'hui sont le CLI, le kernel, les tools, les
-skills et la configuration provider. Le web, le gateway, Telegram, dreaming/daily
-et les subagents sont fonctionnels mais encore en consolidation.
+skills et la configuration provider. Le web, le gateway, Telegram, dreaming,
+les routines et les subagents sont fonctionnels mais encore en consolidation.

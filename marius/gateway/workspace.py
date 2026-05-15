@@ -45,6 +45,10 @@ def telegram_offset_path(agent_name: str) -> Path:
     return _RUN_DIR / f"telegram_{agent_name}.offset"
 
 
+def telegram_chat_path(agent_name: str) -> Path:
+    return _RUN_DIR / f"telegram_{agent_name}.chat"
+
+
 def web_history_path(agent_name: str) -> Path:
     return workspace_dir(agent_name) / "web_history.json"
 

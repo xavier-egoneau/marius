@@ -23,7 +23,6 @@ def _make_skill(
     version: str = "",
     body: str = "Instructions du skill.",
     dream: str | None = None,
-    daily: str | None = None,
     core: dict[str, str] | None = None,
     commands: list[str] | None = None,
 ) -> Path:
@@ -38,8 +37,6 @@ def _make_skill(
     (skill_dir / "SKILL.md").write_text(f"---\n{fm}\n---\n{body}", encoding="utf-8")
     if dream is not None:
         (skill_dir / "DREAM.md").write_text(dream, encoding="utf-8")
-    if daily is not None:
-        (skill_dir / "DAILY.md").write_text(daily, encoding="utf-8")
     if core:
         (skill_dir / "core").mkdir(exist_ok=True)
         for fname, content in core.items():
@@ -120,7 +117,6 @@ def test_load_basic(tmp_path: Path) -> None:
     assert skill.meta.description == "Dev skill"
     assert skill.content == "Aide le dev."
     assert skill.dream_content == ""
-    assert skill.daily_content == ""
     assert skill.core_files == {}
 
 
@@ -132,13 +128,12 @@ def test_load_with_version(tmp_path: Path) -> None:
     assert skill.meta.version == "2.1.0"
 
 
-def test_load_with_dream_and_daily(tmp_path: Path) -> None:
-    _make_skill(tmp_path, "dev", dream="Données pour le dreaming.", daily="Briefing daily.")
+def test_load_with_dream(tmp_path: Path) -> None:
+    _make_skill(tmp_path, "dev", dream="Données pour le dreaming.")
     reader = SkillReader(tmp_path)
     skill = reader.load("dev")
     assert skill is not None
     assert skill.dream_content == "Données pour le dreaming."
-    assert skill.daily_content == "Briefing daily."
 
 
 def test_load_with_core_files(tmp_path: Path) -> None:

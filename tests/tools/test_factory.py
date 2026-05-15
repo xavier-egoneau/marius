@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from marius.storage.memory_store import MemoryStore
-from marius.tools.factory import STATIC_ENTRIES, build_tool_entries
+from marius.config.contracts import ALL_TOOLS
+from marius.tools.factory import STATIC_ENTRIES, build_tool_entries, registered_tool_names
 from marius.provider_config.contracts import AuthType, ProviderEntry, ProviderKind
 
 
@@ -40,6 +41,14 @@ def test_all_tools_when_none(memory_store: MemoryStore, tmp_path: Path) -> None:
     assert "rag_source_add" in names
     assert "rag_search" in names
     assert "rag_checklist_add" in names
+    assert "reminders" in names
+    assert "browser_open" in names
+    assert "browser_close" in names
+    assert "call_agent" in names
+
+
+def test_config_tool_catalog_comes_from_factory() -> None:
+    assert ALL_TOOLS == registered_tool_names()
 
 
 def test_dynamic_dreaming_tools_included_when_entry_is_available(
@@ -57,7 +66,29 @@ def test_dynamic_dreaming_tools_included_when_entry_is_available(
     names = {e.definition.name for e in entries}
 
     assert "dreaming_run" in names
-    assert "daily_digest" in names
+
+
+def test_runtime_bound_tools_are_built_by_factory(
+    memory_store: MemoryStore, tmp_path: Path
+) -> None:
+    entry = ProviderEntry(
+        id="p1",
+        name="test",
+        provider=ProviderKind.OPENAI,
+        auth_type=AuthType.API,
+        api_key="secret:test",
+        model="gpt-test",
+    )
+
+    entries = build_tool_entries(
+        ["read_file", "reminders", "browser_open", "spawn_agent", "call_agent"],
+        memory_store,
+        tmp_path,
+        entry=entry,
+    )
+    names = {e.definition.name for e in entries}
+
+    assert {"read_file", "reminders", "browser_open", "spawn_agent", "call_agent"} <= names
 
 
 def test_memory_always_present_when_none(memory_store: MemoryStore, tmp_path: Path) -> None:
@@ -120,12 +151,12 @@ def test_extra_tool_injected_even_if_absent_from_enabled(
     from marius.kernel.contracts import ToolResult
 
     extra = ToolEntry(
-        definition=ToolDefinition(name="reminders", description="test", parameters={}),
+        definition=ToolDefinition(name="custom_extra", description="test", parameters={}),
         handler=lambda _: ToolResult(tool_call_id="", ok=True, summary="ok"),
     )
-    entries = build_tool_entries(["read_file"], memory_store, tmp_path, extras={"reminders": extra})
+    entries = build_tool_entries(["read_file"], memory_store, tmp_path, extras={"custom_extra": extra})
     names = {e.definition.name for e in entries}
-    assert "reminders" in names
+    assert "custom_extra" in names
 
 
 def test_no_duplicate_entries(memory_store: MemoryStore, tmp_path: Path) -> None:

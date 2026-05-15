@@ -2,10 +2,12 @@
 
 Une tâche est une unité de travail standalone :
   - backlog   : idée / plan non encore assigné
-  - queued    : décidé, prêt à être lancé (ou en attente de scheduled_for)
+  - queued    : décidé, consommé par le scheduler dès que possible
+                (ou à l'heure prévue si scheduled_for est renseigné)
   - running   : en cours d'exécution par un agent
   - failed    : lancement impossible après retry
   - done      : terminé
+  - paused    : suspendu (principalement pour les routines)
   - archived  : archivé (masqué par défaut)
 
 Tâches récurrentes (recurring=True) :
@@ -13,7 +15,7 @@ Tâches récurrentes (recurring=True) :
   - leur prompt est envoyé au gateway de l'agent selon la cadence
 
 Tâches système (system=True) :
-  - créées automatiquement par le gateway (dreaming/daily)
+  - créées automatiquement par le gateway (dreaming)
   - exécutées directement par le scheduler, pas via socket
 """
 
@@ -35,14 +37,14 @@ class Task:
     id: str
     title: str
     prompt: str       = ""           # source unique de cadrage/exécution (vide = title)
-    status: str       = "backlog"    # backlog|queued|running|failed|done|archived
+    status: str       = "backlog"    # backlog|queued|running|failed|done|paused|archived
     priority: str     = "med"        # high|med|low
     agent: str        = ""           # nom de l'agent assigné
     project_path: str = ""           # chemin absolu du dossier projet
     recurring: bool   = False        # True → apparaît dans Routines
-    cadence: str      = ""           # "daily", "08:00", "Nh", "Nd", "weekly"
+    cadence: str      = ""           # "1d", "08:00", "Nh", "Nd", "weekly"
     scheduled_for: str = ""          # ISO datetime pour exécution unique future
-    system: bool      = False        # True → tâche système (dreaming/daily)
+    system: bool      = False        # True → tâche système (dreaming)
     next_run_at: str  = ""           # ISO datetime — prochain run planifié (géré par TaskScheduler)
     last_run: str     = ""           # ISO datetime du dernier run
     last_error: str   = ""           # message d'erreur du dernier run
@@ -58,6 +60,49 @@ class Task:
 
 _FIELDS = set(Task.__dataclass_fields__)
 _LEGACY_MAP = {"project": "project_path"}
+
+
+def _initial_next_run_at(recurring: bool, cadence: str) -> str:
+    if not recurring or not str(cadence or "").strip():
+        return ""
+    try:
+        from marius.kernel.scheduler import next_run_from_cadence
+        return next_run_from_cadence(str(cadence)).isoformat()
+    except Exception:
+        return ""
+
+
+def _should_refresh_next_run(
+    data: dict[str, Any],
+    *,
+    old_recurring: bool,
+    new_recurring: bool,
+    old_cadence: str,
+    new_cadence: str,
+    next_run_at: str,
+) -> bool:
+    recurring_changed = bool(old_recurring) != bool(new_recurring)
+    cadence_changed = str(old_cadence or "") != str(new_cadence or "")
+    if recurring_changed or cadence_changed:
+        return True
+    if ("cadence" in data or "recurring" in data) and not _next_run_matches_cadence(next_run_at, new_cadence):
+        return True
+    return "next_run_at" not in data and ("cadence" in data or "recurring" in data)
+
+
+def _next_run_matches_cadence(next_run_at: str, cadence: str) -> bool:
+    raw = str(cadence or "").strip()
+    parts = raw.split(":", 1)
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        return True
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+        dt = datetime.fromisoformat(str(next_run_at or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    local = dt.astimezone()
+    return local.hour == hour and local.minute == minute
 
 
 def _normalize_status(value: Any) -> str:
@@ -113,6 +158,8 @@ class TaskStore:
 
     def create(self, data: dict[str, Any]) -> Task:
         now = datetime.now(timezone.utc).isoformat()
+        recurring = bool(data.get("recurring", False))
+        cadence = str(data.get("cadence", ""))
         task = Task(
             id=data.get("id") or f"t_{uuid.uuid4().hex[:8]}",
             title=str(data.get("title", "")).strip(),
@@ -121,10 +168,11 @@ class TaskStore:
             priority=str(data.get("priority", "med")),
             agent=str(data.get("agent", "")),
             project_path=str(data.get("project_path") or data.get("project", "")),
-            recurring=bool(data.get("recurring", False)),
-            cadence=str(data.get("cadence", "")),
+            recurring=recurring,
+            cadence=cadence,
             scheduled_for=str(data.get("scheduled_for", "")),
             system=bool(data.get("system", False)),
+            next_run_at=str(data.get("next_run_at", "")) or _initial_next_run_at(recurring, cadence),
             attempts=int(data.get("attempts", 0) or 0),
             max_attempts=int(data.get("max_attempts", 5) or 5),
             next_attempt_at=str(data.get("next_attempt_at", "")),
@@ -148,12 +196,23 @@ class TaskStore:
             existing = next((t for t in tasks if t.id == task_id), None) if task_id else None
             if existing is None:
                 return self.create(data)
+            old_recurring = existing.recurring
+            old_cadence = existing.cadence
             for key, val in data.items():
                 mapped = _LEGACY_MAP.get(key, key)
                 if mapped in _FIELDS and mapped not in ("id", "created_at", "events"):
                     if mapped == "status":
                         val = _normalize_status(val)
                     setattr(existing, mapped, val)
+            if _should_refresh_next_run(
+                data,
+                old_recurring=old_recurring,
+                new_recurring=existing.recurring,
+                old_cadence=old_cadence,
+                new_cadence=existing.cadence,
+                next_run_at=existing.next_run_at,
+            ):
+                existing.next_run_at = _initial_next_run_at(existing.recurring, existing.cadence)
             existing.updated_at = datetime.now(timezone.utc).isoformat()
             self.save(tasks)
             return existing
@@ -166,6 +225,8 @@ class TaskStore:
                 return None
             now = datetime.now(timezone.utc).isoformat()
             old_status = task.status
+            old_recurring = task.recurring
+            old_cadence = task.cadence
             allowed = _FIELDS - {"id", "created_at", "events"}
             for key, val in data.items():
                 mapped = _LEGACY_MAP.get(key, key)
@@ -173,6 +234,15 @@ class TaskStore:
                     if mapped == "status":
                         val = _normalize_status(val)
                     setattr(task, mapped, val)
+            if _should_refresh_next_run(
+                data,
+                old_recurring=old_recurring,
+                new_recurring=task.recurring,
+                old_cadence=old_cadence,
+                new_cadence=task.cadence,
+                next_run_at=task.next_run_at,
+            ):
+                task.next_run_at = _initial_next_run_at(task.recurring, task.cadence)
             task.updated_at = now
             if task.status != old_status:
                 task.events.append({"kind": "status_changed", "at": now,
@@ -225,11 +295,15 @@ class TaskStore:
         return tasks
 
     def recover_interrupted_running(self, agent: str, *, reason: str = "gateway restarted before task completion") -> list[Task]:
-        """Remet en file les tâches restées `running` pour un agent redémarré.
+        """Récupère les tâches restées `running` pour un agent redémarré.
 
         Le board ne possède pas encore de run durable capable de survivre à un
         restart du gateway. Si le process meurt avant que l'agent appelle
         `task_update`, la tâche resterait sinon bloquée visuellement en cours.
+
+        Les tâches uniques sont marquées `failed` afin d'éviter un second envoi
+        automatique après un redémarrage. Les routines peuvent revenir en
+        `queued`, car leur prochain tir reste porté par `next_run_at`.
         """
         agent_name = str(agent or "").strip()
         if not agent_name:
@@ -241,12 +315,13 @@ class TaskStore:
             for task in tasks:
                 if task.agent != agent_name or task.status != "running":
                     continue
-                task.status = "queued"
+                next_status = "queued" if task.recurring else "failed"
+                task.status = next_status
                 task.last_error = reason[:300]
                 task.locked_at = ""
                 task.locked_by = ""
                 task.updated_at = now
-                task.events.append({"kind": "status_changed", "at": now, "from": "running", "to": "queued"})
+                task.events.append({"kind": "status_changed", "at": now, "from": "running", "to": next_status})
                 task.events.append({"kind": "interrupted", "at": now, "agent": agent_name, "reason": reason[:300]})
                 recovered.append(task)
             if recovered:
@@ -255,7 +330,7 @@ class TaskStore:
 
 
 def seed_agent_system_tasks(agent_name: str, tools: list[str]) -> None:
-    """Crée les routines système dreaming/daily pour un agent si elles n'existent pas encore.
+    """Crée les routines système de dreaming pour un agent si elles n'existent pas encore.
 
     Idempotent — peut être appelé à la création ou à la mise à jour d'un agent.
     """

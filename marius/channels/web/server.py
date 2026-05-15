@@ -22,6 +22,7 @@ Routes :
 from __future__ import annotations
 
 import base64
+import fcntl
 import json
 import queue
 import socket
@@ -93,16 +94,65 @@ class WebServer:
     # ── historique persisté ───────────────────────────────────────────────────
 
     def _load_history(self) -> list[dict]:
+        if not hasattr(self, "_history_path"):
+            return list(getattr(self, "_history", []))
+        lock_path = self._history_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            return json.loads(self._history_path.read_text()) if self._history_path.exists() else []
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_SH)
+                try:
+                    return self._read_history_unlocked()
+                finally:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
         except Exception:
             return []
 
     def _save_history(self) -> None:
+        if not hasattr(self, "_history_path"):
+            return
+        lock_path = self._history_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._history_path.write_text(json.dumps(self._history, ensure_ascii=False))
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                try:
+                    self._write_history_unlocked(self._history)
+                finally:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
         except Exception:
             pass
+
+    def _mutate_history(self, mutate: Any) -> None:
+        if not hasattr(self, "_history_path"):
+            mutate(self._history)
+            return
+        lock_path = self._history_lock_path()
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                try:
+                    self._history = self._read_history_unlocked()
+                    mutate(self._history)
+                    self._write_history_unlocked(self._history)
+                finally:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+        except Exception:
+            pass
+
+    def _history_lock_path(self) -> Path:
+        return self._history_path.with_suffix(self._history_path.suffix + ".lock")
+
+    def _read_history_unlocked(self) -> list[dict]:
+        if not self._history_path.exists():
+            return []
+        raw = json.loads(self._history_path.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, list) else []
+
+    def _write_history_unlocked(self, messages: list[dict]) -> None:
+        self._history_path.parent.mkdir(parents=True, exist_ok=True)
+        self._history_path.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
 
     def _archive_history(self) -> dict[str, Any] | None:
         try:
@@ -144,25 +194,20 @@ class WebServer:
         self._current_assistant = ""
         try:
             with self._send_lock:
-                self._send_gateway_event(InputEvent(text=text))
+                self._send_gateway_event(InputEvent(text=text, channel="web"))
         except OSError:
             self._fail_active_turn()
             raise
-        self._history.append({"role": "user", "content": text, "created_at": _now_iso()})
-        self._save_history()
 
     def send_command(self, cmd: str) -> None:
         try:
             with self._send_lock:
-                self._send_gateway_event(CommandEvent(cmd=cmd))
+                self._send_gateway_event(CommandEvent(cmd=cmd, channel="web"))
         except OSError:
             self._fail_active_turn()
             raise
         if cmd == "/new":
-            self._archive_history()
-            self._history.clear()
             self._current_assistant = ""
-            self._save_history()
 
     def approve_permission(self, request_id: str, approved: bool) -> None:
         with self._perms_lock:
@@ -276,14 +321,27 @@ class WebServer:
         elif etype == "status":
             self._push(sid, {"type": "status", "message": event.get("message", "")})
 
+        elif etype == "visible":
+            self._broadcast({
+                "type": "history_changed",
+                "entry": {
+                    "role": event.get("role", ""),
+                    "content": event.get("content", ""),
+                    "channel": event.get("channel", ""),
+                    "created_at": event.get("created_at", ""),
+                    "tools": event.get("tools", []),
+                },
+            })
+
+        elif etype == "visible_reset":
+            self._history = []
+            self._current_assistant = ""
+            self._broadcast({
+                "type": "history_reset",
+                "channel": event.get("channel", ""),
+            })
+
         elif etype == "done":
-            if self._current_assistant.strip():
-                self._history.append({
-                    "role": "assistant",
-                    "content": self._current_assistant,
-                    "created_at": _now_iso(),
-                })
-                self._save_history()
             self._current_assistant = ""
             self._push(sid, {"type": "done_turn"})
             self._active_session = None
@@ -434,7 +492,8 @@ def _make_handler(ws: WebServer):
                 return
 
             if parsed.path == "/api/history":
-                self._json({"ok": True, "messages": ws._history})
+                ws._history = ws._load_history()
+                self._json({"ok": True, "messages": _visible_chat_messages(ws._history)})
                 return
 
             if parsed.path == "/api/permissions":
@@ -468,17 +527,31 @@ def _make_handler(ws: WebServer):
                 return
 
             if parsed.path == "/api/info":
+                active_project = ""
+                try:
+                    import json as _json
+                    ap = _json.loads(
+                        (Path.home() / ".marius" / "active_project.json").read_text(encoding="utf-8")
+                    )
+                    active_project = ap.get("name") or Path(ap.get("path", "")).name
+                except (OSError, Exception):
+                    pass
                 self._json({
                     "ok": True,
                     "agent": ws.agent_name,
                     "model": ws._welcome.get("model", ""),
                     "provider": ws._welcome.get("provider", ""),
+                    "active_project": active_project,
                     "skill_commands": _get_skill_commands(ws.agent_name),
                 })
                 return
 
             if parsed.path == "/api/models":
                 self._json({"ok": True, "models": _get_models(ws)})
+                return
+
+            if parsed.path == "/api/agents":
+                self._json({"ok": True, "agents": _get_agents(ws.agent_name)})
                 return
 
             self._json({"ok": False, "error": "not_found"}, 404)
@@ -727,13 +800,51 @@ def _save_upload(agent_name: str, payload: dict) -> dict:
     return {"ok": True, "path": str(path), "name": safe}
 
 
+def _get_agents(current_agent: str) -> list[dict]:
+    """Retourne la liste des agents configurés avec leur URL web si disponible."""
+    import glob
+    import os as _os
+    try:
+        from marius.config.store import ConfigStore
+        cfg = ConfigStore().load()
+        if not cfg:
+            return []
+        run_dir = Path.home() / ".marius" / "run"
+        agents = []
+        for name in cfg.agents:
+            url = None
+            pattern = str(run_dir / f"web_{name}_*.pid")
+            for pid_file in sorted(glob.glob(pattern)):
+                try:
+                    port = int(Path(pid_file).stem.rsplit("_", 1)[-1])
+                    pid  = int(Path(pid_file).read_text().strip())
+                    _os.kill(pid, 0)
+                    url = f"http://localhost:{port}"
+                    break
+                except (ValueError, OSError):
+                    continue
+            agents.append({"name": name, "url": url, "current": name == current_agent})
+        return agents
+    except Exception:
+        return []
+
+
 # ── UI HTML ───────────────────────────────────────────────────────────────────
 
 
-import functools
-
-
-@functools.cache
 def _ui_html() -> str:
     p = Path(__file__).parent / "ui.html"
     return p.read_text(encoding="utf-8") if p.exists() else "<html><body>ui.html manquant.</body></html>"
+
+
+def _visible_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    visible: list[dict[str, Any]] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "")
+        content = str(item.get("content") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        visible.append(item)
+    return visible

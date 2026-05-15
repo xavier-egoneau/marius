@@ -30,6 +30,7 @@ import json
 import mimetypes
 import os
 import re
+import threading
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -278,6 +279,11 @@ class DashboardServer:
                     self._json(_api_providers())
                 elif path == "/api/skills":
                     self._json(_api_skills())
+                elif path.startswith("/api/docs/"):
+                    name = path[len("/api/docs/"):]
+                    result = _api_doc_get(name)
+                    if result is None: self._json({"error": "not found"}, 404)
+                    else: self._json(result)
                 elif path == "/api/routines":
                     self._json(_api_routines())
                 elif path == "/api/sessions":
@@ -313,6 +319,14 @@ class DashboardServer:
                     if m:
                         self._json(_api_provider_models(m.group(1)))
                         return
+                    m = re.match(r"^/api/agents/([^/]+)/docs/([^/]+)$", path)
+                    if m:
+                        result = _api_agent_doc_get(m.group(1), m.group(2))
+                        if result is None:
+                            self._json({"error": "not found"}, 404)
+                        else:
+                            self._json(result)
+                        return
                     m = re.match(r"^/api/agents/([^/]+)/web$", path)
                     if m:
                         self._json(_api_agent_web(m.group(1)))
@@ -320,6 +334,14 @@ class DashboardServer:
                     m = re.match(r"^/api/skills/([^/]+)$", path)
                     if m:
                         result = _api_skill_get(m.group(1))
+                        if result is None:
+                            self._json({"error": "not found"}, 404)
+                        else:
+                            self._json(result)
+                        return
+                    m = re.match(r"^/api/sessions/([^/]+)/([^/]+\.md)$", path)
+                    if m:
+                        result = _api_session_get(m.group(1), m.group(2))
                         if result is None:
                             self._json({"error": "not found"}, 404)
                         else:
@@ -366,6 +388,14 @@ class DashboardServer:
                 elif parsed.path == "/api/skills":
                     ok, msg = _create_skill(body)
                     self._json({"ok": ok, "message": msg}, 201 if ok else 400)
+                elif parsed.path == "/api/providers":
+                    ok, msg = _create_provider(body)
+                    self._json({"ok": ok, "message": msg}, 201 if ok else 400)
+                elif parsed.path == "/api/providers/probe":
+                    self._json(_probe_provider_models(body))
+                elif parsed.path == "/api/projects":
+                    ok, msg = _api_projects_add(body)
+                    self._json({"ok": ok, "message": msg}, 201 if ok else 400)
                 else:
                     m = re.match(r"^/api/tasks/([^/]+)/launch$", parsed.path)
                     if m:
@@ -395,6 +425,25 @@ class DashboardServer:
                     ok, msg = _update_skill(m.group(1), body)
                     self._json({"ok": ok, "message": msg}, 200 if ok else 400)
                     return
+                m = re.match(r"^/api/providers/([^/]+)$", parsed.path)
+                if m:
+                    ok, msg = _update_provider(m.group(1), body)
+                    self._json({"ok": ok, "message": msg}, 200 if ok else 400)
+                    return
+                m = re.match(r"^/api/agents/([^/]+)/docs/([^/]+)$", parsed.path)
+                if m:
+                    ok, msg = _api_agent_doc_put(m.group(1), m.group(2), body)
+                    self._json({"ok": ok, "message": msg}, 200 if ok else 400)
+                    return
+                m = re.match(r"^/api/docs/([^/]+)$", parsed.path)
+                if m:
+                    ok, msg = _api_doc_put(m.group(1), body)
+                    self._json({"ok": ok, "message": msg}, 200 if ok else 400)
+                    return
+                if parsed.path == "/api/projects":
+                    ok, msg = _api_projects_patch(body)
+                    self._json({"ok": ok, "message": msg}, 200 if ok else 400)
+                    return
                 self._json({"error": "not found"}, 404)
 
             def do_PATCH(self) -> None:
@@ -416,14 +465,9 @@ class DashboardServer:
                 m = re.match(r"^/api/tasks/([^/]+)$", parsed.path)
                 if m:
                     task_id = m.group(1)
-                    previous = next((t for t in server._tasks.load() if t.id == task_id), None)
-                    previous_status = getattr(previous, "status", "")
                     task = server._tasks.update(task_id, body)
                     if task is None:
                         self._json({"error": "not found"}, 404)
-                    elif _should_launch_after_queue_patch(task, body, previous_status=previous_status):
-                        status, payload = _launch_task(server._tasks, task.id)
-                        self._json(payload, status)
                     else:
                         self._json({"task": asdict(task)})
                     return
@@ -451,6 +495,12 @@ class DashboardServer:
                     self._json({"ok": ok, "message": msg}, 200 if ok else 404)
                     return
 
+                if parsed.path == "/api/projects":
+                    body = self._read_json()
+                    if body is None: return
+                    ok, msg = _api_projects_remove(body)
+                    self._json({"ok": ok, "message": msg}, 200 if ok else 400)
+                    return
                 m = re.match(r"^/api/skills/([^/]+)$", parsed.path)
                 if m:
                     ok, msg = _delete_skill(m.group(1))
@@ -558,8 +608,10 @@ def _api_agents() -> dict:
             "model": ac.model,
             "skills": ac.skills,
             "tools": list(ac.tools),
+            "disabled_tools": list(ac.disabled_tools or []),
             "tools_count": len(ac.tools),
             "scheduler_enabled": ac.scheduler_enabled,
+            "permission_mode": ac.permission_mode,
             "running": _is_running(name),
             "last_session": _last_session_time(name),
         })
@@ -630,7 +682,11 @@ def _last_session_time(agent_name: str) -> str:
 
 def _update_agent(name: str, data: dict) -> tuple[bool, str]:
     from marius.config.store import ConfigStore
-    from marius.config.contracts import effective_tools_for_role
+    from marius.config.contracts import (
+        disabled_tools_for_active_tools,
+        effective_tools_for_agent,
+        normalize_disabled_tools,
+    )
     store = ConfigStore()
     cfg = store.load()
     if cfg is None:
@@ -638,12 +694,16 @@ def _update_agent(name: str, data: dict) -> tuple[bool, str]:
     if name not in cfg.agents:
         return False, f"agent '{name}' not found"
     ac = cfg.agents[name]
-    allowed = {"model", "scheduler_enabled", "skills", "provider_id"}
+    allowed = {"model", "scheduler_enabled", "skills", "provider_id", "permission_mode"}
     for k, v in data.items():
         if k in allowed:
             setattr(ac, k, v)
+    if "disabled_tools" in data and isinstance(data["disabled_tools"], list):
+        ac.disabled_tools = normalize_disabled_tools(data["disabled_tools"], ac.role, ac.skills)
     if "tools" in data and isinstance(data["tools"], list):
-        ac.tools = effective_tools_for_role(data["tools"], ac.role)
+        ac.disabled_tools = disabled_tools_for_active_tools(data["tools"], ac.role)
+    ac.disabled_tools = normalize_disabled_tools(ac.disabled_tools, ac.role, ac.skills)
+    ac.tools = effective_tools_for_agent(ac.disabled_tools, ac.role, ac.skills)
     store.save(cfg)
     from marius.storage.task_store import seed_agent_system_tasks
     seed_agent_system_tasks(name, ac.tools or [])
@@ -755,6 +815,20 @@ def _api_sessions(limit: int = 10) -> dict:
         sessions.extend(_sessions_for_agent(name, limit=5))
     sessions.sort(key=lambda s: s.get("started_at", ""), reverse=True)
     return {"sessions": sessions[:limit]}
+
+
+def _api_session_get(agent_name: str, filename: str) -> dict | None:
+    """Retourne le contenu brut d'un fichier de session."""
+    if ".." in filename or "/" in filename or not filename.endswith(".md"):
+        return None
+    path = _WORKSPACE_ROOT / agent_name / "sessions" / filename
+    if not path.exists():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8")
+        return {"agent": agent_name, "file": filename, "content": content}
+    except OSError:
+        return None
 
 
 def _load_log_entries(n: int) -> list[dict]:
@@ -1006,7 +1080,7 @@ def _api_missions(limit: int = 60) -> dict:
 
 def _create_agent(data: dict) -> tuple[bool, str]:
     from marius.config.store import ConfigStore
-    from marius.config.contracts import AgentConfig, effective_tools_for_role, default_tools_for_role
+    from marius.config.contracts import AgentConfig, disabled_tools_for_active_tools, default_tools_for_role, normalize_disabled_tools
     import re as _re
     store = ConfigStore()
     cfg = store.load()
@@ -1014,7 +1088,7 @@ def _create_agent(data: dict) -> tuple[bool, str]:
         return False, "config unavailable"
     name = str(data.get("name", "")).strip()
     if not name or not _re.match(r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$", name):
-        return False, "invalid agent name"
+        return False, "invalid agent name: use letters, digits, '-' or '_', and start with a letter"
     if name in cfg.agents:
         return False, f"agent '{name}' already exists"
     provider_id = str(data.get("provider_id", "")).strip()
@@ -1023,20 +1097,29 @@ def _create_agent(data: dict) -> tuple[bool, str]:
     model = str(data.get("model", "")).strip()
     if not model:
         return False, "model is required"
-    tools = effective_tools_for_role(data.get("tools") or default_tools_for_role("agent"), "agent")
+    skills = list(data.get("skills") or [])
+    if isinstance(data.get("disabled_tools"), list):
+        disabled_tools = normalize_disabled_tools(data.get("disabled_tools"), "agent", skills)
+    else:
+        disabled_tools = disabled_tools_for_active_tools(
+            data.get("tools") or default_tools_for_role("agent"),
+            "agent",
+        )
     agent = AgentConfig(
         name=name,
         provider_id=provider_id,
         model=model,
         role="agent",
-        skills=list(data.get("skills") or []),
-        tools=tools,
+        skills=skills,
+        disabled_tools=disabled_tools,
         scheduler_enabled=bool(data.get("scheduler_enabled", True)),
     )
     cfg.agents[name] = agent
     store.save(cfg)
+    from marius.storage.agent_docs import seed_agent_docs_from_global
+    seed_agent_docs_from_global(name, marius_home=_MARIUS_HOME, workspace_root=_WORKSPACE_ROOT)
     from marius.storage.task_store import seed_agent_system_tasks
-    seed_agent_system_tasks(name, tools)
+    seed_agent_system_tasks(name, agent.tools or [])
     return True, f"agent '{name}' created"
 
 
@@ -1045,11 +1128,14 @@ _CORE_TOOLS = {
 }
 
 def _api_tools() -> dict:
-    from marius.config.contracts import ALL_TOOLS, ADMIN_ONLY_TOOLS
+    from marius.config.contracts import ALL_TOOLS, ADMIN_ONLY_TOOLS, default_tools_for_role, resolved_tool_groups
     return {
         "tools":      ALL_TOOLS,
         "admin_only": list(ADMIN_ONLY_TOOLS),
         "core":       list(_CORE_TOOLS),
+        "groups":     resolved_tool_groups(ALL_TOOLS),
+        "default_admin": default_tools_for_role("admin"),
+        "default_agent": default_tools_for_role("agent"),
     }
 
 
@@ -1190,6 +1276,70 @@ def _api_config_patch(data: dict) -> tuple[bool, str]:
     return False, f"invalid permission_mode: {new_mode!r} (expected: safe|limited|power)"
 
 
+def _create_provider(data: dict) -> tuple[bool, str]:
+    from marius.provider_config.store import ProviderStore
+    from marius.provider_config.contracts import ProviderEntry, AuthType
+    from marius.provider_config.registry import PROVIDER_REGISTRY, normalize_base_url, requires_api_key_for_base_url
+
+    kind = str(data.get("provider", "")).strip()
+    if kind not in PROVIDER_REGISTRY:
+        return False, f"kind '{kind}' inconnu (valeurs: {', '.join(PROVIDER_REGISTRY)})"
+    defn = PROVIDER_REGISTRY[kind]
+    base_url = normalize_base_url(kind, str(data.get("base_url", "") or defn.default_base_url))
+    api_key  = str(data.get("api_key",  "") or "").strip()
+    model    = str(data.get("model",    "") or "").strip()
+    if requires_api_key_for_base_url(kind, base_url) and not api_key:
+        return False, "clé API requise pour ce provider"
+    if not model:
+        return False, "modèle requis"
+    store = ProviderStore()
+    name = str(data.get("name", "") or "").strip() or f"{kind}-{len(store.load()) + 1}"
+    entry = ProviderEntry(
+        id=ProviderEntry.generate_id(), name=name, provider=kind,
+        auth_type=AuthType.API, base_url=base_url, api_key=api_key, model=model,
+    )
+    store.add(entry)
+    return True, entry.id
+
+
+def _update_provider(provider_id: str, data: dict) -> tuple[bool, str]:
+    from marius.provider_config.store import ProviderStore
+    store   = ProviderStore()
+    entries = store.load()
+    entry   = next((e for e in entries if e.id == provider_id), None)
+    if entry is None:
+        return False, f"provider '{provider_id}' introuvable"
+    if data.get("name"):     entry.name     = str(data["name"]).strip()
+    if data.get("base_url"):
+        from marius.provider_config.registry import normalize_base_url
+        entry.base_url = normalize_base_url(entry.provider, str(data["base_url"]))
+    if data.get("api_key"):  entry.api_key  = str(data["api_key"]).strip()
+    if data.get("model"):    entry.model    = str(data["model"]).strip()
+    store.update(entry)
+    return True, "updated"
+
+
+def _probe_provider_models(data: dict) -> dict:
+    from marius.provider_config.contracts import ProviderEntry, AuthType
+    from marius.provider_config.fetcher import fetch_models, ModelFetchError
+    from marius.provider_config.registry import PROVIDER_REGISTRY, normalize_base_url
+    kind = str(data.get("provider", "")).strip()
+    if kind not in PROVIDER_REGISTRY:
+        return {"models": [], "error": f"kind '{kind}' inconnu"}
+    defn  = PROVIDER_REGISTRY[kind]
+    entry = ProviderEntry(
+        id="probe", name="probe", provider=kind, auth_type=AuthType.API,
+        base_url=normalize_base_url(kind, str(data.get("base_url", "") or defn.default_base_url)),
+        api_key=str(data.get("api_key",  "") or ""), model="",
+    )
+    try:
+        return {"models": fetch_models(entry)}
+    except ModelFetchError as e:
+        return {"models": [], "error": str(e)}
+    except Exception as e:
+        return {"models": [], "error": f"Erreur : {e}"}
+
+
 def _delete_provider(provider_id: str) -> tuple[bool, str]:
     from marius.provider_config.store import ProviderStore
     from marius.config.store import ConfigStore
@@ -1209,11 +1359,12 @@ def _api_providers() -> dict:
     return {
         "providers": [
             {
-                "id":       p.id,
-                "name":     p.name,
-                "provider": p.provider,
-                "model":    p.model,
-                "base_url": p.base_url,
+                "id":        p.id,
+                "name":      p.name,
+                "provider":  str(p.provider),
+                "auth_type": str(p.auth_type),
+                "model":     p.model,
+                "base_url":  p.base_url,
             }
             for p in providers
         ]
@@ -1283,6 +1434,81 @@ def _api_projects() -> dict:
     return {"projects": projects, "active_path": active_path_str}
 
 
+def _api_projects_add(data: dict) -> tuple[bool, str]:
+    path_str = str(data.get("path", "")).strip()
+    if not path_str:
+        return False, "path requis"
+    if not Path(path_str).exists():
+        return False, f"chemin introuvable : {path_str}"
+    projects_file = _MARIUS_HOME / "projects.json"
+    try:
+        raw = json.loads(projects_file.read_text(encoding="utf-8"))
+        projects = raw if isinstance(raw, list) else []
+    except (OSError, json.JSONDecodeError):
+        projects = []
+    if any(p.get("path") == path_str for p in projects):
+        return False, "projet déjà dans la liste"
+    name = str(data.get("name", "") or Path(path_str).name).strip()
+    projects.append({
+        "path": path_str, "name": name,
+        "last_opened": datetime.now(timezone.utc).isoformat(),
+        "session_count": 0,
+    })
+    projects_file.write_text(json.dumps(projects, indent=2, ensure_ascii=False), encoding="utf-8")
+    return True, "added"
+
+
+def _api_projects_remove(data: dict) -> tuple[bool, str]:
+    path_str = str(data.get("path", "")).strip()
+    projects_file = _MARIUS_HOME / "projects.json"
+    try:
+        raw = json.loads(projects_file.read_text(encoding="utf-8"))
+        projects = raw if isinstance(raw, list) else []
+    except (OSError, json.JSONDecodeError):
+        return False, "projects.json introuvable"
+    filtered = [p for p in projects if p.get("path") != path_str]
+    if len(filtered) == len(projects):
+        return False, "projet non trouvé"
+    projects_file.write_text(json.dumps(filtered, indent=2, ensure_ascii=False), encoding="utf-8")
+    return True, "removed"
+
+
+def _api_projects_patch(data: dict) -> tuple[bool, str]:
+    path_str = str(data.get("path", "")).strip()
+    projects_file = _MARIUS_HOME / "projects.json"
+    active_file   = _MARIUS_HOME / "active_project.json"
+    try:
+        raw = json.loads(projects_file.read_text(encoding="utf-8"))
+        projects = raw if isinstance(raw, list) else []
+    except (OSError, json.JSONDecodeError):
+        projects = []
+    project = next((p for p in projects if p.get("path") == path_str), None)
+    if project is None:
+        if data.get("set_active") and path_str and Path(path_str).expanduser().is_dir():
+            resolved = str(Path(path_str).expanduser().resolve())
+            project = {
+                "path": resolved,
+                "name": Path(resolved).name,
+                "last_opened": datetime.now(timezone.utc).isoformat(),
+                "session_count": 0,
+            }
+            projects.append(project)
+            path_str = resolved
+        else:
+            return False, "projet non trouvé"
+    if "name" in data:
+        project["name"] = str(data["name"]).strip() or Path(path_str).name
+    if data.get("set_active"):
+        project["last_opened"] = datetime.now(timezone.utc).isoformat()
+    projects_file.write_text(json.dumps(projects, indent=2, ensure_ascii=False), encoding="utf-8")
+    if data.get("set_active"):
+        active_file.write_text(json.dumps({
+            "path": path_str, "name": project["name"],
+            "set_at": datetime.now(timezone.utc).isoformat(),
+        }, indent=2, ensure_ascii=False), encoding="utf-8")
+    return True, "updated"
+
+
 def _send_to_agent(agent_name: str, message: str) -> dict:
     """Envoie un message au gateway d'un agent (fire-and-forget via socket Unix)."""
     import socket as _socket
@@ -1338,12 +1564,125 @@ def _send_to_agent(agent_name: str, message: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+def _send_routine_to_agent(agent_name: str, prompt: str) -> dict:
+    """Envoie une routine au gateway et garde la connexion ouverte jusqu'à la fin du tour."""
+    import socket as _socket
+    from marius.gateway.workspace import socket_path
+    from marius.gateway.protocol import InputEvent, PermissionResponseEvent, decode, encode
+
+    web = _api_agent_web(agent_name)
+    if not web.get("running"):
+        started = _start_agent_web(agent_name)
+        if started.get("ok"):
+            web = started
+
+    sock_path = socket_path(agent_name)
+    if not sock_path.exists():
+        return {"ok": False, "error": f"Gateway '{agent_name}' non actif."}
+
+    conn = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    try:
+        conn.settimeout(900.0)
+        conn.connect(str(sock_path))
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+
+        conn.sendall(encode(InputEvent(text=prompt, channel="routine")))
+        while True:
+            while b"\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    return {"ok": False, "error": "gateway closed before routine completion"}
+                buf += chunk
+            raw, buf = buf.split(b"\n", 1)
+            event = decode(raw.decode(errors="replace"))
+            etype = event.get("type")
+            if etype == "permission_request":
+                conn.sendall(encode(PermissionResponseEvent(
+                    request_id=str(event.get("request_id") or ""),
+                    approved=False,
+                )))
+            elif etype == "error":
+                return {"ok": False, "error": str(event.get("message") or "routine failed")}
+            elif etype in {"done", "status"}:
+                return {"ok": True}
+    except (OSError, RuntimeError) as exc:
+        return {"ok": False, "error": str(exc)}
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def _launch_routine_task(task_store: Any, task: Any) -> tuple[int, dict]:
+    prompt = str(getattr(task, "prompt", "") or "").strip() or str(getattr(task, "title", "") or "")
+    if not prompt:
+        return 400, {"ok": False, "error": "prompt required"}
+
+    previous_status = str(getattr(task, "status", "") or "queued")
+    now = datetime.now(timezone.utc)
+    task = task_store.update(task.id, {
+        "locked_at": now.isoformat(),
+        "locked_by": "dashboard-routine",
+        "last_error": "",
+    }) or task
+
+    def _worker() -> None:
+        from marius.storage.task_store import TaskStore
+
+        ts = TaskStore()
+        result = _send_routine_to_agent(task.agent, prompt)
+        restore_status = "paused" if previous_status == "paused" else "queued"
+        if result.get("ok"):
+            ts.update(task.id, {
+                "status": restore_status,
+                "locked_at": "",
+                "locked_by": "",
+                "last_error": "",
+                "attempts": 0,
+            })
+            ts.add_event(task.id, {
+                "kind": "launched",
+                "agent": task.agent,
+                "cmd": prompt[:200],
+                "channel": "routine",
+                "manual": True,
+            })
+        else:
+            error = str(result.get("error") or "send_failed")[:300]
+            ts.update(task.id, {
+                "status": restore_status,
+                "locked_at": "",
+                "locked_by": "",
+                "last_error": error,
+            })
+            ts.add_event(task.id, {
+                "kind": "launch_failed",
+                "runner": "dashboard-routine",
+                "error": error,
+                "channel": "routine",
+                "manual": True,
+            })
+
+    threading.Thread(target=_worker, daemon=True, name=f"routine-test-{task.id}").start()
+    return 202, {"ok": True, "routine": True, "task": asdict(task)}
+
+
 def _launch_task(task_store: Any, task_id: str) -> tuple[int, dict]:
     task = next((t for t in task_store.load() if t.id == task_id), None)
     if task is None:
         return 404, {"ok": False, "error": "not_found"}
     if not task.agent:
         return 400, {"ok": False, "error": "agent required"}
+    if task.recurring and not task.system:
+        if task.status not in {"queued", "paused", "failed"}:
+            return 400, {"ok": False, "error": f"routine status is {task.status}"}
+        return _launch_routine_task(task_store, task)
     if task.status not in {"backlog", "queued", "failed"}:
         return 400, {"ok": False, "error": f"task status is {task.status}"}
 
@@ -1511,40 +1850,9 @@ def _is_path_under(path: Path, root: Path) -> bool:
         return False
 
 
-def _should_launch_after_queue_patch(task: Any, data: dict[str, Any], *, previous_status: str = "") -> bool:
-    if data.get("status") != "queued":
-        return False
-    if previous_status in {"queued", "running"}:
-        return False
-    if getattr(task, "recurring", False) or getattr(task, "system", False):
-        return False
-    return bool(getattr(task, "agent", ""))
-
-
 def _task_execution_message(task: Any) -> str:
-    body = (task.prompt or "").strip()
-    if not body:
-        body = task.title
-    project_path = str(getattr(task, "project_path", "") or "").strip()
-    if project_path and not _is_new_project_marker(project_path):
-        body = f"Projet cible: {project_path}\n\n{body}"
-    task_id = str(getattr(task, "id", "") or "").strip()
-    if not task_id:
-        return body
-    instructions = (
-        "[Task Board]\n"
-        f"Task id: {task_id}\n"
-        "Exécute uniquement la task ci-dessous. Quand le travail est livré, "
-        f"appelle l'outil task_update avec id={task_id} et status=\"done\". "
-        "Si tu ne peux pas livrer après avoir réellement essayé, appelle "
-        f"task_update avec id={task_id}, status=\"failed\" et last_error. "
-        "Ne crée pas de nouvelle task."
-    )
-    if body.startswith("/"):
-        command, _, arg = body.partition(" ")
-        prompt = f"{instructions}\n\n[Prompt]\n{arg.strip()}" if arg.strip() else instructions
-        return f"{command} {prompt}".strip()
-    return f"{instructions}\n\n[Prompt]\n{body}"
+    from marius.storage.task_execution import task_execution_message
+    return task_execution_message(task)
 
 
 def _parse_task_datetime(value: str) -> datetime | None:
@@ -1621,6 +1929,60 @@ def _mark_task_launch_failed(
         "next_attempt_at": retry_at.isoformat(),
         "error": short_error,
     }
+
+
+def _api_doc_get(name: str) -> dict | None:
+    """Lit SOUL.md ou IDENTITY.md depuis ~/.marius/."""
+    allowed = {"soul": "SOUL.md", "identity": "IDENTITY.md"}
+    filename = allowed.get(name)
+    if not filename:
+        return None
+    path = _MARIUS_HOME / filename
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    return {"name": name, "content": content}
+
+
+def _api_doc_put(name: str, data: dict) -> tuple[bool, str]:
+    allowed = {"soul": "SOUL.md", "identity": "IDENTITY.md"}
+    filename = allowed.get(name)
+    if not filename:
+        return False, f"document '{name}' inconnu"
+    content = str(data.get("content", ""))
+    (_MARIUS_HOME / filename).write_text(content, encoding="utf-8")
+    return True, "updated"
+
+
+def _api_agent_doc_get(agent_name: str, name: str) -> dict | None:
+    path = _agent_doc_path(agent_name, name)
+    if path is None:
+        return None
+    content = path.read_text(encoding="utf-8") if path.exists() else ""
+    return {
+        "name": name,
+        "agent": agent_name,
+        "scope": "agent",
+        "exists": path.exists(),
+        "path": str(path),
+        "content": content,
+    }
+
+
+def _api_agent_doc_put(agent_name: str, name: str, data: dict) -> tuple[bool, str]:
+    path = _agent_doc_path(agent_name, name)
+    if path is None:
+        return False, "invalid agent document"
+    content = str(data.get("content", ""))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        return False, str(exc)
+    return True, "updated"
+
+
+def _agent_doc_path(agent_name: str, name: str) -> Path | None:
+    from marius.storage.agent_docs import agent_doc_path
+    return agent_doc_path(agent_name, name, marius_home=_MARIUS_HOME, workspace_root=_WORKSPACE_ROOT)
 
 
 def _api_skills() -> dict:

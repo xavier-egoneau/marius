@@ -48,19 +48,21 @@ class TaskScheduler:
                 next_attempt_at = _parse_datetime(task.next_attempt_at)
                 due_scheduled = bool(scheduled_for and now >= scheduled_for)
                 due_retry = bool(next_attempt_at and now >= next_attempt_at)
-                if not due_scheduled and not due_retry:
+                due_immediate = not task.scheduled_for and not task.next_attempt_at
+                if not due_immediate and not due_scheduled and not due_retry:
                     continue
                 handler = self._handlers.get(task.id)
                 if handler is None:
                     continue
                 ts.update(task.id, {
+                    "status": "running",
                     "locked_at": now.isoformat(),
                     "locked_by": "scheduler",
+                    "last_error": "",
                 })
                 try:
                     handler()
-                    ts.update(task.id, {
-                        "status": "running",
+                    updated = ts.update(task.id, {
                         "scheduled_for": "",
                         "next_attempt_at": "",
                         "locked_at": "",
@@ -69,6 +71,8 @@ class TaskScheduler:
                         "last_run": now.isoformat(),
                         "last_error": "",
                     })
+                    if updated is not None and updated.status == "running":
+                        ts.update(task.id, {"status": "done"})
                     fired.append(task.id)
                 except Exception as exc:
                     _mark_queue_failure(ts, task, str(exc), now=now)
@@ -137,7 +141,6 @@ def cadence_to_seconds(cadence: str) -> int | None:
         "off":      None,
         "disabled": None,
         "hourly":   3600,
-        "daily":    86400,
         "weekly":   7 * 86400,
     }
     if raw in aliases:
@@ -171,7 +174,7 @@ def next_run_from_cadence(cadence: str, after: datetime | None = None) -> dateti
     now = after or datetime.now(timezone.utc)
     cadence = (cadence or "").strip()
 
-    # HH:MM → daily at specific local time
+    # HH:MM -> every day at a specific local time
     if re.match(r"^\d{1,2}:\d{2}$", cadence):
         return next_run_for_time(cadence)
 
@@ -266,7 +269,7 @@ def _advance(last: datetime, cadence: str) -> datetime:
     """Calcule le prochain slot sans accumulation de retard."""
     now  = datetime.now(timezone.utc)
 
-    # HH:MM → daily at that local time, starting tomorrow
+    # HH:MM -> every day at that local time, starting tomorrow
     if re.match(r"^\d{1,2}:\d{2}$", cadence.strip()):
         return next_run_for_time(cadence)
 

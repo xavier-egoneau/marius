@@ -85,6 +85,8 @@ def test_host_agent_list_omits_tools_by_default(tmp_path):
 def test_host_agent_save_creates_agent_from_provider(tmp_path):
     config_path = tmp_path / "config.json"
     provider_path = tmp_path / "providers.json"
+    (tmp_path / "SOUL.md").write_text("ame globale", encoding="utf-8")
+    (tmp_path / "IDENTITY.md").write_text("identite globale", encoding="utf-8")
     _provider(provider_path)
     ConfigStore(path=config_path).save(
         MariusConfig(permission_mode="limited", main_agent="main", agents={})
@@ -95,7 +97,6 @@ def test_host_agent_save_creates_agent_from_provider(tmp_path):
         {
             "name": "worker",
             "provider_id": "provider-1",
-            "daily_model": "gpt-mini",
             "add_tools": ["host_status"],
             "skills": ["assistant"],
             "set_main": True,
@@ -107,10 +108,11 @@ def test_host_agent_save_creates_agent_from_provider(tmp_path):
     assert loaded is not None
     assert loaded.main_agent == "worker"
     assert loaded.agents["worker"].model == "gpt-test"
-    assert loaded.agents["worker"].daily_model == "gpt-mini"
     assert "host_status" in loaded.agents["worker"].tools
     assert loaded.agents["worker"].role == "agent"
     assert "spawn_agent" not in loaded.agents["worker"].tools
+    assert (tmp_path / "workspace" / "worker" / "SOUL.md").read_text(encoding="utf-8") == "ame globale"
+    assert (tmp_path / "workspace" / "worker" / "IDENTITY.md").read_text(encoding="utf-8") == "identite globale"
 
 
 def test_host_agent_save_can_enable_spawn_agent_for_named_agent(tmp_path):

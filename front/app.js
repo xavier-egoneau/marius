@@ -5,11 +5,24 @@ const API_BASE = "";   // same origin
 
 // ── API ───────────────────────────────────────────────────────────────────────
 
+async function apiJson(response) {
+  let data = null;
+  try {
+    data = await response.json();
+  } catch (_) {
+    data = null;
+  }
+  if (!response.ok) {
+    const message = data?.message || data?.error || `${response.status} ${response.statusText}`;
+    throw new Error(message);
+  }
+  return data;
+}
+
 const api = {
   async get(path) {
     const r = await fetch(API_BASE + path);
-    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-    return r.json();
+    return apiJson(r);
   },
   async post(path, body) {
     const r = await fetch(API_BASE + path, {
@@ -17,8 +30,7 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-    return r.json();
+    return apiJson(r);
   },
   async put(path, body) {
     const r = await fetch(API_BASE + path, {
@@ -26,8 +38,7 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-    return r.json();
+    return apiJson(r);
   },
   async patch(path, body) {
     const r = await fetch(API_BASE + path, {
@@ -35,13 +46,13 @@ const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-    return r.json();
+    return apiJson(r);
   },
-  async del(path) {
-    const r = await fetch(API_BASE + path, { method: "DELETE" });
-    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-    return r.json();
+  async del(path, body) {
+    const opts = { method: "DELETE" };
+    if (body) { opts.headers = { "Content-Type": "application/json" }; opts.body = JSON.stringify(body); }
+    const r = await fetch(API_BASE + path, opts);
+    return apiJson(r);
   },
 };
 
@@ -261,6 +272,10 @@ const AgentPanel = (() => {
         <div class="panel-label">TOOLS</div>
         <div class="panel-value">${agent.tools_count} actifs</div>
       </div>
+      <div class="panel-section">
+        <div class="panel-label">PERMISSIONS</div>
+        <div class="panel-value">${esc(agent.permission_mode || "limited")}</div>
+      </div>
       ${agent.last_session ? `
         <div class="panel-section">
           <div class="panel-label">DERNIÈRE SESSION</div>
@@ -269,11 +284,13 @@ const AgentPanel = (() => {
     `;
 
     document.getElementById("panel-footer").innerHTML = `
-      <button class="btn primary" id="btn-panel-chat">Ouvrir le chat</button>
+      <button class="btn primary" id="btn-panel-chat" style="width:100%">Ouvrir le chat</button>
       <div style="display:flex;gap:8px;margin-top:6px">
-        <button class="btn" id="btn-panel-edit" style="flex:1">Éditer</button>
+        <button class="btn" id="btn-panel-edit" style="flex:1">Éditer agent</button>
         ${!agent.is_admin ? `<button class="btn danger" id="btn-panel-del">Del</button>` : ""}
       </div>
+      <button class="btn" id="btn-panel-soul" style="width:100%;margin-top:6px">SOUL.MD</button>
+      <button class="btn" id="btn-panel-identity" style="width:100%;margin-top:6px">IDENTITY.MD</button>
     `;
 
     panel.classList.add("open");
@@ -288,6 +305,9 @@ const AgentPanel = (() => {
     document.getElementById("btn-panel-chat").onclick = () => {
       ChatPanel.open(agent);
     };
+
+    document.getElementById("btn-panel-soul").onclick     = () => _openDocEditor("soul", agent.name);
+    document.getElementById("btn-panel-identity").onclick = () => _openDocEditor("identity", agent.name);
   }
 
   function close() {
@@ -305,8 +325,51 @@ const AgentPanel = (() => {
     return "AGENT";
   }
 
-  return { open, close };
+  return { open, close, currentName: () => _agent?.name ?? null };
 })();
+
+// ── Doc editor (SOUL / IDENTITY) ──────────────────────────────────────────────
+
+async function _openDocEditor(name, agentName = null) {
+  const labels = { soul: "SOUL.MD", identity: "IDENTITY.MD" };
+  const hints  = {
+    soul:     agentName ? `Override agent ${agentName}` : "Document global",
+    identity: agentName ? `Override agent ${agentName}` : "Document global",
+  };
+  const label = labels[name] || name.toUpperCase();
+  const basePath = agentName
+    ? `/api/agents/${encodeURIComponent(agentName)}/docs/${encodeURIComponent(name)}`
+    : `/api/docs/${encodeURIComponent(name)}`;
+
+  let content = "";
+  try {
+    const d = await api.get(basePath);
+    content = d.content || "";
+  } catch (e) { toast("Erreur chargement : " + e.message, "err"); return; }
+
+  Modal.open({
+    title: agentName ? `${agentName.toUpperCase()} · ${label}` : label,
+    body: `
+      <div style="font-size:11px;color:var(--dim);margin-bottom:12px">${esc(hints[name] || "")}</div>
+      <textarea id="doc-editor-ta" class="form-textarea"
+        style="min-height:420px;font-family:monospace;font-size:12px;line-height:1.6"
+      >${esc(content)}</textarea>`,
+    footer: `
+      <span style="flex:1"></span>
+      <button class="btn" onclick="Modal.close()">Annuler</button>
+      <button class="btn primary" id="btn-doc-save">Sauvegarder</button>`,
+    onOpen() {
+      document.getElementById("btn-doc-save").onclick = async () => {
+        const newContent = document.getElementById("doc-editor-ta").value;
+        try {
+          const res = await api.put(basePath, { content: newContent });
+          if (res.ok) { toast(`${label} sauvegardé`, "ok"); Modal.close(); }
+          else toast(res.message || "Erreur", "err");
+        } catch (e) { toast("Erreur : " + e.message, "err"); }
+      };
+    },
+  });
+}
 
 // ── ChatPanel ────────────────────────────────────────────────────────────────
 
@@ -319,21 +382,15 @@ const ChatPanel = (() => {
   const statusMsg = document.getElementById("chat-status-msg");
 
   document.getElementById("chat-close").onclick = close;
-  let _chatMdOutside = false;
   let _draft = "";
+  let _autoSend = "";
   let _syncTimer = null;
-  overlay.addEventListener("mousedown", e => {
-    const panel = document.getElementById("chat-panel");
-    _chatMdOutside = panel ? !panel.contains(e.target) : true;
-  });
-  overlay.addEventListener("mouseup", e => {
-    const panel = document.getElementById("chat-panel");
-    if (_chatMdOutside && panel && !panel.contains(e.target)) close();
-  });
+  // Chat panel closes only via ✕ button — not on outside click
 
   async function open(agent, opts = {}) {
     _draft = opts.draft || "";
-    document.getElementById("chat-agent-name").textContent = agent.name.toUpperCase();
+    _autoSend = opts.autoSend || "";
+
     frame.style.display = "none";
     frame.src = "";
     loading.classList.remove("hidden");
@@ -352,7 +409,6 @@ const ChatPanel = (() => {
       }
       statusDot.className = "dot on";
       statusMsg.textContent = res.url;
-      frame.src = _draft ? `${res.url}#draft=${encodeURIComponent(_draft)}` : res.url;
       frame.onload = () => {
         loading.classList.add("hidden");
         frame.style.display = "block";
@@ -362,6 +418,7 @@ const ChatPanel = (() => {
           setTimeout(injectDraft, 1000);
         }
       };
+      frame.src = _draft ? `${res.url}#draft=${encodeURIComponent(_draft)}` : res.url;
     } catch (e) {
       loadingMsg.textContent = "Erreur : " + e.message;
       statusDot.className = "dot err";
@@ -374,6 +431,7 @@ const ChatPanel = (() => {
     frame.style.display = "none";
     loading.classList.remove("hidden");
     _draft = "";
+    _autoSend = "";
     stopSync();
     if (currentView === "tasks") {
       Views.tasks.reload().catch(() => {});
@@ -385,6 +443,13 @@ const ChatPanel = (() => {
   function injectDraft() {
     if (!_draft) return;
     frame.contentWindow?.postMessage({ type: "marius:setDraft", text: _draft }, "*");
+  }
+
+  function sendAuto() {
+    if (!_autoSend) return;
+    const text = _autoSend;
+    _autoSend = "";
+    frame.contentWindow?.postMessage({ type: "marius:sendMessage", text }, "*");
   }
 
   function startSync() {
@@ -405,7 +470,7 @@ const ChatPanel = (() => {
     }
   }
 
-  return { open, close };
+  return { open, close, sendAuto };
 })();
 
 // ── router ────────────────────────────────────────────────────────────────────
@@ -415,6 +480,10 @@ let currentView = null;
 let pollTimer   = null;
 
 window.addEventListener("message", event => {
+  if (event.source === document.getElementById("chat-frame")?.contentWindow && event.data?.type === "marius:ready") {
+    ChatPanel.sendAuto();
+    return;
+  }
   if (!["marius:turnDone", "marius:tasksChanged"].includes(event.data?.type)) return;
   if (currentView === "tasks") {
     Views.tasks.reload().catch(() => {});
@@ -439,11 +508,11 @@ function navigate(view) {
   location.hash = view;
 
   const breadcrumbs = {
-    agents:   "MESH · <b>AGENTS</b>",
-    control:  "MESH · <b>MISSION CONTROL</b>",
-    tasks:    "MESH · <b>TASK.BOARD</b>",
-    routines: "MESH · <b>ROUTINES.CRON</b>",
-    skills:   "MESH · <b>SKILLS</b>",
+    agents:   "MARIUS · <b>AGENTS</b>",
+    control:  "MARIUS · <b>SESSIONS</b>",
+    tasks:    "MARIUS · <b>TASK.BOARD</b>",
+    routines: "MARIUS · <b>ROUTINES.CRON</b>",
+    skills:   "MARIUS · <b>SKILLS</b>",
   };
   document.getElementById("nav-breadcrumb").innerHTML = breadcrumbs[view];
 
@@ -606,7 +675,8 @@ const Views = {
         this._skills = sd.skills || [];
         this._agents = ad.agents || [];
         _skillsRenderList(this);
-        if (this._selected) await _skillsOpenSkill(this, this._selected);
+        const toOpen = this._selected || this._skills[0]?.name || null;
+        if (toOpen) await _skillsOpenSkill(this, toOpen);
         else _skillsRenderEmpty();
       } catch (e) {
         el.innerHTML = `<div class="empty">Cannot reach API · ${e.message}</div>`;
@@ -866,6 +936,50 @@ function _nodeInvaderSVG(isAdmin) {
   return out;
 }
 
+async function _refreshSystemHud(agents) {
+  const hud = document.getElementById("system-hud");
+  if (!hud) return;
+
+  const [taskData, routineData] = await Promise.all([
+    api.get("/api/tasks?non_recurring=1").catch(() => ({ tasks: [] })),
+    api.get("/api/routines").catch(() => ({ routines: [] })),
+  ]);
+  const tasks    = taskData.tasks    || [];
+  const routines = routineData.routines || [];
+
+  const runningAgents   = agents.filter(a => a.running).length;
+  const totalAgents     = agents.length;
+  const healthOk        = runningAgents > 0;
+
+  const reviewTasks     = tasks.filter(t => t.status === "review");
+  const failedTasks     = tasks.filter(t => t.status === "failed");
+  const erroredRoutines = routines.filter(r => r.last_error);
+  const blockedCount    = failedTasks.length + erroredRoutines.length;
+  const runningTasks    = tasks.filter(t => t.status === "running");
+  const activeRoutines  = routines.filter(r => r.status !== "paused");
+
+  const pill = (count, singular, plural, color, onclick) => {
+    const label = `${count} ${count === 1 ? singular : plural}`;
+    return `<div class="hud-pill hud-clickable" onclick="${onclick}" style="color:${color}">${esc(label)}</div>`;
+  };
+
+  const agentLabel = `${runningAgents} ${runningAgents === 1 ? "agent actif" : "agents actifs"} / ${totalAgents}`;
+
+  hud.innerHTML = `
+    <span class="dot ${healthOk ? "ok" : "err"}" style="width:8px;height:8px;flex-shrink:0"></span>
+    <div class="hud-pill hud-clickable" onclick="navigate('agents')" style="color:${healthOk ? "var(--green)" : "var(--red)"}">${esc(agentLabel)}</div>
+    <div class="hud-sep"></div>
+    ${pill(reviewTasks.length, "task en review", "tasks en review",
+        reviewTasks.length ? "var(--accent)" : "var(--dim)", "navigate('tasks')")}
+    <div class="hud-sep"></div>
+    ${pill(blockedCount, "task bloquée", "tasks bloquées",
+        blockedCount ? "var(--red)" : "var(--dim)", "navigate('tasks')")}
+    <div class="hud-sep"></div>
+    ${pill(activeRoutines.length, "routine active", "routines actives",
+        activeRoutines.length ? "var(--text)" : "var(--dim)", "navigate('routines')")}
+  `;
+}
+
 function _buildGraphDOM(el) {
   el.innerHTML = `
     <div id="agent-graph-wrap">
@@ -873,6 +987,7 @@ function _buildGraphDOM(el) {
         <span id="graph-label" style="color:var(--muted);font-size:12px;letter-spacing:.09em">AGENTS</span>
         <span class="badge" id="graph-count">0</span>
       </div>
+      <div id="system-hud"></div>
       <svg id="agent-graph" xmlns="${_NS}">
         <defs>
           <pattern id="graph-grid" width="52" height="52" patternUnits="userSpaceOnUse">
@@ -895,9 +1010,7 @@ function _buildGraphDOM(el) {
     </div>
   `;
   document.getElementById("panel-close").onclick = () => AgentPanel.close();
-  document.getElementById("agent-graph").addEventListener("click", e => {
-    if (!e.target.closest(".agent-node")) AgentPanel.close();
-  });
+  // Panel closes only via ✕ button — not on outside click
 }
 
 function _buildNodeEl(nodeData) {
@@ -998,11 +1111,69 @@ function renderAgentGraph(agents) {
   });
 
   Views.agents.graph.start();
+
+  // Keep panel open: refresh current agent or auto-open admin on first render
+  const currentName = AgentPanel.currentName();
+  const target = currentName
+    ? nodeData.find(n => n.id === currentName)
+    : (nodeData.find(n => n.is_admin) || nodeData[0]);
+  if (target) AgentPanel.open(target);
+
+  // Refresh system HUD (fire-and-forget)
+  _refreshSystemHud(agents);
 }
 
 // ── render: missions table ────────────────────────────────────────────────────
 
-const _expandedMissions = new Set(); // tracks expanded row keys across polls
+const _expandedMissions = new Set();
+
+async function _openSessionTranscript(s) {
+  if (!s.file) { toast("Transcript non disponible", "err"); return; }
+  let content = "";
+  try {
+    const d = await api.get(`/api/sessions/${encodeURIComponent(s.agent)}/${encodeURIComponent(s.file)}`);
+    if (!d || typeof d !== "object") { toast("Réponse invalide", "err"); return; }
+    if (d.error) { toast(d.error, "err"); return; }
+    content = d.content || "";
+  } catch (e) { toast("Erreur chargement : " + e.message, "err"); return; }
+
+  // Parse markdown : strip frontmatter, split turns
+  const body = content.replace(/^---[\s\S]*?---\s*\n/, "");
+  const turns = [];
+  let current = null;
+  for (const line of body.split("\n")) {
+    const userMatch = line.match(/^\*\*(User|Utilisateur)\*\*\s*:?\s*(.*)/);
+    const asstMatch = line.match(/^\*\*(Assistant|Marius)\*\*\s*:?\s*(.*)/);
+    if (userMatch) {
+      if (current) turns.push(current);
+      current = { role: "user", lines: [userMatch[2]] };
+    } else if (asstMatch) {
+      if (current) turns.push(current);
+      current = { role: "asst", lines: [asstMatch[2]] };
+    } else if (current) {
+      current.lines.push(line);
+    }
+  }
+  if (current) turns.push(current);
+
+  const turnsHtml = turns.map(t => {
+    const isUser = t.role === "user";
+    const text = t.lines.join("\n").trim();
+    return `<div class="transcript-turn ${isUser ? "transcript-user" : "transcript-asst"}">
+      <div class="transcript-role">${isUser ? "VOUS" : esc(s.agent.toUpperCase())}</div>
+      <div class="transcript-text">${esc(text)}</div>
+    </div>`;
+  }).join("");
+
+  const date = s.started_at ? new Date(s.started_at).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" }) : "";
+
+  Modal.open({
+    title: `${esc(s.agent.toUpperCase())} · ${date}`,
+    body: turnsHtml || `<div style="color:var(--dim)">Transcript vide</div>`,
+    footer: `<span style="flex:1"></span><button class="btn" onclick="Modal.close()">Fermer</button>`,
+    onOpen() {},
+  });
+}
 
 const _AGENT_COLORS = ["#e07020","#60a5fa","#22c55e","#f59e0b","#a78bfa","#f472b6","#34d399","#fb923c"];
 function _agentColor(name) {
@@ -1073,7 +1244,7 @@ function renderMissions(rows, scheduled, stats) {
   const el = document.getElementById("view-control");
   const savedScroll = document.getElementById("missions-wrap")?.scrollTop ?? 0;
 
-  // daily token histogram for sparkline in stats
+  // Token histogram for sparkline in stats
   const tokByDay = {};
   rows.forEach(s => {
     const day = (s.started_at || "").slice(0, 10);
@@ -1213,21 +1384,17 @@ function renderMissions(rows, scheduled, stats) {
       <td class="r m-time">${_missionAge(s.started_at)}</td>
     `;
 
-    // click to expand: show full recent turns
-    const rowKey = `${s.agent}|${s.started_at}`;
-    if (isLive || (s.recent_turns && s.recent_turns.length)) {
-      tr.style.cursor = "pointer";
-      tr.addEventListener("click", () => {
-        _expandedMissions.has(rowKey) ? _expandedMissions.delete(rowKey) : _expandedMissions.add(rowKey);
-        _expandMissionRow(tr, s);
-      });
-    }
+    // clic : live → ouvrir le chat · passé → ouvrir le transcript
+    tr.style.cursor = "pointer";
+    tr.title = isLive ? "Ouvrir le chat" : "Lire le transcript";
+    tr.addEventListener("click", () => {
+      if (isLive) {
+        ChatPanel.open({ name: s.agent });
+      } else if (s.file) {
+        _openSessionTranscript(s);
+      }
+    });
     tbody.appendChild(tr);
-
-    // restore expanded state after poll rebuild
-    if (_expandedMissions.has(rowKey)) {
-      _expandMissionRow(tr, s, true);
-    }
   });
 
   if (savedScroll) document.getElementById("missions-wrap").scrollTop = savedScroll;
@@ -1262,6 +1429,106 @@ function _expandMissionRow(tr, s, forceOpen = false) {
   tr.after(det);
 }
 
+// ── projects modal ────────────────────────────────────────────────────────────
+
+async function openProjectsModal(tv) {
+  const reload = async () => {
+    const d = await api.get("/api/projects").catch(() => ({ projects: [], active_path: "" }));
+    return { projects: d.projects || [], active: d.active_path || "" };
+  };
+
+  const renderRows = (projects, active) => projects.map(p => `
+    <div class="proj-row" data-path="${esc(p.path)}">
+      <div class="proj-row-info">
+        <div style="display:flex;align-items:center;gap:8px">
+          <input class="form-input proj-name-input" value="${esc(p.name)}" data-path="${esc(p.path)}"
+            style="font-size:13px;padding:4px 8px;flex:0 0 160px" title="Modifier le nom — valide en quittant le champ">
+          ${p.active ? `<span class="tag orange">actif</span>` : `<button class="nav-btn proj-set-active" data-path="${esc(p.path)}" style="font-size:10px;padding:2px 8px">Activer</button>`}
+        </div>
+        <div class="proj-row-path" title="${esc(p.path)}">${esc(p.path)}</div>
+      </div>
+      <button class="icon-btn danger proj-remove" data-path="${esc(p.path)}">✕</button>
+    </div>`).join("") ||
+    `<div style="color:var(--dim);font-size:12px;padding:8px 0">Aucun projet enregistré</div>`;
+
+  let { projects, active } = await reload();
+
+  Modal.open({
+    title: "PROJETS",
+    body: `
+      <div id="proj-list">${renderRows(projects, active)}</div>
+      <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+        <div class="form-label" style="margin-bottom:8px">AJOUTER UN PROJET</div>
+        <div style="display:flex;gap:8px;align-items:flex-end">
+          <div style="flex:1">
+            <div style="font-size:11px;color:var(--dim);margin-bottom:4px">CHEMIN ABSOLU</div>
+            <input class="form-input" id="proj-add-path" placeholder="/home/user/Documents/projets/monapp">
+          </div>
+          <div style="flex:0 0 140px">
+            <div style="font-size:11px;color:var(--dim);margin-bottom:4px">NOM (optionnel)</div>
+            <input class="form-input" id="proj-add-name" placeholder="auto">
+          </div>
+          <button class="nav-btn primary" id="proj-add-btn">Ajouter</button>
+        </div>
+      </div>`,
+    footer: `<span style="flex:1"></span><button class="btn" onclick="Modal.close()">Fermer</button>`,
+    onOpen() {
+      const refresh = async () => {
+        const r = await reload();
+        projects = r.projects; active = r.active;
+        document.getElementById("proj-list").innerHTML = renderRows(projects, active);
+        wireRows();
+        if (tv) await tv.reload();
+      };
+
+      const wireRows = () => {
+        document.querySelectorAll(".proj-remove").forEach(btn => {
+          btn.onclick = async () => {
+            if (!confirm(`Retirer "${btn.dataset.path}" de la liste ?`)) return;
+            const res = await api.del("/api/projects", { path: btn.dataset.path }).catch(e => ({ ok: false, message: e.message }));
+            if (res.ok) { toast("Projet retiré", "ok"); await refresh(); }
+            else toast(res.message || "Erreur", "err");
+          };
+        });
+        document.querySelectorAll(".proj-set-active").forEach(btn => {
+          btn.onclick = async () => {
+            const res = await api.patch("/api/projects", { path: btn.dataset.path, set_active: true }).catch(e => ({ ok: false, message: e.message }));
+            if (res.ok) { toast("Projet activé", "ok"); await refresh(); }
+            else toast(res.message || "Erreur", "err");
+          };
+        });
+        document.querySelectorAll(".proj-name-input").forEach(input => {
+          const saveName = async () => {
+            const name = input.value.trim();
+            const path = input.dataset.path;
+            const original = projects.find(p => p.path === path)?.name || "";
+            if (!name || name === original) return;
+            const res = await api.patch("/api/projects", { path, name }).catch(e => ({ ok: false, message: e.message }));
+            if (res.ok) { toast("Renommé", "ok"); await refresh(); }
+            else toast(res.message || "Erreur", "err");
+          };
+          input.addEventListener("blur", saveName);
+          input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); input.blur(); } });
+        });
+      };
+      wireRows();
+
+      document.getElementById("proj-add-btn").onclick = async () => {
+        const path = document.getElementById("proj-add-path").value.trim();
+        const name = document.getElementById("proj-add-name").value.trim();
+        if (!path) { toast("Chemin requis", "err"); return; }
+        const res = await api.post("/api/projects", { path, name }).catch(e => ({ ok: false, message: e.message }));
+        if (res.ok) {
+          toast("Projet ajouté", "ok");
+          document.getElementById("proj-add-path").value = "";
+          document.getElementById("proj-add-name").value = "";
+          await refresh();
+        } else toast(res.message || "Erreur", "err");
+      };
+    },
+  });
+}
+
 // ── render: kanban ────────────────────────────────────────────────────────────
 
 const COLS = [
@@ -1290,7 +1557,7 @@ function renderKanban(tasks, filter, selectedProject, projects) {
   const pct       = total ? Math.round(done / total * 100) : 0;
 
   document.getElementById("nav-breadcrumb").innerHTML =
-    `MESH · <b>TASK.BOARD</b> <span style="color:var(--dim);font-size:10px;margin-left:8px">${total} tasks · ${inflight} inflight · ${pct}% done</span>`;
+    `MARIUS · <b>TASK.BOARD</b> <span style="color:var(--dim);font-size:10px;margin-left:8px">${total} tasks · ${inflight} inflight · ${pct}% done</span>`;
 
   // project bar
   const projBar = _buildProjectBar(projects, selectedProject);
@@ -1303,6 +1570,7 @@ function renderKanban(tasks, filter, selectedProject, projects) {
   document.querySelectorAll(".project-chip").forEach(chip => {
     chip.addEventListener("click", () => Views.tasks.setProject(chip.dataset.path));
   });
+  document.getElementById("btn-edit-projects")?.addEventListener("click", () => openProjectsModal(Views.tasks));
 
   COLS.forEach(col => {
     const colTasks = filtered.filter(t => t.status === col.id);
@@ -1339,7 +1607,10 @@ function renderKanban(tasks, filter, selectedProject, projects) {
 }
 
 function _buildProjectBar(projects, selected) {
-  if (!projects || !projects.length) return "";
+  const editBtn = `<button class="project-bar-edit" id="btn-edit-projects" title="Gérer les projets">···</button>`;
+  if (!projects || !projects.length) {
+    return `<div id="project-bar"><span id="project-bar-label">PROJET</span><button class="project-chip${selected === "all" ? " active" : ""}" data-path="all">Tous</button>${editBtn}</div>`;
+  }
   const chips = [
     `<button class="project-chip${selected === "all" ? " active" : ""}" data-path="all">Tous</button>`,
     ...projects.map(p => {
@@ -1348,7 +1619,7 @@ function _buildProjectBar(projects, selected) {
       return `<button class="project-chip${isActive}${isSel}" data-path="${esc(p.path)}" title="${esc(p.path)}">${esc(p.name)}</button>`;
     }),
   ].join("");
-  return `<div id="project-bar"><span id="project-bar-label">PROJET</span>${chips}</div>`;
+  return `<div id="project-bar"><span id="project-bar-label">PROJET</span>${chips}${editBtn}</div>`;
 }
 
 function buildTaskCard(t) {
@@ -1364,8 +1635,10 @@ function buildTaskCard(t) {
     : "";
   const tags = (t.tags || []).map(tg => `<span class="tag">${esc(tg)}</span>`).join(" ");
 
-  // action buttons: frame/launch for actionable tasks, view for running
-  const canAct = t.agent && ["backlog","queued","failed"].includes(t.status);
+  // action buttons: backlog is cadrage/queue; queued is already owned by the scheduler.
+  const canPlan = t.agent && ["backlog","failed"].includes(t.status);
+  const canQueue = t.agent && t.status === "backlog";
+  const canRetry = t.agent && t.status === "failed";
   const retryHtml = t.next_attempt_at
     ? `<div class="task-desc">Retry ${esc(_missionAge(t.next_attempt_at))}</div>`
     : "";
@@ -1381,10 +1654,11 @@ function buildTaskCard(t) {
   const agentHtml = t.agent
     ? `<span class="task-agent ${t.running_agent ? "is-running" : "is-idle"}" title="${esc(agentTitle)}"><span class="task-agent-dot"></span>${esc(t.agent)}</span>`
     : "";
-  const actHtml = canAct ? `
+  const actHtml = canPlan ? `
     <div class="task-actions" onclick="event.stopPropagation()">
       <button class="task-btn task-btn-plan">Plan</button>
-      <button class="task-btn primary task-btn-launch">Launch →</button>
+      ${canQueue ? `<button class="task-btn primary task-btn-queue">Queue →</button>` : ""}
+      ${canRetry ? `<button class="task-btn primary task-btn-retry">Retry →</button>` : ""}
     </div>` : t.status === "running" && t.agent ? `
     <div class="task-actions" onclick="event.stopPropagation()">
       <button class="task-btn primary task-btn-view">${t.permission_pending ? "Ask" : "Voir"} →</button>
@@ -1418,7 +1692,8 @@ function buildTaskCard(t) {
   };
 
   card.querySelector(".task-btn-plan")?.addEventListener("click", e => { e.stopPropagation(); planTask(t); });
-  card.querySelector(".task-btn-launch")?.addEventListener("click", e => { e.stopPropagation(); launchTask(t); });
+  card.querySelector(".task-btn-queue")?.addEventListener("click", e => { e.stopPropagation(); queueTask(t); });
+  card.querySelector(".task-btn-retry")?.addEventListener("click", e => { e.stopPropagation(); queueTask(t); });
   card.querySelector(".task-btn-view")?.addEventListener("click", e => { e.stopPropagation(); viewTask(t); });
 
   return card;
@@ -1446,33 +1721,40 @@ function _taskPlanningMessage(t, projectPath = "") {
 }
 
 async function planTask(t) {
-  let projectPath = "";
+  let projectPath = t.project_path || t.project || "";
   if (!t.project_path && !t.project && Views.tasks?.selectedProject && Views.tasks.selectedProject !== "all") {
     projectPath = Views.tasks.selectedProject;
     t = { ...t, project_path: projectPath };
     api.patch(`/api/tasks/${t.id}`, { project_path: projectPath }).catch(() => {});
+  }
+  if (projectPath) {
+    await api.patch("/api/projects", { path: projectPath, set_active: true })
+      .then(() => {
+        if (Views.tasks) Views.tasks.activeProject = projectPath;
+      })
+      .catch(() => toast(`Projet actif non modifié`, "err"));
   }
   ChatPanel.open({ name: t.agent }, { draft: _taskPlanningMessage(t, projectPath) });
   toast(`Message de cadrage prêt dans le chat → ${t.agent}`, "ok");
   if (projectPath) Views.tasks.reload().catch(() => {});
 }
 
-async function launchTask(t) {
+async function queueTask(t) {
   try {
-    const res = await api.post(`/api/tasks/${t.id}/launch`, {});
-    if (res.failed) {
-      toast(`Échec après retry : ${res.error || "gateway indisponible"}`, "err");
-    } else if (res.retry_scheduled) {
-      toast(`Gateway indisponible, retry programmé → ${t.agent}`, "ok");
-    } else if (!res.ok) {
-      toast(`Envoi échoué : ${res.error || "gateway indisponible"}`, "err");
-    } else if (res.scheduled) {
+    const res = await api.patch(`/api/tasks/${t.id}`, {
+      status: "queued",
+      last_error: "",
+      next_attempt_at: "",
+      locked_at: "",
+      locked_by: "",
+      attempts: 0,
+    });
+    if (!res.task) {
+      toast(`Mise en queue échouée`, "err");
+    } else if (res.task.scheduled_for) {
       toast(`Tâche programmée → ${t.agent}`, "ok");
-    } else if (res.locked) {
-      toast(`Envoi déjà en cours → ${t.agent}`, "ok");
     } else {
-      toast(`Tâche lancée → ${t.agent}`, "ok");
-      ChatPanel.open({ name: t.agent });
+      toast(`Tâche en queue → ${t.agent}`, "ok");
     }
     await Views.tasks.reload();
   } catch (e) { toast("Erreur : " + e.message, "err"); }
@@ -1565,13 +1847,11 @@ function renderRoutines(routines) {
         btn.disabled = true;
         btn.textContent = "Envoi…";
         try {
-          const res = await api.post(`/api/agents/${encodeURIComponent(r.agent)}/send`, { message: r.prompt });
-          if (res.ok) {
-            toast(`Prompt envoyé à ${r.agent}`, "ok");
-            ChatPanel.open({ name: r.agent });
-          } else {
-            toast(res.error || "Erreur envoi", "err");
-          }
+          const res = await api.post(`/api/tasks/${encodeURIComponent(r.id)}/launch`, {});
+          if (!res.ok) throw new Error(res.error || "test failed");
+          toast(`Test lancé → ${r.agent}`, "ok");
+          ChatPanel.open({ name: r.agent });
+          await Views.routines.reload();
         } catch(err) {
           toast("Erreur : " + err.message, "err");
         } finally {
@@ -1602,7 +1882,7 @@ async function openNewAgentModal() {
   // blank agent shell for the form
   const blank = {
     name: "", provider_id: providers[0]?.id || "", model: providers[0]?.model || "",
-    is_admin: false, role: "agent", skills: [], tools: [],
+    is_admin: false, role: "agent", skills: [], tools: toolData.default_agent || [], disabled_tools: [], permission_mode: "limited",
   };
 
   Modal.open({
@@ -1611,8 +1891,9 @@ async function openNewAgentModal() {
       <div class="form-row">
         <label class="form-label">NAME</label>
         <input class="form-input" id="f-name" placeholder="ex: researcher" autocomplete="off">
+        <div style="font-size:11px;color:var(--dim);margin-top:6px">Identifiant : lettres, chiffres, tiret ou underscore. Les espaces seront remplacés par des tirets.</div>
       </div>
-      ${_agentFormHtml(blank, providers, allSkills, new Set(), providers[0] || null, allTools, adminOnly, { configured: false }, true)}
+      ${_agentFormHtml(blank, providers, allSkills, new Set(), providers[0] || null, allTools, adminOnly, toolData, { configured: false }, true)}
     `,
     footer: `
       <span style="flex:1"></span>
@@ -1640,8 +1921,15 @@ async function openNewAgentModal() {
       }
 
       document.getElementById("btn-create-agent").onclick = async () => {
-        const name = val("f-name").trim();
+        const rawName = val("f-name");
+        const name = normalizeAgentName(rawName);
+        const nameEl = document.getElementById("f-name");
+        if (nameEl && rawName !== name) nameEl.value = name;
         if (!name) { toast("Le nom est requis", "err"); return; }
+        if (!isValidAgentName(name)) {
+          toast("Nom invalide : commence par une lettre, puis lettres/chiffres/tiret/underscore.", "err");
+          return;
+        }
         const d = _readAgentForm();
         if (!d.provider_id) { toast("Sélectionne un provider", "err"); return; }
         if (!d.model)        { toast("Renseigne un modèle", "err"); return; }
@@ -1682,7 +1970,7 @@ async function openEditAgentModal(agent) {
 
   Modal.open({
     title: `EDIT AGENT · ${agent.name.toUpperCase()}`,
-    body: _agentFormHtml(agent, providers, allSkills, activeSkills, currentProv, allTools, adminOnly, tgData),
+    body: _agentFormHtml(agent, providers, allSkills, activeSkills, currentProv, allTools, adminOnly, toolData, tgData),
     footer: `
       ${!agent.is_admin ? `<button class="btn danger" id="btn-del-agent">Delete</button>` : ""}
       <span style="flex:1"></span>
@@ -1723,6 +2011,16 @@ async function openEditAgentModal(agent) {
         const selectedId = provSelect.value;
         const curModel = document.getElementById("f-model")?.value || "";
         loadModels(selectedId, curModel);
+      });
+
+      // permission mode toggle
+      document.querySelectorAll('.perm-option input[name="f-perm"]').forEach(input => {
+        input.addEventListener("change", () => {
+          document.querySelectorAll('.perm-option input[name="f-perm"]').forEach(el =>
+            el.closest(".perm-option").classList.remove("active")
+          );
+          input.closest(".perm-option").classList.add("active");
+        });
       });
 
       // telegram toggle → show/hide fields
@@ -1783,51 +2081,7 @@ async function openEditAgentModal(agent) {
   });
 }
 
-// tool groups — [label, resolver, description]
-const _TOOL_GROUPS = [
-  ["Filesystem",  ["read_file","list_dir","write_file","make_dir","move_path"],
-    "Lecture, écriture et déplacement de fichiers"],
-  ["Explore",     t => t.filter(x => x.startsWith("explore_")),
-    "Parcours et recherche dans l'arborescence"],
-  ["Shell",       ["run_bash"],
-    "Exécution de commandes shell"],
-  ["Web",         t => t.filter(x => x.startsWith("web_")),
-    "Recherche web et récupération de pages"],
-  ["Vision",      ["vision"],
-    "Analyse d'images locales via Ollama"],
-  ["Skill authoring", t => t.filter(x => x.startsWith("skill_")),
-    "Lire, créer et recharger des fichiers de skills (authoring uniquement)"],
-  ["Host",        t => t.filter(x => x.startsWith("host_")),
-    "Permissions pour interroger Marius lui-même : lister les agents, lire les logs, diagnostics, redémarrer le gateway"],
-  ["Projects",    t => t.filter(x => x.startsWith("project_")),
-    "Gestion et sélection du projet actif"],
-  ["Security",    t => t.filter(x => x.startsWith("approval_") || x.startsWith("secret_ref_")),
-    "Permissions pour gérer les approbations d'actions et les références de secrets (pas les secrets eux-mêmes)"],
-  ["Provider",    t => t.filter(x => x.startsWith("provider_")),
-    "Permissions pour lister ou modifier les providers LLM configurés"],
-  ["Dreaming",    ["dreaming_run","daily_digest"],
-    "Déclencher manuellement la consolidation mémoire ou le briefing quotidien"],
-  ["Self-update", t => t.filter(x => x.startsWith("self_update_")),
-    "Permissions pour proposer, appliquer ou rollback des mises à jour de Marius"],
-  ["Watch",       t => t.filter(x => x.startsWith("watch_")),
-    "Veille automatisée sur des sujets web"],
-  ["RAG",         t => t.filter(x => x.startsWith("rag_")),
-    "Sources Markdown indexées, recherche sémantique, checklists"],
-  ["Calendar",    t => t.filter(x => x.startsWith("caldav_")),
-    "Calendrier CalDAV via khal/vdirsyncer"],
-  ["Sentinelle",  ["sentinelle_scan"],
-    "Audit local : ports ouverts, services, Docker, dérive système"],
-  ["Agents",      ["spawn_agent"],
-    "Délégation de tâches parallèles à des sous-agents"],
-  ["Web UI",      ["open_marius_web"],
-    "Ouverture de l'interface web Marius"],
-];
-
-function _resolveGroup(defOrFn, allTools) {
-  return typeof defOrFn === "function" ? defOrFn(allTools) : defOrFn.filter(t => allTools.includes(t));
-}
-
-function _agentFormHtml(agent, providers, allSkills, activeSkills, currentProv, allTools, adminOnly, tgData, hideNameRow = false) {
+function _agentFormHtml(agent, providers, allSkills, activeSkills, currentProv, allTools, adminOnly, toolData, tgData, hideNameRow = false) {
   // provider select
   const provOptions = providers.map(p =>
     `<option value="${esc(p.id)}" ${p.id === agent.provider_id ? "selected" : ""}>${esc(p.name)} · ${esc(p.provider)}</option>`
@@ -1857,38 +2111,50 @@ function _agentFormHtml(agent, providers, allSkills, activeSkills, currentProv, 
 
   // tools as group toggles
   const activeTools = new Set(agent.tools || []);
+  const disabledTools = new Set(agent.disabled_tools || []);
   const isAdmin     = agent.is_admin;
-  const coreTools   = new Set((typeof toolData !== "undefined" ? toolData.core : null) || []);
+  const coreTools   = new Set(toolData?.core || []);
+  const toolGroups  = (toolData?.groups || []).length
+    ? toolData.groups
+    : [{ id: "all", label: "Tools", description: "Outils disponibles", tools: allTools }];
 
-  // collect core tools list for the hidden input
-  const coreList = allTools.filter(t => coreTools.has(t));
+  const editableTools = [];
 
   const toolsHtml = `
-    <input type="hidden" id="f-always-tools" value="${esc(coreList.join(","))}">
+    <input type="hidden" id="f-disabled-tools" value="${esc([...disabledTools].join(","))}">
     <div class="tool-toggles">
-      ${_TOOL_GROUPS.map(([label, def, desc]) => {
-        const items = _resolveGroup(def, allTools);
+      ${toolGroups.map(group => {
+        const label = group.label || group.id || "Tools";
+        const desc = group.description || "";
+        const items = Array.isArray(group.tools) ? group.tools.filter(t => allTools.includes(t)) : [];
         // filter: remove core, remove admin-only if not admin
         const available = items.filter(t =>
           !coreTools.has(t) && (isAdmin || !adminOnly.has(t))
         );
         if (!available.length) return "";
+        editableTools.push(...available);
         const isOn = available.some(t => activeTools.has(t));
+        const activeCount = available.filter(t => activeTools.has(t)).length;
+        const partial = activeCount > 0 && activeCount < available.length;
         return `
           <label class="toggle-row tool-toggle-row">
             <span class="toggle-label-block">
               <span class="toggle-label">${esc(label)}</span>
               ${desc ? `<span class="toggle-desc">${esc(desc)}</span>` : ""}
+              ${partial ? `<span class="toggle-desc tool-partial">Partiel : ${activeCount}/${available.length} outils actifs.</span>` : ""}
             </span>
             <span class="toggle-wrap">
               <input type="checkbox" class="toggle-input tool-group-toggle"
                 data-tools="${esc(available.join(","))}"
+                data-initial-disabled="${esc(available.filter(t => disabledTools.has(t)).join(","))}"
+                onchange="this.dataset.dirty='1'"
                 ${isOn ? "checked" : ""}>
               <span class="toggle-slider"></span>
             </span>
           </label>`;
       }).filter(Boolean).join("")}
-    </div>`;
+    </div>
+    <input type="hidden" id="f-editable-tools" value="${esc([...new Set(editableTools)].join(","))}">`;
 
   // telegram — recalculé ici pour le rendu (tgOwner/tgActive existent aussi dans openEditAgentModal pour le save handler)
   const tgOwner  = tgData.configured && tgData.agent_name === agent.name;
@@ -1915,12 +2181,30 @@ function _agentFormHtml(agent, providers, allSkills, activeSkills, currentProv, 
       </div>
     </div>`;
 
+  const permOpts = ["safe", "limited", "power"];
+  const curPerm  = agent.permission_mode || "limited";
+  const permHtml = `
+    <div style="display:flex;gap:8px">
+      ${permOpts.map(p => `
+        <label class="perm-option ${p === curPerm ? "active" : ""}">
+          <input type="radio" name="f-perm" value="${p}" ${p === curPerm ? "checked" : ""} style="display:none">
+          <span>${p.toUpperCase()}</span>
+        </label>`).join("")}
+    </div>
+    <div style="margin-top:6px;font-size:11px;color:var(--dim)">
+      safe — lecture seule &nbsp;·&nbsp; limited — écriture locale (recommandé) &nbsp;·&nbsp; power — sans restriction
+    </div>`;
+
   return `
     ${hideNameRow ? "" : `
     <div class="form-row">
       <label class="form-label">NAME</label>
       <div class="form-input" style="opacity:.45;cursor:default">${esc(agent.name)}</div>
     </div>`}
+    <div class="form-row">
+      <label class="form-label">PERMISSION MODE</label>
+      ${permHtml}
+    </div>
     <div class="form-row">
       <label class="form-label">PROVIDER</label>
       ${providers.length
@@ -1951,19 +2235,26 @@ function _readAgentForm() {
   const modelEl = document.getElementById("f-model");
   const skills  = [...document.querySelectorAll('input[name="skill"]:checked')].map(el => el.value);
 
-  // core tools always included
-  const alwaysEl = document.getElementById("f-always-tools");
-  const always   = alwaysEl ? alwaysEl.value.split(",").filter(Boolean) : [];
-  // group toggles
-  const toggled  = [...document.querySelectorAll(".tool-group-toggle:checked")]
-    .flatMap(t => t.dataset.tools.split(",").filter(Boolean));
-  const tools    = [...new Set([...always, ...toggled])];
+  const existingDisabledEl = document.getElementById("f-disabled-tools");
+  const disabled = new Set(existingDisabledEl ? existingDisabledEl.value.split(",").filter(Boolean) : []);
+  document.querySelectorAll(".tool-group-toggle").forEach(t => {
+    const tools = t.dataset.tools.split(",").filter(Boolean);
+    if (t.dataset.dirty === "1") {
+      tools.forEach(tool => {
+        if (t.checked) disabled.delete(tool);
+        else disabled.add(tool);
+      });
+    }
+  });
+
+  const permEl = document.querySelector('input[name="f-perm"]:checked');
 
   return {
-    provider_id: provEl  ? provEl.value  : "",
-    model:       modelEl ? modelEl.value : "",
+    provider_id:     provEl  ? provEl.value  : "",
+    model:           modelEl ? modelEl.value : "",
+    permission_mode: permEl  ? permEl.value  : "limited",
     skills,
-    tools,
+    disabled_tools:  [...disabled],
   };
 }
 
@@ -1998,7 +2289,7 @@ async function openTaskModal(task, tasksView, isRoutine = false) {
   const isNew = !task;
   const tv = tasksView || Views.tasks;
   // if opening from routines, pre-set recurring=true on new task
-  if (isNew && isRoutine) task = { recurring: true, cadence: "daily" };
+  if (isNew && isRoutine) task = { recurring: true, cadence: "1d" };
 
   // fetch agents + projects for selects
   const [agData, prData] = await Promise.all([
@@ -2103,14 +2394,12 @@ async function openTaskModal(task, tasksView, isRoutine = false) {
           btn.disabled = true;
           btn.textContent = "Envoi…";
           try {
-            const res = await api.post(`/api/agents/${encodeURIComponent(task.agent)}/send`, { message: task.prompt });
-            if (res.ok) {
-              toast(`Prompt envoyé à ${task.agent}`, "ok");
-              Modal.close();
-              ChatPanel.open({ name: task.agent });
-            } else {
-              toast(res.error || "Erreur envoi", "err");
-            }
+            const res = await api.post(`/api/tasks/${encodeURIComponent(task.id)}/launch`, {});
+            if (!res.ok) throw new Error(res.error || "test failed");
+            toast(`Test lancé → ${task.agent}`, "ok");
+            Modal.close();
+            ChatPanel.open({ name: task.agent });
+            await Views.routines.reload();
           } catch (err) {
             toast("Erreur : " + err.message, "err");
           } finally {
@@ -2232,7 +2521,7 @@ function _renderEvents(events) {
 
 const _CADENCE_PRESETS = [
   { value: "at_time", label: "Chaque jour à…" },
-  { value: "daily",   label: "Chaque jour (minuit)" },
+  { value: "1d",      label: "Chaque jour" },
   { value: "hourly",  label: "Toutes les heures" },
   { value: "4h",      label: "Toutes les 4h" },
   { value: "6h",      label: "Toutes les 6h" },
@@ -2242,7 +2531,7 @@ const _CADENCE_PRESETS = [
 ];
 
 function _parseCadencePreset(cadence) {
-  if (!cadence) return { preset: "daily", time: "08:00", custom: "" };
+  if (!cadence) return { preset: "1d", time: "08:00", custom: "" };
   if (/^\d{2}:\d{2}$/.test(cadence)) return { preset: "at_time", time: cadence, custom: "" };
   const known = _CADENCE_PRESETS.map(p => p.value).filter(v => v !== "at_time" && v !== "custom");
   if (known.includes(cadence)) return { preset: cadence, time: "08:00", custom: "" };
@@ -2267,7 +2556,7 @@ function _cadenceSelectHtml(cadence) {
 }
 
 function _readCadence() {
-  const preset = document.getElementById("tf-cadence-preset")?.value || "daily";
+  const preset = document.getElementById("tf-cadence-preset")?.value || "1d";
   if (preset === "at_time") return document.getElementById("tf-cadence-time")?.value || "08:00";
   if (preset === "custom")  return document.getElementById("tf-cadence-custom")?.value.trim() || "";
   return preset;
@@ -2395,11 +2684,74 @@ function val(id) {
   return el ? el.value.trim() : "";
 }
 
+function normalizeAgentName(name) {
+  return String(name ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, 64);
+}
+
+function isValidAgentName(name) {
+  return /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(String(name ?? ""));
+}
+
 // ── boot ──────────────────────────────────────────────────────────────────────
 
 document.querySelectorAll(".tab").forEach(btn => {
   btn.onclick = () => navigate(btn.dataset.view);
 });
+
+// ── provider defaults (registry mirrors) ─────────────────────────────────────
+// 3 connection types → maps to (provider kind, auth_type, fields shown)
+const _CONN_TYPES = {
+  api:          { label: "OpenAI API",     hint: "OpenAI-compatible avec /v1",                 kind: "openai", needsKey: true  },
+  ollama_cloud: { label: "Ollama Cloud",   hint: "API distante Ollama avec clé",                kind: "ollama", needsKey: true  },
+  local:        { label: "Ollama local",   hint: "Modèle local, pas de clé",                    kind: "ollama", needsKey: false },
+  oauth:        { label: "OAuth",          hint: "ChatGPT via abonnement",                      kind: "openai", needsKey: false },
+};
+
+function _provConnType(p) {
+  if (p.auth_type === "auth") return "oauth";
+  const kind = String(p.provider).toLowerCase();
+  const baseUrl = String(p.base_url || "").toLowerCase();
+  if (kind.includes("ollama")) {
+    if (p.has_api_key || baseUrl.includes("ollama.com")) return "ollama_cloud";
+    return "local";
+  }
+  return "api";
+}
+
+function _providersListHtml(providers) {
+  if (!providers.length) {
+    return `<div style="color:var(--dim);font-size:12px;padding:6px 0">Aucun provider configuré.</div>`;
+  }
+  return providers.map(p => {
+    const ct = _provConnType(p);
+    const ctLabel = _CONN_TYPES[ct]?.label || ct;
+    return `
+    <div class="provider-row" data-id="${esc(p.id)}">
+      <span class="provider-dot"></span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:13px;color:var(--text)">${esc(p.name)}</span>
+          <span style="font-size:10px;padding:1px 6px;border:1px solid var(--border-hi);border-radius:2px;color:var(--dim)">${esc(ctLabel)}</span>
+        </div>
+        <div style="font-size:11px;color:var(--dim);margin-top:2px">${esc(p.model || "—")}</div>
+      </div>
+      <button class="icon-btn provider-edit"
+        data-id="${esc(p.id)}" data-name="${esc(p.name)}" data-ct="${ct}"
+        data-url="${esc(p.base_url || "")}" data-model="${esc(p.model || "")}">edit</button>
+      <button class="icon-btn danger provider-del"
+        data-id="${esc(p.id)}" data-name="${esc(p.name)}">del</button>
+    </div>`;
+  }).join("");
+}
 
 document.getElementById("btn-settings").onclick = async () => {
   const [cfgData, provData] = await Promise.all([
@@ -2409,37 +2761,77 @@ document.getElementById("btn-settings").onclick = async () => {
   const cfg       = cfgData;
   const providers = provData.providers || [];
 
-  const permOptions = ["safe", "limited", "power"];
-
   Modal.open({
     title: "SETTINGS",
     body: `
-      <div class="form-row">
-        <label class="form-label">PERMISSION MODE</label>
-        <div style="display:flex;gap:8px">
-          ${permOptions.map(p => `
-            <label class="perm-option ${p === cfg.permission_mode ? "active" : ""}">
-              <input type="radio" name="perm" value="${p}" ${p === cfg.permission_mode ? "checked" : ""} style="display:none">
-              <span>${p.toUpperCase()}</span>
-            </label>`).join("")}
-        </div>
-        <div style="margin-top:7px;font-size:11px;color:var(--dim)">
-          safe — lecture seule &nbsp;·&nbsp; limited — écriture locale (recommandé) &nbsp;·&nbsp; power — sans restriction
-        </div>
-      </div>
-
       <div class="form-row" style="margin-top:4px">
-        <label class="form-label">PROVIDERS</label>
-        <div id="providers-list">
-          ${providers.length ? providers.map(p => `
-            <div class="provider-row" data-id="${esc(p.id)}">
-              <span class="provider-dot"></span>
-              <span class="provider-name">${esc(p.name)}</span>
-              <span class="provider-kind">${esc(p.provider)}</span>
-              <span class="provider-model">${esc(p.model)}</span>
-              <button class="icon-btn danger provider-del" data-id="${esc(p.id)}" data-name="${esc(p.name)}">del</button>
-            </div>`).join("")
-          : `<div style="color:var(--dim);font-size:13px">Aucun provider configuré — lancez <code>marius add provider</code></div>`}
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <label class="form-label" style="margin:0">PROVIDERS</label>
+          <button class="nav-btn" id="pf-add-btn" style="font-size:11px;padding:3px 10px">+ Ajouter</button>
+        </div>
+        <div id="providers-list">${_providersListHtml(providers)}</div>
+
+        <div id="pf-wrap" style="display:none;margin-top:12px;border:1px solid var(--border);border-radius:4px;padding:16px">
+          <div style="display:flex;align-items:center;margin-bottom:16px">
+            <span style="font-size:11px;letter-spacing:.1em;color:var(--muted)" id="pf-title">NOUVEAU PROVIDER</span>
+            <span style="flex:1"></span>
+            <button class="icon-btn" id="pf-cancel">✕</button>
+          </div>
+
+          <!-- 1. Type de connexion -->
+          <div class="form-row" id="pf-type-row" style="margin-bottom:14px">
+            <label class="form-label">TYPE DE CONNEXION</label>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              ${Object.entries(_CONN_TYPES).map(([k, t]) => `
+                <label class="perm-option pf-conn-option${k==="api"?" active":""}" id="pf-ct-${k}" data-ct="${k}" role="radio" aria-checked="${k==="api"?"true":"false"}" tabindex="0" title="${t.hint}">
+                  <input type="radio" name="pf-ct" value="${k}" ${k==="api"?"checked":""} style="display:none">
+                  <span>${t.label}</span>
+                </label>`).join("")}
+            </div>
+          </div>
+
+          <!-- 2. OAuth notice (read-only when creating, model-only when editing) -->
+          <div id="pf-oauth-notice" style="display:none;margin-bottom:12px;padding:10px 12px;background:var(--card);border-radius:4px;font-size:12px;color:var(--muted);line-height:1.7">
+            La connexion OAuth (ChatGPT via abonnement) nécessite un flow navigateur.<br>
+            Créez ce provider depuis le terminal : <code style="color:var(--accent)">marius add provider</code><br>
+            <span id="pf-oauth-edit-hint" style="display:none">En mode édition, vous pouvez modifier le nom et changer de modèle.</span>
+          </div>
+
+          <!-- 3. Champs communs (nom + url) -->
+          <div id="pf-fields-common" style="margin-bottom:12px">
+            <div class="form-row-2">
+              <div>
+                <label class="form-label">NOM</label>
+                <input class="form-input" id="pf-name" placeholder="ex: anthropic-api">
+              </div>
+              <div id="pf-url-col">
+                <label class="form-label">BASE URL</label>
+                <input class="form-input" id="pf-url" value="https://api.openai.com/v1">
+              </div>
+            </div>
+          </div>
+
+          <!-- 4. Clé API (API seulement) -->
+          <div id="pf-key-row" class="form-row" style="margin-bottom:12px">
+            <label class="form-label">CLEF API</label>
+            <input class="form-input" id="pf-key" type="password" placeholder="sk-… / ollama_…" autocomplete="new-password">
+            <div style="margin-top:4px;font-size:11px;color:var(--dim)" id="pf-key-hint">OpenAI-compatible avec clef API.</div>
+          </div>
+
+          <!-- 5. Modèle -->
+          <div id="pf-model-row" class="form-row" style="margin-bottom:14px">
+            <label class="form-label">MODÈLE</label>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+              <select class="form-select" id="pf-model-sel" style="flex:1">
+                <option value="">— cliquez Charger pour voir les modèles disponibles —</option>
+              </select>
+              <button class="nav-btn" id="pf-fetch" style="white-space:nowrap;flex-shrink:0">⟳ Charger</button>
+            </div>
+            <input class="form-input" id="pf-model-manual" placeholder="Ou saisir le nom du modèle manuellement" style="display:none">
+            <button style="background:none;border:none;color:var(--dim);font-size:11px;cursor:pointer;padding:0;font-family:var(--font)" id="pf-manual-toggle">Saisir manuellement</button>
+          </div>
+
+          <button class="nav-btn primary" id="pf-submit">CRÉER</button>
         </div>
       </div>
 
@@ -2452,51 +2844,254 @@ document.getElementById("btn-settings").onclick = async () => {
     `,
     footer: `
       <span style="flex:1"></span>
-      <button class="btn" onclick="Modal.close()">Fermer</button>
-      <button class="btn primary" id="btn-save-settings">Sauvegarder</button>
+      <button class="btn primary" id="btn-save-settings" onclick="Modal.close()">Fermer</button>
     `,
     onOpen() {
-      // radio styling
-      document.querySelectorAll(".perm-option input").forEach(input => {
-        input.addEventListener("change", () => {
-          document.querySelectorAll(".perm-option").forEach(el => el.classList.remove("active"));
-          input.closest(".perm-option").classList.add("active");
+      let _pfEditId = null;
+
+      // ── connection type switching ──────────────────────────────────────
+      const DEFAULT_URLS = {
+        api:          "https://api.openai.com/v1",
+        ollama_cloud: "https://ollama.com",
+        local:        "http://localhost:11434",
+      };
+
+      const pfSelectedCt = () => {
+        const active = document.querySelector(".pf-conn-option.active input[name='pf-ct']");
+        if (active?.value) return active.value;
+        return document.querySelector("input[name='pf-ct']:checked")?.value || "api";
+      };
+
+      const pfApplyCt = (ct, isEdit = false) => {
+        Object.keys(_CONN_TYPES).forEach(k => {
+          const el = document.getElementById(`pf-ct-${k}`);
+          if (!el) return;
+          el.classList.toggle("active", k === ct);
+          el.setAttribute("aria-checked", k === ct ? "true" : "false");
         });
-      });
+        const checked = document.querySelector(`input[name="pf-ct"][value="${ct}"]`);
+        if (checked) checked.checked = true;
 
-      // delete provider
-      document.querySelectorAll(".provider-del").forEach(btn => {
-        btn.onclick = async () => {
-          const id   = btn.dataset.id;
-          const name = btn.dataset.name;
-          if (!confirm(`Supprimer le provider "${name}" ?`)) return;
-          try {
-            const res = await api.del(`/api/providers/${encodeURIComponent(id)}`);
-            if (res.ok) {
-              btn.closest(".provider-row").remove();
-              toast(`Provider ${name} supprimé`, "ok");
-            } else {
-              toast(res.message || "Erreur", "err");
-            }
-          } catch (e) { toast("Erreur: " + e.message, "err"); }
-        };
-      });
+        const isOauth = ct === "oauth";
+        const isLocal = ct === "local";
+        const needsKey = !!_CONN_TYPES[ct]?.needsKey;
 
-      document.getElementById("btn-save-settings").onclick = async () => {
-        const checked = document.querySelector('input[name="perm"]:checked');
-        if (!checked) return;
-        try {
-          const res = await api.patch("/api/config", { permission_mode: checked.value });
-          if (res.ok) {
-            toast("Paramètres sauvegardés", "ok");
-            Modal.close();
-          } else {
-            toast(res.message || "Erreur", "err");
+        // OAuth: in edit mode show only a small badge, no CLI message
+        document.getElementById("pf-oauth-notice").style.display   = isOauth && !isEdit ? "" : "none";
+        document.getElementById("pf-oauth-edit-hint").style.display = "none";
+        document.getElementById("pf-fields-common").style.display  = (!isOauth || isEdit) ? "" : "none";
+        document.getElementById("pf-url-col").style.display        = isOauth ? "none" : "";
+        document.getElementById("pf-key-row").style.display        = (!isOauth && needsKey) ? "" : "none";
+        document.getElementById("pf-model-row").style.display      = (!isOauth || isEdit) ? "" : "none";
+        document.getElementById("pf-submit").style.display         = isOauth && !isEdit ? "none" : "";
+        document.getElementById("pf-key-hint").textContent = ct === "ollama_cloud"
+          ? "Clef API Ollama Cloud. Base URL attendue : https://ollama.com"
+          : "OpenAI-compatible avec clef API.";
+
+        const urlEl = document.getElementById("pf-url");
+        if (!urlEl.dataset.userEdited && !isEdit) {
+          urlEl.value = DEFAULT_URLS[ct] || DEFAULT_URLS.api;
+        }
+      };
+
+      document.querySelectorAll(".pf-conn-option").forEach(label => {
+        const input = label.querySelector("input[name='pf-ct']");
+        const apply = event => {
+          event?.preventDefault();
+          if (!input) return;
+          const next = label.dataset.ct || input.value;
+          const current = pfSelectedCt();
+          const urlEl = document.getElementById("pf-url");
+          if (urlEl && urlEl.value.trim() === (DEFAULT_URLS[current] || "")) {
+            delete urlEl.dataset.userEdited;
           }
+          pfApplyCt(next, !!_pfEditId);
+        };
+        label.addEventListener("click", apply);
+        label.addEventListener("keydown", event => {
+          if (event.key === "Enter" || event.key === " ") apply(event);
+        });
+        input?.addEventListener("change", () => pfApplyCt(input.value, !!_pfEditId));
+      });
+      document.getElementById("pf-url")?.addEventListener("input", e =>
+        { e.target.dataset.userEdited = "1"; });
+
+      // ── show / hide form ───────────────────────────────────────────────
+      const showForm = (prefill = null) => {
+        _pfEditId = prefill?.id || null;
+        const ct  = prefill?.ct || "api";
+        const isEdit = !!_pfEditId;
+
+        document.getElementById("pf-title").textContent    = isEdit ? "MODIFIER PROVIDER" : "NOUVEAU PROVIDER";
+        document.getElementById("pf-submit").textContent   = isEdit ? "METTRE À JOUR" : "CRÉER";
+        document.getElementById("pf-type-row").style.display = isEdit ? "none" : "";
+
+        document.getElementById("pf-name").value = prefill?.name || "";
+        const urlEl = document.getElementById("pf-url");
+        delete urlEl.dataset.userEdited;
+        if (isEdit) {
+          urlEl.value = prefill?.url || "";
+          urlEl.dataset.userEdited = "1";
+        } else {
+          urlEl.value = "";
+        }
+        pfApplyCt(ct, isEdit);
+        document.getElementById("pf-key").value = "";
+
+        // Reset model select
+        const sel = document.getElementById("pf-model-sel");
+        sel.innerHTML = `<option value="">Chargement…</option>`;
+        document.getElementById("pf-model-manual").style.display = "none";
+        document.getElementById("pf-model-manual").value = prefill?.model || "";
+        document.getElementById("pf-wrap").style.display = "";
+        document.getElementById("pf-wrap").scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+        // Auto-fetch models for existing providers
+        if (isEdit && prefill?.id) {
+          api.get(`/api/providers/${encodeURIComponent(prefill.id)}/models`)
+            .then(res => {
+              const models = res?.models || [];
+              const cur    = prefill?.model || "";
+              if (models.length) {
+                sel.innerHTML = models.map(m =>
+                  `<option value="${esc(m)}" ${m === cur ? "selected" : ""}>${esc(m)}</option>`
+                ).join("");
+              } else {
+                sel.innerHTML = `<option value="${esc(cur)}" selected>${esc(cur || "—")}</option>`;
+                if (res?.error) toast(res.error, "err");
+              }
+            })
+            .catch(() => {
+              const cur = prefill?.model || "";
+              sel.innerHTML = `<option value="${esc(cur)}" selected>${esc(cur || "—")}</option>`;
+            });
+        } else {
+          sel.innerHTML = `<option value="">— cliquez Charger pour voir les modèles disponibles —</option>`;
+        }
+      };
+
+      const hideForm = () => { _pfEditId = null; document.getElementById("pf-wrap").style.display = "none"; };
+
+      document.getElementById("pf-add-btn").onclick = () => showForm(null);
+      document.getElementById("pf-cancel").onclick  = hideForm;
+
+      // ── manual model toggle ────────────────────────────────────────────
+      document.getElementById("pf-manual-toggle").onclick = () => {
+        const manEl = document.getElementById("pf-model-manual");
+        const shown = manEl.style.display !== "none";
+        manEl.style.display = shown ? "none" : "";
+        document.getElementById("pf-manual-toggle").textContent = shown ? "Saisir manuellement" : "Utiliser la liste";
+      };
+
+      // ── fetch models ───────────────────────────────────────────────────
+      const pfGetModel = () => {
+        const manual = document.getElementById("pf-model-manual").value.trim();
+        if (manual) return manual;
+        const sel = document.getElementById("pf-model-sel");
+        return sel.value || "";
+      };
+
+      document.getElementById("pf-fetch").onclick = async () => {
+        const ct = pfSelectedCt();
+        const btn = document.getElementById("pf-fetch");
+        btn.disabled = true; btn.textContent = "…";
+        try {
+          let models = [];
+          if (_pfEditId) {
+            // Edit: use stored credentials via provider models endpoint
+            const res = await api.get(`/api/providers/${encodeURIComponent(_pfEditId)}/models`);
+            models = res.models || [];
+            if (res.error) toast(res.error, "err");
+          } else {
+            // Create: use probe
+            const kind    = _CONN_TYPES[ct]?.kind || "openai";
+            const base_url = document.getElementById("pf-url").value.trim();
+            const api_key  = document.getElementById("pf-key").value.trim();
+            const res = await api.post("/api/providers/probe", { provider: kind, base_url, api_key });
+            models = res.models || [];
+            if (!models.length) toast(res.error || "Aucun modèle trouvé", "err");
+          }
+          if (models.length) {
+            const sel = document.getElementById("pf-model-sel");
+            const cur = pfGetModel();
+            sel.innerHTML = models.map(m =>
+              `<option value="${esc(m)}" ${m===cur?"selected":""}>${esc(m)}</option>`).join("");
+            if (!cur && models[0]) {/* first is auto-selected by browser */}
+            toast(`${models.length} modèle(s) disponibles`, "ok");
+          }
+        } catch (e) { toast("Fetch failed: " + e.message, "err"); }
+        finally { btn.disabled = false; btn.textContent = "⟳ Charger"; }
+      };
+
+      // ── create / update ────────────────────────────────────────────────
+      document.getElementById("pf-submit").onclick = async () => {
+        const ct      = pfSelectedCt();
+        const name    = document.getElementById("pf-name").value.trim();
+        const base_url = document.getElementById("pf-url").value.trim();
+        const api_key  = document.getElementById("pf-key").value.trim();
+        const model   = pfGetModel();
+        if (!model) { toast("Modèle requis — chargez la liste ou saisissez manuellement", "err"); return; }
+        try {
+          let res;
+          if (_pfEditId) {
+            res = await api.put(`/api/providers/${encodeURIComponent(_pfEditId)}`,
+              { name, base_url: base_url || undefined, api_key: api_key || undefined, model });
+          } else {
+            const kind = _CONN_TYPES[ct]?.kind || "openai";
+            res = await api.post("/api/providers", { provider: kind, name, base_url, api_key, model });
+          }
+          if (!res.ok) { toast(res.message || "Erreur", "err"); return; }
+          toast(_pfEditId ? "Provider mis à jour" : "Provider ajouté", "ok");
+          hideForm();
+          const fresh = await api.get("/api/providers").catch(() => ({ providers: [] }));
+          document.getElementById("providers-list").innerHTML = _providersListHtml(fresh.providers || []);
+          _wireProviderBtns();
         } catch (e) { toast("Erreur: " + e.message, "err"); }
+      };
+
+      // ── delete + edit buttons ─────────────────────────────────────────
+      const _wireProviderBtns = () => {
+        document.querySelectorAll(".provider-del").forEach(btn => {
+          btn.onclick = async () => {
+            const id = btn.dataset.id, name = btn.dataset.name;
+            if (!confirm(`Supprimer le provider "${name}" ?`)) return;
+            try {
+              const res = await api.del(`/api/providers/${encodeURIComponent(id)}`);
+              if (res.ok) { btn.closest(".provider-row").remove(); toast(`Provider ${name} supprimé`, "ok"); }
+              else toast(res.message || "Erreur", "err");
+            } catch (e) { toast("Erreur: " + e.message, "err"); }
+          };
+        });
+        document.querySelectorAll(".provider-edit").forEach(btn => {
+          btn.onclick = () => showForm({
+            id: btn.dataset.id, name: btn.dataset.name,
+            ct: btn.dataset.ct, url: btn.dataset.url, model: btn.dataset.model,
+          });
+        });
+      };
+      _wireProviderBtns();
+
+      // ── save settings ──────────────────────────────────────────────────
+      document.getElementById("btn-save-settings").onclick = () => {
+        Modal.close();
       };
     },
   });
+};
+
+document.getElementById("btn-chat").onclick = async () => {
+  const overlay = document.getElementById("chat-overlay");
+  if (!overlay.classList.contains("hidden")) {
+    ChatPanel.close();
+    return;
+  }
+  try {
+    const d = await api.get("/api/agents");
+    const agents = d.agents || [];
+    if (!agents.length) { toast("Aucun agent configuré", "err"); return; }
+    const agent = agents.find(a => a.running) || agents.find(a => a.is_admin) || agents[0];
+    ChatPanel.open({ name: agent.name });
+  } catch (e) { toast("Erreur : " + e.message, "err"); }
 };
 
 const initial = location.hash.replace("#", "") || "agents";

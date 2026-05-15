@@ -2,7 +2,6 @@
 
 Chaque cycle dreaming produit un rapport sauvegardé dans
 ~/.marius/dreams/dream_<timestamp>.json.
-Le daily lit le dernier rapport disponible sans relancer le dreaming.
 """
 
 from __future__ import annotations

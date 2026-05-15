@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import AuthType, ProviderEntry, ProviderKind
-from .registry import PROVIDER_REGISTRY
+from .registry import PROVIDER_REGISTRY, normalize_base_url
 from .secrets import resolve_provider_secret
 
 _CODEX_MODELS_CACHE = Path.home() / ".codex" / "models_cache.json"
@@ -55,7 +55,7 @@ def fetch_models(entry: ProviderEntry, *, timeout: int = 10) -> list[str]:
     if definition is None:
         raise ModelFetchError(f"Provider non référencé dans le registre : {entry.provider}")
 
-    url = entry.base_url.rstrip("/") + definition.models_endpoint
+    url = normalize_base_url(entry.provider, entry.base_url) + definition.models_endpoint
     req = urllib.request.Request(url)
     api_key = resolve_provider_secret(entry.api_key)
     if api_key:
@@ -66,9 +66,13 @@ def fetch_models(entry: ProviderEntry, *, timeout: int = 10) -> list[str]:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise ModelFetchError(f"HTTP {exc.code} sur {url}") from exc
+        raise ModelFetchError(f"HTTP {exc.code} — vérifiez l'URL et la clef API") from exc
     except urllib.error.URLError as exc:
         raise ModelFetchError(f"Impossible de joindre {url} : {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise ModelFetchError(
+            f"L'endpoint ne renvoie pas du JSON — vérifiez que l'URL pointe vers une API compatible OpenAI (ex : https://api.example.com/v1)"
+        ) from exc
     except Exception as exc:
         raise ModelFetchError(f"Erreur inattendue : {exc}") from exc
 

@@ -1,4 +1,4 @@
-"""Tests du moteur dreaming/daily.
+"""Tests du moteur dreaming.
 
 _call_llm est mocké — on teste l'orchestration sans appel réseau réel.
 """
@@ -12,8 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
-from marius.dreaming.engine import LLMCallResult, run_daily, run_dreaming
-from marius.kernel.contracts import ContextUsage
+from marius.dreaming.engine import run_dreaming
 from marius.storage.memory_store import MemoryStore
 
 
@@ -172,95 +171,7 @@ def test_run_dreaming_invalid_llm_response_no_crash(
     assert result.added == 0
 
 
-# ── run_daily — contexte vide ─────────────────────────────────────────────────
-
-
-def test_run_daily_empty_context_returns_placeholder(
-    memory_store: MemoryStore, entry, tmp_path: Path
-) -> None:
-    briefing = run_daily(
-        memory_store=memory_store,
-        entry=entry,
-        project_root=tmp_path,
-
-    )
-    assert isinstance(briefing, str)
-    assert len(briefing) > 0
-
-
-# ── run_daily — chemin normal ─────────────────────────────────────────────────
-
-
-def test_run_daily_returns_llm_output(
-    memory_store: MemoryStore, entry, tmp_path: Path
-) -> None:
-    memory_store.add("Préférence : réponses courtes")
-
-    with patch(
-        "marius.dreaming.engine._call_llm_with_usage",
-        return_value=LLMCallResult(
-            text="# Briefing\n\nTout va bien.",
-            usage=ContextUsage(provider_input_tokens=120, provider_output_tokens=20),
-            model="gpt-4o",
-        ),
-    ):
-        briefing = run_daily(
-            memory_store=memory_store,
-            entry=entry,
-            project_root=tmp_path,
-    
-        )
-
-    assert "Briefing" in briefing
-    assert "Tout va bien." in briefing
-    assert "Tokens daily" in briefing
-    assert "total 140" in briefing
-    assert "gpt-4o" in briefing
-
-
-def test_run_daily_can_use_model_override(
-    memory_store: MemoryStore, entry, tmp_path: Path
-) -> None:
-    memory_store.add("Préférence : réponses courtes")
-
-    with patch(
-        "marius.dreaming.engine._call_llm_with_usage",
-        return_value=LLMCallResult(
-            text="# Briefing\n\nTout va bien.",
-            usage=ContextUsage(),
-            model="gpt-mini",
-        ),
-    ) as call:
-        briefing = run_daily(
-            memory_store=memory_store,
-            entry=entry,
-            project_root=tmp_path,
-    
-            model="gpt-mini",
-        )
-
-    assert call.call_args.args[0].model == "gpt-mini"
-    assert "modèle `gpt-mini`" in briefing
-
-
-def test_run_daily_provider_error_returns_error_message(
-    memory_store: MemoryStore, entry, tmp_path: Path
-) -> None:
-    memory_store.add("Mémoire test")
-    from marius.kernel.provider import ProviderError
-
-    with patch("marius.dreaming.engine._call_llm_with_usage", side_effect=ProviderError("refused")):
-        briefing = run_daily(
-            memory_store=memory_store,
-            entry=entry,
-            project_root=tmp_path,
-    
-        )
-
-    assert "Erreur" in briefing or "erreur" in briefing
-
-
-# ── GatewayScheduler — dreaming/daily sur tick ───────────────────────────────
+# ── GatewayScheduler — dreaming sur tick ─────────────────────────────────────
 
 
 def test_scheduler_runner_dream_delegates_to_engine(
@@ -273,7 +184,6 @@ def test_scheduler_runner_dream_delegates_to_engine(
     agent_cfg = SimpleNamespace(
         scheduler_enabled=False,   # on appelle manuellement
         dream_time="",
-        daily_time="",
     )
     runner = GatewayScheduler(
         agent_name="test",
@@ -290,48 +200,3 @@ def test_scheduler_runner_dream_delegates_to_engine(
 
     with patch("marius.dreaming.engine._call_llm", return_value=_dream_llm_response([], "ok")):
         runner._run_scheduled_dream()   # ne doit pas lever
-
-
-def test_scheduler_runner_daily_writes_cache(
-    memory_store: MemoryStore, entry, tmp_path: Path
-) -> None:
-    from types import SimpleNamespace
-    from marius.gateway.scheduler_runner import GatewayScheduler
-    from marius.storage.reminders_store import RemindersStore
-
-    agent_cfg = SimpleNamespace(
-        scheduler_enabled=False,
-        dream_time="",
-        daily_time="",
-    )
-    runner = GatewayScheduler(
-        agent_name="test",
-        workspace=tmp_path,
-        memory_store=memory_store,
-        entry=entry,
-        active_skills=[],
-        agent_config=agent_cfg,
-        reminders_store=RemindersStore(tmp_path / "reminders.json"),
-        get_telegram_chat_id=lambda: None,
-    )
-
-    memory_store.add("mémoire pour le daily")
-
-    with (
-        patch(
-            "marius.dreaming.engine._call_llm_with_usage",
-            return_value=LLMCallResult(
-                text="# Briefing\n\nBonjour.",
-                usage=ContextUsage(provider_input_tokens=10, provider_output_tokens=5),
-                model="gpt-4o",
-            ),
-        ),
-        patch("marius.gateway.workspace.daily_cache_path", return_value=tmp_path / "daily.md"),
-    ):
-        runner._run_scheduled_daily()
-
-    cache = tmp_path / "daily.md"
-    assert cache.exists()
-    assert "Briefing" in cache.read_text()
-
-

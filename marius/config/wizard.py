@@ -277,7 +277,7 @@ def _configure_agent(
         scheduler_enabled = getattr(existing, "scheduler_enabled", True)
 
     if ASSISTANT_SKILL in set(skills):
-        c.print("\n  [bold]Scheduler[/]  [dim](dreaming/daily — horaires configurables dans Routines)[/]\n")
+        c.print("\n  [bold]Scheduler[/]  [dim](dreaming — les autres routines se configurent dans Routines)[/]\n")
         raw_enabled = c.input(
             f"  Activer le scheduler ? [[dim]{'O' if scheduler_enabled else 'n'}[/]]: "
         ).strip().lower()

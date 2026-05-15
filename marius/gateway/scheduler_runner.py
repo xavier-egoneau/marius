@@ -1,6 +1,6 @@
 """Scheduling des tâches périodiques du gateway.
 
-Encapsule dreaming, daily, et livraison des rappels dans une classe indépendante.
+Encapsule le dreaming planifié et la livraison des rappels dans une classe indépendante.
 GatewayServer en possède une instance et lui passe les ressources partagées
 via injection — aucune référence inverse vers GatewayServer.
 """
@@ -17,10 +17,11 @@ from marius.storage.memory_store import MemoryStore
 from marius.storage.reminders_store import RemindersStore
 
 _REMINDERS_POLL_SECONDS = 30.0
+_TASK_SCHEDULER_POLL_SECONDS = 10.0
 
 
 class GatewayScheduler:
-    """Exécute dreaming/daily en cron et livre les rappels à l'heure."""
+    """Exécute le dreaming en cron et livre les rappels à l'heure."""
 
     def __init__(
         self,
@@ -47,7 +48,7 @@ class GatewayScheduler:
 
         self._start_reminders_thread()
 
-    # ── scheduler dream / daily ───────────────────────────────────────────────
+    # ── scheduler dreaming ────────────────────────────────────────────────────
 
     def _start_scheduler(self, agent_config: Any) -> None:
         from marius.kernel.scheduler import TaskScheduler
@@ -72,12 +73,15 @@ class GatewayScheduler:
                 if (
                     not task.system
                     and task.status == "queued"
-                    and (task.scheduled_for or task.next_attempt_at)
                     and task.id not in handlers
                 ):
                     handlers[task.id] = lambda tid=task.id: self._run_user_task(tid)
 
-        self._scheduler = TaskScheduler(handlers, before_tick=before_tick)
+        self._scheduler = TaskScheduler(
+            handlers,
+            before_tick=before_tick,
+            poll_seconds=_TASK_SCHEDULER_POLL_SECONDS,
+        )
         t = threading.Thread(target=self._scheduler.run_forever, daemon=True)
         t.start()
 
@@ -98,7 +102,7 @@ class GatewayScheduler:
         import socket as _socket
         from marius.storage.task_store import TaskStore
         from marius.gateway.workspace import socket_path
-        from marius.gateway.protocol import InputEvent, encode
+        from marius.gateway.protocol import InputEvent, PermissionResponseEvent, decode, encode
 
         ts = TaskStore()
         task = next((t for t in ts.load() if t.id == task_id), None)
@@ -107,16 +111,19 @@ class GatewayScheduler:
 
         if task.recurring:
             prompt = task.prompt.strip() or task.title
+            channel = "routine"
         else:
-            prompt = task.prompt.strip() or task.title
+            from marius.storage.task_execution import task_execution_message
+            prompt = task_execution_message(task)
+            channel = "task"
         agent  = task.agent or self.agent_name
         sock   = socket_path(agent)
         if not sock.exists():
             raise OSError(f"Gateway '{agent}' non actif.")
 
+        conn = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
         try:
-            conn = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-            conn.settimeout(5.0)
+            conn.settimeout(900.0)
             conn.connect(str(sock))
             buf = b""
             while b"\n" not in buf:
@@ -124,15 +131,38 @@ class GatewayScheduler:
                 if not chunk:
                     break
                 buf += chunk
-            conn.sendall(encode(InputEvent(text=prompt)))
-            conn.close()
+            conn.sendall(encode(InputEvent(text=prompt, channel=channel)))
+            while True:
+                while b"\n" not in buf:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        raise OSError("gateway closed before routine completion")
+                    buf += chunk
+                raw, buf = buf.split(b"\n", 1)
+                event = decode(raw.decode(errors="replace"))
+                etype = event.get("type")
+                if etype == "permission_request":
+                    conn.sendall(encode(PermissionResponseEvent(
+                        request_id=str(event.get("request_id") or ""),
+                        approved=False,
+                    )))
+                elif etype == "error":
+                    raise RuntimeError(str(event.get("message") or "routine failed"))
+                elif etype in {"done", "status"}:
+                    break
         except OSError:
             raise
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
         ts.add_event(task_id, {
             "kind": "launched",
             "agent": agent,
             "cmd":   prompt[:200],
+            "channel": channel,
         })
         log_event("task_scheduled_run", {
             "agent":   self.agent_name,

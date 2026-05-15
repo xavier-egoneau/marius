@@ -47,16 +47,16 @@ tags: [security]
 
 
 def test_rag_store_important_returns_tagged_chunks(tmp_path):
-    source_file = tmp_path / "daily.md"
-    source_file.write_text("# Daily\n\n[daily] Check open loops.\n", encoding="utf-8")
+    source_file = tmp_path / "routine.md"
+    source_file.write_text("# Routine\n\n[routine] Check open loops.\n", encoding="utf-8")
     store = RagStore(tmp_path / "rag.db")
-    source = store.add_source(name="Daily", uri=str(source_file), scope="user")
+    source = store.add_source(name="Routine", uri=str(source_file), scope="user")
 
     store.sync_source(source.id)
-    chunks = store.important(tag="daily")
+    chunks = store.important(tag="routine")
 
     assert len(chunks) == 1
-    assert chunks[0].title == "Daily"
+    assert chunks[0].title == "Routine"
     store.close()
 
 

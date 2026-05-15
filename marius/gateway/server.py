@@ -1,10 +1,11 @@
 """Serveur gateway Marius.
 
 Processus persistant par agent : maintient la session et la mémoire
-entre les reconnexions. Une seule connexion cliente à la fois.
+entre les reconnexions. Plusieurs surfaces peuvent rester connectées.
 
 Threading :
-- Thread principal : accepte les connexions, lit le socket
+- Thread principal : accepte les connexions
+- Threads clients  : lisent chaque socket
 - Thread de tour   : exécute orchestrator.run_turn, écrit en streaming
 - Les requêtes de permission bloquent le thread de tour jusqu'à
   réception de PermissionResponseEvent depuis le client.
@@ -13,7 +14,9 @@ Threading :
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
+import re
 import signal
 import socket
 import sys
@@ -25,12 +28,12 @@ from pathlib import Path
 from typing import Any
 
 from marius.adapters.http_provider import make_adapter
-from marius.config.contracts import effective_tools_for_role
+from marius.config.contracts import effective_tools_for_agent
 from marius.kernel.compaction import CompactionConfig
 from marius.kernel.context_factory import build_system_prompt
 from marius.kernel.skills import SkillCommand, SkillReader, collect_skill_commands
 from marius.kernel.context_window import FALLBACK_CONTEXT_WINDOW, resolve_context_window
-from marius.kernel.contracts import Message, Role, ToolCall, ToolResult
+from marius.kernel.contracts import Artifact, ArtifactType, Message, Role, ToolCall, ToolResult
 from marius.kernel.memory_context import format_memory_block
 from marius.kernel.permission_guard import PermissionGuard
 from marius.kernel.posture import maybe_activate_dev_posture, uses_dev_posture
@@ -47,21 +50,30 @@ from marius.storage.allow_root_store import AllowRootStore
 from marius.storage.log_store import log_event, preview
 from marius.storage.project_store import ProjectStore
 from marius.storage.session_corpus import SessionRecord, write_session_file
+from marius.storage.ui_history import FileVisibleConversationStore
 from marius.tools.factory import build_tool_entries
 
 from .protocol import (
     CommandEvent, DeltaEvent, DoneEvent, ErrorEvent, InputEvent,
     PermissionRequestEvent, PongEvent, StatusEvent, ToolResultEvent,
-    ToolStartEvent, WelcomeEvent, decode, encode, tool_target,
+    ToolStartEvent, VisibleEvent, VisibleResetEvent, WelcomeEvent,
+    decode, encode, tool_target,
 )
 from .workspace import (
     ensure_workspace, lock_path,
     memory_db_path, pid_path, reminders_path, sessions_dir, socket_path,
-    web_history_path,
+    telegram_chat_path, web_conversations_dir, web_history_path,
 )
 from .scheduler_runner import GatewayScheduler
 
 _PERMISSION_TIMEOUT_SECONDS = 300
+_ATTACHMENT_RE = re.compile(r"\[fichier joint : ([^\]]+)\]")
+_NATIVE_IMAGE_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+}
 
 
 def _trusted_roots_for_active_project(
@@ -182,10 +194,12 @@ class GatewayServer:
             self.system_prompt = f"{self.system_prompt}\n\n{self.memory_block.text}".strip()
 
         self._send_lock = threading.Lock()
-        self._turn_lock  = threading.Lock()   # sérialise CLI + Telegram
+        self._turn_lock  = threading.RLock()  # sérialise CLI + Telegram + resets
         self._conn: socket.socket | None = None
+        self._connections: set[socket.socket] = set()
+        self._connections_lock = threading.Lock()
         self._pending_perms: dict[str, tuple[threading.Event, list[bool]]] = {}
-        self.telegram_chat_id: int | None = None   # mémorisé pour pushs daily
+        self.telegram_chat_id: int | None = self._load_telegram_chat_id()
         self.allowed_roots = _trusted_roots_for_active_project(
             permission_mode=permission_mode,
             workspace=ws,
@@ -205,9 +219,10 @@ class GatewayServer:
             approval_lookup=self.approval_store.lookup,
             approval_recorder=self._record_approval,
         )
-        enabled_tools = effective_tools_for_role(
-            list(agent_config.tools) if agent_config else None,
+        enabled_tools = effective_tools_for_agent(
+            list(agent_config.disabled_tools or []) if agent_config else None,
             getattr(agent_config, "role", None),
+            self.active_skills,
         )
         self._ensure_search_backend(enabled_tools)
         self.tool_router = self._build_tool_router(enabled_tools, guard, ws, entry, permission_mode)
@@ -289,6 +304,67 @@ class GatewayServer:
         )
         self._telegram_poller.start()
 
+    def _load_telegram_chat_id(self) -> int | None:
+        try:
+            text = telegram_chat_path(self.agent_name).read_text(encoding="utf-8").strip()
+            return int(text) if text else None
+        except (OSError, ValueError):
+            return None
+
+    def remember_telegram_chat_id(self, chat_id: int) -> None:
+        self.telegram_chat_id = int(chat_id)
+        try:
+            path = telegram_chat_path(self.agent_name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(str(int(chat_id)), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _telegram_mirror_chat_id(self) -> int | None:
+        from marius.channels.telegram.config import load as load_tg_cfg
+
+        cfg = load_tg_cfg()
+        if not cfg or not cfg.enabled or cfg.agent_name != self.agent_name:
+            return None
+        if cfg.allowed_chats:
+            return int(cfg.allowed_chats[0])
+        if self.telegram_chat_id is not None:
+            return self.telegram_chat_id
+        if cfg.allowed_users:
+            return int(cfg.allowed_users[0])
+        return None
+
+    def _mirror_visible_to_telegram(self, *, role: str, content: str, channel: str) -> None:
+        if channel == "telegram":
+            return
+        text_content = str(content or "").strip()
+        if role not in {"user", "assistant"} or not text_content:
+            return
+        chat_id = self._telegram_mirror_chat_id()
+        if chat_id is None:
+            return
+        from marius.channels.telegram.config import load as load_tg_cfg
+        from marius.channels.telegram.api import send_message
+
+        cfg = load_tg_cfg()
+        if not cfg or not cfg.token:
+            return
+        label = {
+            "web": "Marius web",
+            "cli": "Marius CLI",
+            "routine": "Routine",
+        }.get(channel, channel or "autre canal")
+        speaker = "Vous" if role == "user" else "Marius"
+        text = f"**{label} · {speaker}**\n\n{text_content}"
+        ok = send_message(cfg.token, chat_id, text)
+        log_event("telegram_mirror_sent", {
+            "agent": self.agent_name,
+            "channel": channel,
+            "chat_id": chat_id,
+            "role": role,
+            "ok": ok,
+        })
+
     def run_turn_for_telegram(self, text: str) -> str:
         """Exécute un tour depuis Telegram. Bloquant, sérialisé via turn_lock."""
         from marius.kernel.contracts import Message, Role
@@ -324,12 +400,15 @@ class GatewayServer:
             role=Role.USER,
             content=text,
             created_at=datetime.now(timezone.utc),
+            artifacts=self._native_image_artifacts(text),
         )
         from marius.kernel.runtime import TurnInput
         with self._turn_lock:
             try:
+                self._publish_visible("user", text, channel="telegram")
                 command_response = self._handle_builtin_command(text)
                 if command_response is not None:
+                    self._publish_visible("assistant", command_response, channel="telegram")
                     log_event("turn_done", {
                         "session_id": self.agent_name, "channel": "telegram",
                         "model": self.entry.model,
@@ -363,6 +442,8 @@ class GatewayServer:
                         response = f"{response}\n\n{rendered}"
                     elif rendered:
                         response = rendered
+                if response.strip():
+                    self._publish_visible("assistant", response, channel="telegram")
                 log_event("turn_done", {
                     "session_id": self.agent_name, "channel": "telegram",
                     "model": self.entry.model,
@@ -376,12 +457,33 @@ class GatewayServer:
                 log_event("turn_error", {"session_id": self.agent_name, "channel": "telegram", "error": str(exc)})
                 return f"Erreur : {exc}"
 
-    def new_conversation(self) -> None:
-        """Réinitialise la session (appelable depuis Telegram /new ou web)."""
-        self.session.state.turns.clear()
-        self.session.state.compaction_notices.clear()
-        self.session.state.derived_context_summary = ""
-        self.session.state.derived_context_summary_message = None
+    def new_conversation(
+        self,
+        *,
+        clear_visible: bool = True,
+        channel: str = "unknown",
+        reason: str = "manual",
+    ) -> None:
+        """Réinitialise la session canonique runtime et, si demandé, le visible."""
+        with self._turn_lock:
+            previous_turns = len(self.session.state.turns)
+            previous_metadata_keys = sorted(self.session.state.metadata.keys())
+            self.session = SessionRuntime(
+                session_id=self.agent_name,
+                metadata={"provider": self.entry.name, "model": self.entry.model},
+            )
+            if clear_visible:
+                _archive_and_clear_visible_history(self.agent_name)
+                self._broadcast(VisibleResetEvent(channel=channel))
+            log_event("conversation_reset", {
+                "agent": self.agent_name,
+                "session_id": self.agent_name,
+                "channel": channel,
+                "reason": reason,
+                "clear_visible": clear_visible,
+                "previous_turns": previous_turns,
+                "previous_metadata_keys": previous_metadata_keys,
+            })
 
     def resolve_skill_command(self, text: str) -> str:
         """Si text est une commande skill connue, retourne le prompt injecté.
@@ -506,11 +608,17 @@ class GatewayServer:
         )
 
     def _command_compact(self) -> str:
-        kept = self.orchestrator.compaction_config.keep_recent_turns
-        before = len(self.session.state.turns)
-        if before > kept:
-            self.session.state.turns = self.session.state.turns[-kept:]
-        after = len(self.session.state.turns)
+        with self._turn_lock:
+            kept = self.orchestrator.compaction_config.keep_recent_turns
+            before = len(self.session.state.turns)
+            if before > kept:
+                self.session.state.turns = self.session.state.turns[-kept:]
+            after = len(self.session.state.turns)
+        _append_visible_compaction_boundary(
+            self.agent_name,
+            kept_turns=after,
+            removed_turns=before - after,
+        )
         return f"Compaction effectuée : {before - after} tour(s) supprimé(s), {after} conservé(s)."
 
     def list_models(self) -> list[str]:
@@ -586,6 +694,55 @@ class GatewayServer:
             except OSError:
                 pass
 
+    def _broadcast(self, event: Any) -> None:
+        if not hasattr(self, "_connections_lock"):
+            return
+        with self._connections_lock:
+            connections = list(getattr(self, "_connections", set()))
+        for conn in connections:
+            self._send(conn, event)
+
+    def _publish_visible(
+        self,
+        role: str,
+        content: str,
+        *,
+        channel: str,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> None:
+        text = str(content or "").strip()
+        if role not in {"user", "assistant"} or not text:
+            return
+        sanitized_tools = _sanitize_visible_tools(tools)
+        created_at = _append_visible_history(
+            self.agent_name,
+            role,
+            text,
+            channel=channel,
+            tools=sanitized_tools,
+        )
+        if created_at is None:
+            return
+        self._broadcast(VisibleEvent(
+            role=role,
+            content=text,
+            channel=channel,
+            created_at=created_at,
+            tools=sanitized_tools,
+        ))
+        self._mirror_visible_to_telegram(role=role, content=text, channel=channel)
+
+    def _native_image_artifacts(self, text: str) -> list[Artifact]:
+        if self._has_local_vision_tool():
+            return []
+        return _attached_image_artifacts(text, self.workspace)
+
+    def _has_local_vision_tool(self) -> bool:
+        try:
+            return any(tool.name == "vision" for tool in self.tool_router.definitions())
+        except Exception:
+            return False
+
     def _build_tool_router(
         self,
         enabled_tools: list[str] | None,
@@ -594,37 +751,19 @@ class GatewayServer:
         entry: ProviderEntry | None = None,
         permission_mode: str = "limited",
     ) -> ToolRouter:
-        from marius.tools.call_agent import make_call_agent_tool
-        from marius.tools.reminders import make_reminders_tool
-        from marius.tools.spawn_agent import make_spawn_agent_tool
-
-        reminders_tool = make_reminders_tool(
-            self.reminders_store,
-            get_chat_id=lambda: self.telegram_chat_id,
-        )
-        base_entries = build_tool_entries(
+        entries = build_tool_entries(
             enabled_tools,
             self.memory_store,
             cwd,
             entry=entry,
             active_skills=self.active_skills or None,
             agent_name=self.agent_name,
-            extras={"reminders": reminders_tool},
+            reminders_store=self.reminders_store,
+            get_reminder_chat_id=lambda: self.telegram_chat_id,
+            permission_mode=permission_mode,
         )
 
-        if entry is not None and (enabled_tools is None or "spawn_agent" in enabled_tools):
-            spawn_tool = make_spawn_agent_tool(
-                entry,
-                base_entries,
-                permission_mode=permission_mode,
-                cwd=cwd,
-            )
-            base_entries = [*base_entries, spawn_tool]
-
-        if enabled_tools is None or "call_agent" in enabled_tools:
-            base_entries = [*base_entries, make_call_agent_tool()]
-
-        return ToolRouter(base_entries, guard=guard)
+        return ToolRouter(entries, guard=guard)
 
     def _ensure_search_backend(self, enabled_tools: list[str] | None) -> None:
         if enabled_tools is not None and "web_search" not in enabled_tools:
@@ -694,22 +833,17 @@ class GatewayServer:
 
         server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server_sock.bind(str(sock_path))
-        server_sock.listen(1)
+        server_sock.listen(16)
 
         try:
             while True:
                 conn, _ = server_sock.accept()
-                self._conn = conn
-                try:
-                    self._handle_connection(conn)
-                except Exception:
-                    pass
-                finally:
-                    self._conn = None
-                    try:
-                        conn.close()
-                    except OSError:
-                        pass
+                threading.Thread(
+                    target=self._handle_connection_thread,
+                    args=(conn,),
+                    daemon=True,
+                    name=f"gateway-client-{self.agent_name}",
+                ).start()
         finally:
             server_sock.close()
             if sock_path.exists():
@@ -722,6 +856,24 @@ class GatewayServer:
             except OSError:
                 pass
             self._write_corpus()
+
+    def _handle_connection_thread(self, conn: socket.socket) -> None:
+        with self._connections_lock:
+            self._connections.add(conn)
+        self._conn = conn
+        try:
+            self._handle_connection(conn)
+        except Exception:
+            pass
+        finally:
+            with self._connections_lock:
+                self._connections.discard(conn)
+            if self._conn is conn:
+                self._conn = None
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     def _handle_connection(self, conn: socket.socket) -> None:
         self._send(conn, WelcomeEvent(
@@ -762,10 +914,22 @@ class GatewayServer:
                     stop_event.set()
                     self.orchestrator.cancel_current_provider()
                 elif cmd == "/new":
-                    if turn_thread is None or not turn_thread.is_alive():
-                        self.session.state.turns.clear()
-                        self.session.state.compaction_notices.clear()
-                        self._send(conn, StatusEvent(message="Nouvelle conversation démarrée."))
+                    channel = str(event.get("channel") or "cli")
+                    if turn_thread is not None and turn_thread.is_alive():
+                        if stop_event:
+                            stop_event.set()
+                        self.orchestrator.cancel_current_provider()
+                    self.new_conversation(
+                        clear_visible=True,
+                        channel=channel,
+                        reason="command",
+                    )
+                    self._send(conn, StatusEvent(message="Nouvelle conversation démarrée."))
+                    self._mirror_visible_to_telegram(
+                        role="assistant",
+                        content="Nouvelle conversation démarrée.",
+                        channel=channel,
+                    )
 
             elif etype == "input":
                 if turn_thread and turn_thread.is_alive():
@@ -779,21 +943,25 @@ class GatewayServer:
                     continue
                 stop_event = threading.Event()
                 text = event.get("text", "")
+                channel = str(event.get("channel") or "cli")
                 turn_thread = threading.Thread(
                     target=self._run_turn,
-                    args=(conn, text, stop_event),
+                    args=(conn, text, stop_event, channel),
                     daemon=True,
                 )
                 turn_thread.start()
 
     def _run_turn(
-        self, conn: socket.socket, text: str, stop_event: threading.Event
+        self, conn: socket.socket, text: str, stop_event: threading.Event, channel: str = "web"
     ) -> None:
         text = text.strip()
+        visible_response_parts: list[str] = []
+        visible_tools: list[dict[str, Any]] = []
         user_message = Message(
             role=Role.USER,
             content=text,
             created_at=datetime.now(timezone.utc),
+            artifacts=self._native_image_artifacts(text),
         )
         log_event("turn_start", {
             "session_id": self.agent_name,
@@ -802,6 +970,7 @@ class GatewayServer:
             "provider": self.entry.name,
             "provider_kind": self.entry.provider,
             "model": self.entry.model,
+            "channel": channel,
             "user_preview": preview(text),
         })
         sent_text_delta = False
@@ -811,6 +980,7 @@ class GatewayServer:
             if stop_event.is_set():
                 raise KeyboardInterrupt
             sent_text_delta = True
+            visible_response_parts.append(delta)
             self._send(conn, DeltaEvent(text=delta))
 
         def on_tool_start(call: ToolCall) -> None:
@@ -833,6 +1003,14 @@ class GatewayServer:
                 "tool": call.name,
                 "target": preview(target, limit=200),
             })
+            visible_tools.append({
+                "id": call.id,
+                "name": call.name,
+                "target": preview(target, limit=200),
+                "ok": None,
+                "summary": "",
+                "error": "",
+            })
             self._send(conn, ToolStartEvent(
                 name=call.name,
                 target=target,
@@ -847,28 +1025,48 @@ class GatewayServer:
                 "summary_preview": preview(result.summary, limit=300),
                 "error": preview(result.error or "", limit=300),
             })
+            trace = next((t for t in reversed(visible_tools) if t.get("id") == call.id), None)
+            if trace is None:
+                trace = {
+                    "id": call.id,
+                    "name": call.name,
+                    "target": "",
+                    "ok": None,
+                    "summary": "",
+                    "error": "",
+                }
+                visible_tools.append(trace)
+            trace["ok"] = bool(result.ok)
+            trace["summary"] = preview(result.summary, limit=300)
+            trace["error"] = preview(result.error or "", limit=300)
             self._send(conn, ToolResultEvent(name=call.name, ok=result.ok))
 
         try:
-            command_response = self._handle_builtin_command(text)
-            if command_response is not None:
-                self._send(conn, DeltaEvent(text=command_response))
-                log_event("turn_done", {
-                    "session_id": self.agent_name,
-                    "agent": self.agent_name,
-                    "provider": self.entry.name,
-                    "provider_kind": self.entry.provider,
-                    "model": self.entry.model,
-                    "tool_results": 0,
-                    "assistant_preview": preview(command_response),
-                    "command": text.split(maxsplit=1)[0].lower() if text else "",
-                })
-                return
-
-            text = self.resolve_skill_command(text)
-            user_message.content = text
-            system_prompt = self._system_prompt_for_session()
             with self._turn_lock:
+                publish_user_visible = channel not in {"routine", "task"}
+                if publish_user_visible:
+                    self._publish_visible("user", text, channel=channel)
+                command_response = self._handle_builtin_command(text)
+                if command_response is not None:
+                    self._send(conn, DeltaEvent(text=command_response))
+                    self._publish_visible("assistant", command_response, channel=channel)
+                    log_event("turn_done", {
+                        "session_id": self.agent_name,
+                        "agent": self.agent_name,
+                        "provider": self.entry.name,
+                        "provider_kind": self.entry.provider,
+                        "model": self.entry.model,
+                        "tool_results": 0,
+                        "assistant_preview": preview(command_response),
+                        "command": text.split(maxsplit=1)[0].lower() if text else "",
+                    })
+                    return
+
+                text = self.resolve_skill_command(text)
+                user_message.content = text
+                system_prompt = self._system_prompt_for_session()
+                if stop_event.is_set():
+                    raise KeyboardInterrupt
                 output = self.orchestrator.run_turn(
                     TurnInput(
                         session=self.session,
@@ -880,29 +1078,38 @@ class GatewayServer:
                     on_tool_result=on_tool_result,
                     is_cancelled=stop_event.is_set,
                 )
-            if output.assistant_message is not None:
-                content = output.assistant_message.content
-                rendered = render_turn_output(
-                    _without_content(output.assistant_message) if sent_text_delta else output.assistant_message,
-                    tool_results=output.tool_results,
-                    compaction_notice=output.compaction_notice,
-                    surface=RenderSurface.WEB,
-                )
-                if rendered:
-                    prefix = "\n\n" if sent_text_delta else ""
-                    self._send(conn, DeltaEvent(text=f"{prefix}{rendered}"))
-                event_name = "turn_empty_response" if not content.strip() else "turn_done"
-                log_event(event_name, {
-                    "session_id": self.agent_name,
-                    "agent": self.agent_name,
-                    "provider": self.entry.name,
-                    "provider_kind": self.entry.provider,
-                    "model": self.entry.model,
-                    "tool_results": len(output.tool_results),
-                    "assistant_preview": preview(content),
-                    "input_tokens": output.usage.provider_input_tokens,
-                    "estimated_input_tokens": output.usage.estimated_input_tokens,
-                })
+                if output.assistant_message is not None:
+                    content = output.assistant_message.content
+                    rendered = render_turn_output(
+                        _without_content(output.assistant_message) if sent_text_delta else output.assistant_message,
+                        tool_results=output.tool_results,
+                        compaction_notice=output.compaction_notice,
+                        surface=RenderSurface.WEB,
+                    )
+                    if rendered:
+                        prefix = "\n\n" if sent_text_delta else ""
+                        self._send(conn, DeltaEvent(text=f"{prefix}{rendered}"))
+                        visible_response_parts.append(f"{prefix}{rendered}")
+                    visible_response = "".join(visible_response_parts).strip() or content
+                    if visible_response.strip():
+                        self._publish_visible(
+                            "assistant",
+                            visible_response,
+                            channel=channel,
+                            tools=visible_tools,
+                        )
+                    event_name = "turn_empty_response" if not content.strip() else "turn_done"
+                    log_event(event_name, {
+                        "session_id": self.agent_name,
+                        "agent": self.agent_name,
+                        "provider": self.entry.name,
+                        "provider_kind": self.entry.provider,
+                        "model": self.entry.model,
+                        "tool_results": len(output.tool_results),
+                        "assistant_preview": preview(content),
+                        "input_tokens": output.usage.provider_input_tokens,
+                        "estimated_input_tokens": output.usage.estimated_input_tokens,
+                    })
         except KeyboardInterrupt:
             log_event("turn_interrupted", {"session_id": self.agent_name, "agent": self.agent_name})
             self._send(conn, ErrorEvent(message="Inférence interrompue."))
@@ -984,9 +1191,17 @@ def _hydrate_session_from_visible_history(
     if session.state.turns:
         return 0
 
+    last_boundary = -1
+    for index, item in enumerate(history):
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("kind") == "compaction_boundary":
+            last_boundary = index
+
     pairs: list[tuple[str, str]] = []
     pending_user: str | None = None
-    for item in history:
+    for item in history[last_boundary + 1:]:
         role = str(item.get("role") or "")
         content = str(item.get("content") or "").strip()
         if not content:
@@ -1023,6 +1238,144 @@ def _hydrate_session_from_visible_history(
         turn.metadata["status"] = "restored"
 
     return len(pairs)
+
+
+def _attached_image_artifacts(text: str, workspace: Path) -> list[Artifact]:
+    uploads_root = (workspace / "uploads").expanduser().resolve(strict=False)
+    artifacts: list[Artifact] = []
+    seen: set[Path] = set()
+    for match in _ATTACHMENT_RE.finditer(text or ""):
+        raw_path = match.group(1).strip()
+        if not raw_path:
+            continue
+        try:
+            path = Path(raw_path).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if path in seen:
+            continue
+        if not _is_under_path(path, uploads_root):
+            continue
+        mime_type = mimetypes.guess_type(path.name)[0] or ""
+        if mime_type not in _NATIVE_IMAGE_MIME_TYPES:
+            continue
+        if not path.is_file():
+            continue
+        seen.add(path)
+        artifacts.append(Artifact(
+            type=ArtifactType.IMAGE,
+            path=str(path),
+            data={"mime_type": mime_type, "source": "user_attachment"},
+        ))
+    return artifacts
+
+
+def _is_under_path(path: Path, root: Path) -> bool:
+    try:
+        return path == root or root in path.parents
+    except RuntimeError:
+        return False
+
+
+def _sanitize_visible_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("name") or "").strip()
+        if not name:
+            continue
+        rows.append({
+            "name": name,
+            "target": preview(str(tool.get("target") or ""), limit=200),
+            "ok": bool(tool.get("ok")) if tool.get("ok") is not None else None,
+            "summary": preview(str(tool.get("summary") or ""), limit=300),
+            "error": preview(str(tool.get("error") or ""), limit=300),
+        })
+    return rows
+
+
+def _append_visible_history(
+    agent_name: str,
+    role: str,
+    content: str,
+    *,
+    channel: str,
+    tools: list[dict[str, Any]] | None = None,
+) -> str | None:
+    text = str(content or "").strip()
+    if role not in {"user", "assistant"} or not text:
+        return None
+    path = web_history_path(agent_name)
+    created_at = datetime.now(timezone.utc).isoformat()
+    sanitized_tools = _sanitize_visible_tools(tools) if role == "assistant" else []
+
+    def append(messages: list[dict[str, Any]]) -> None:
+        entry: dict[str, Any] = {
+            "role": role,
+            "content": text,
+            "created_at": created_at,
+            "channel": channel,
+        }
+        if sanitized_tools:
+            entry["tools"] = sanitized_tools
+        messages.append(entry)
+
+    _mutate_visible_history(
+        path,
+        append,
+    )
+    return created_at
+
+
+def _append_visible_compaction_boundary(
+    agent_name: str,
+    *,
+    kept_turns: int,
+    removed_turns: int,
+) -> None:
+    path = web_history_path(agent_name)
+    _mutate_visible_history(
+        path,
+        lambda messages: messages.append({
+            "role": "system",
+            "content": "",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "metadata": {
+                "kind": "compaction_boundary",
+                "kept_turns": kept_turns,
+                "removed_turns": removed_turns,
+            },
+        }),
+    )
+
+
+def _archive_and_clear_visible_history(agent_name: str) -> None:
+    history_path = web_history_path(agent_name)
+    conversations = FileVisibleConversationStore(web_conversations_dir(agent_name))
+
+    def mutate(messages: list[dict[str, Any]]) -> None:
+        conversations.archive(messages, agent=agent_name)
+        messages.clear()
+
+    _mutate_visible_history(history_path, mutate)
+
+
+def _mutate_visible_history(path: Path, mutate: Any) -> None:
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raw = []
+            messages = raw if isinstance(raw, list) else []
+            mutate(messages)
+            path.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _without_content(message: Message) -> Message:

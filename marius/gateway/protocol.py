@@ -2,7 +2,8 @@
 
 Client → serveur : Input, Command, Ping, PermissionResponse
 Serveur → client : Welcome, Delta, ToolStart, ToolResult,
-                   PermissionRequest, Done, Error, Pong, Status
+                   PermissionRequest, Done, Error, Pong, Status,
+                   Visible, VisibleReset
 """
 
 from __future__ import annotations
@@ -17,12 +18,14 @@ from typing import Any
 @dataclass
 class InputEvent:
     text: str
+    channel: str = "cli"
     type: str = "input"
 
 
 @dataclass
 class CommandEvent:
     cmd: str
+    channel: str = "cli"
     type: str = "command"
 
 
@@ -98,6 +101,22 @@ class PongEvent:
 class StatusEvent:
     message: str
     type: str = "status"
+
+
+@dataclass
+class VisibleEvent:
+    role: str
+    content: str
+    channel: str
+    created_at: str
+    tools: list[dict[str, Any]] = field(default_factory=list)
+    type: str = "visible"
+
+
+@dataclass
+class VisibleResetEvent:
+    channel: str
+    type: str = "visible_reset"
 
 
 # ── sérialisation ─────────────────────────────────────────────────────────────
