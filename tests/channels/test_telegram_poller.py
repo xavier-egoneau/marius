@@ -7,9 +7,11 @@ On teste _handle_command et _is_allowed en isolation :
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -196,6 +198,109 @@ def test_unknown_command_forwarded_as_message() -> None:
     with patch("marius.channels.telegram.poller.send_message"):
         p._handle_command(CHAT, "/commande_inconnue")
     gw.run_turn_for_telegram.assert_called_once_with("/commande_inconnue")
+
+
+def test_permission_callback_approves_gateway_request() -> None:
+    gw = _gw()
+    gw.respond_permission_request = MagicMock(return_value=True)
+    p = _poller(gw=gw)
+    update = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cq1",
+            "from": {"id": USER},
+            "message": {"message_id": 7, "chat": {"id": CHAT}},
+            "data": "perm:req123:allow",
+        },
+    }
+
+    with (
+        patch("marius.channels.telegram.poller.answer_callback_query") as mock_answer,
+        patch("marius.channels.telegram.poller.edit_message_text") as mock_edit,
+    ):
+        p._handle_update(update)
+
+    gw.respond_permission_request.assert_called_once_with("req123", True)
+    mock_answer.assert_called_once_with(TOKEN, "cq1", "Permission autorisée.")
+    mock_edit.assert_called_once()
+
+
+def test_permission_callback_denies_gateway_request() -> None:
+    gw = _gw()
+    gw.respond_permission_request = MagicMock(return_value=True)
+    p = _poller(gw=gw)
+    update = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cq1",
+            "from": {"id": USER},
+            "message": {"message_id": 7, "chat": {"id": CHAT}},
+            "data": "perm:req123:deny",
+        },
+    }
+
+    with (
+        patch("marius.channels.telegram.poller.answer_callback_query") as mock_answer,
+        patch("marius.channels.telegram.poller.edit_message_text"),
+    ):
+        p._handle_update(update)
+
+    gw.respond_permission_request.assert_called_once_with("req123", False)
+    mock_answer.assert_called_once_with(TOKEN, "cq1", "Permission refusée.")
+
+
+def test_permission_callback_reports_expired_request() -> None:
+    gw = _gw()
+    gw.respond_permission_request = MagicMock(return_value=False)
+    p = _poller(gw=gw)
+    update = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "cq1",
+            "from": {"id": USER},
+            "message": {"message_id": 7, "chat": {"id": CHAT}},
+            "data": "perm:req123:allow",
+        },
+    }
+
+    with (
+        patch("marius.channels.telegram.poller.answer_callback_query") as mock_answer,
+        patch("marius.channels.telegram.poller.edit_message_text"),
+    ):
+        p._handle_update(update)
+
+    mock_answer.assert_called_once_with(TOKEN, "cq1", "Demande expirée ou déjà traitée.")
+
+
+def test_gateway_telegram_message_runs_in_background() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def run_turn(_text: str) -> str:
+        started.set()
+        release.wait(timeout=1)
+        return "réponse"
+
+    gw = _gw(run_turn_for_telegram=MagicMock(side_effect=run_turn), _turn_lock=threading.Lock())
+    p = _poller(gw=gw)
+
+    with (
+        patch("marius.channels.telegram.poller.send_chat_action"),
+        patch("marius.channels.telegram.poller.send_message") as mock_send,
+    ):
+        p._handle_message(CHAT, "salut")
+        assert started.wait(timeout=1)
+        assert mock_send.call_count == 0
+        release.set()
+        deadline = time.time() + 1
+        while time.time() < deadline:
+            with p._turn_threads_lock:
+                if not p._turn_threads:
+                    break
+            time.sleep(0.01)
+
+    gw.run_turn_for_telegram.assert_called_once_with("salut")
+    mock_send.assert_called_once_with(TOKEN, CHAT, "réponse")
 
 
 def test_photo_message_is_downloaded_and_forwarded(tmp_path: Path) -> None:

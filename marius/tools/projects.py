@@ -118,7 +118,11 @@ def make_project_tools(
                 description=(
                     "Set the explicit active project by path or known project name. "
                     "Use it when the user clearly asks to work on a known project; "
-                    "if another project is only mentioned as a reference or comparison, ask before switching."
+                    "if another project is only mentioned as a reference or comparison, ask before switching. "
+                    "For a natural request to create a brand-new project, prefer creating a Kanban task "
+                    "with project_path='nouveau'. Inside that task, use this tool only if work must continue "
+                    "inside the new project after the directory is created; if the task only creates the project, "
+                    "do not change the active project."
                 ),
                 parameters={
                     "type": "object",

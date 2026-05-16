@@ -74,6 +74,33 @@ _ALLOW = PermissionDecision("allow")
 _DENY_SYSTEM = PermissionDecision("deny", "Chemin système — accès interdit.")
 _DENY_SHELL  = PermissionDecision("deny", "Shell désactivé en mode safe.")
 _DENY_WRITE  = PermissionDecision("deny", "Écriture hors CWD interdite en mode safe.")
+_DENY_UNKNOWN_TOOL = PermissionDecision("deny", "Outil non classé par le gardien de permissions.")
+
+_KNOWN_TOOLS = {
+    "allow_root_list", "allow_root_add", "allow_root_remove",
+    "web_fetch", "web_search", "memory",
+    "host_status", "host_doctor", "host_logs", "host_agent_list",
+    "project_list", "approval_list", "secret_ref_list", "provider_list",
+    "caldav_doctor", "caldav_agenda", "sentinelle_scan",
+    "rag_source_list", "rag_search", "rag_get", "rag_promote_to_memory",
+    "browser_open", "browser_extract", "browser_screenshot",
+    "browser_click", "browser_type", "browser_close",
+    "task_create", "task_list", "task_update",
+    "reminders", "open_marius_web", "spawn_agent", "call_agent",
+    "run_bash",
+    "read_file", "list_dir", "vision", "explore_tree", "explore_grep", "explore_summary",
+    "make_dir", "write_file", "move_path",
+    "skill_view", "skill_create", "skill_list", "skill_reload",
+    "host_agent_save", "host_agent_delete", "host_gateway_restart", "host_telegram_configure",
+    "self_update_list", "self_update_show", "self_update_propose", "self_update_report_bug",
+    "self_update_apply", "self_update_rollback",
+    "rag_source_add", "rag_source_sync", "rag_checklist_add",
+    "caldav_maintenance", "project_set_active",
+    "approval_decide", "approval_forget",
+    "secret_ref_save", "secret_ref_delete", "secret_ref_prepare_file",
+    "provider_save", "provider_delete", "provider_models",
+    "dreaming_run",
+}
 
 
 # ── guard ─────────────────────────────────────────────────────────────────────
@@ -153,6 +180,9 @@ class PermissionGuard:
             return
 
     def _evaluate(self, tool_name: str, arguments: dict) -> PermissionDecision:
+        if tool_name not in _KNOWN_TOOLS:
+            return _DENY_UNKNOWN_TOOL
+
         if tool_name == "allow_root_list":
             return _ALLOW
         if tool_name == "allow_root_add":
@@ -171,6 +201,8 @@ class PermissionGuard:
             "caldav_agenda", "sentinelle_scan",
             "rag_source_list", "rag_search", "rag_get",
             "browser_open", "browser_extract", "browser_close",
+            "task_create", "task_list", "task_update",
+            "reminders", "open_marius_web", "spawn_agent", "call_agent",
         ):
             return _ALLOW
         if tool_name == "browser_screenshot":
@@ -279,7 +311,7 @@ class PermissionGuard:
         if tool_name == "dreaming_run":
             return self._check_write({"path": str(_DREAMS_DIR)})
 
-        return _ALLOW
+        return _DENY_UNKNOWN_TOOL
 
     # ── checks par outil ─────────────────────────────────────────────────────
 

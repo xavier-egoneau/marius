@@ -221,6 +221,99 @@ Conséquences :
 - retirer une racine est une action de réduction de confiance et reste
   autorisée directement par le guard.
 
+## 2026-05-16 — Ask permission global et promotion en racine autorisée
+
+Une demande de permission interactive appartient au gateway, pas à une surface
+particulière.
+
+Conséquences :
+- le gateway garde les demandes de permission en attente et les relaie aux
+  surfaces connectées ;
+- une surface qui se connecte pendant qu'une demande est en attente reçoit aussi
+  la demande, afin d'éviter les blocages silencieux ;
+- les tours déclenchés depuis Telegram ou depuis une task peuvent produire un
+  ask visible sur les surfaces web/CLI ;
+- Telegram affiche aussi des boutons inline `Autoriser` / `Refuser` pour
+  répondre directement à l'ask depuis le chat ;
+- les tours Telegram lancés depuis le poller tournent en arrière-plan afin que
+  le même poller puisse continuer à recevoir les callbacks de permission ;
+- une approbation utilisateur ne valide pas seulement l'appel en cours : pour
+  les opérations filesystem/RAG/projet, le dossier pertinent est promu dans
+  `~/.marius/allowed_roots.json` après revue du gardien ;
+- les ajouts de racines depuis le dashboard passent par la même politique de
+  gardien avant de modifier la liste blanche.
+
+## 2026-05-16 — PermissionGuard deny-by-default
+
+Le gardien de permissions refuse désormais les outils non classés explicitement.
+
+Conséquences :
+- ajouter un nouvel outil runtime exige de le classer dans le guard : read-only,
+  filesystem, admin sensible, orchestration interne, etc. ;
+- un oubli de classification se transforme en refus visible plutôt qu'en accès
+  implicite ;
+- les outils d'orchestration Marius (`task_*`, `reminders`, `spawn_agent`,
+  `call_agent`, `open_marius_web`) sont classés explicitement comme capacités
+  autorisées quand elles sont exposées à l'agent par la configuration.
+
+## 2026-05-16 — Projet actif souple et contexte déterministe des tasks
+
+Le projet actif reste fluide en conversation, mais déterministe pendant
+l'exécution d'une task.
+
+Conséquences :
+- en conversation normale, l'agent conserve ou change le projet actif selon
+  l'intention utilisateur ; s'il y a ambiguïté entre le projet actif et un autre
+  projet cité, il demande confirmation ;
+- une task unique qui porte un `project_path` impose ce dossier comme projet
+  actif d'exécution pour le tour task ;
+- une demande naturelle de création de nouveau projet doit devenir une task
+  Kanban par défaut, assignée à l'agent courant ;
+- une task avec `project_path='nouveau'` commence volontairement sans projet
+  actif réel : elle crée d'abord le dossier, puis remplace `project_path` par le
+  chemin absolu réel ;
+- créer un nouveau projet ne force pas le projet actif global si la demande
+  s'arrête à la création du dossier ; l'agent active le nouveau projet seulement
+  si la task demande de travailler dedans après création ;
+- le dashboard ne pré-crée pas le dossier d'un nouveau projet à la place de la
+  task : la création passe par les outils de l'agent et donc par le gardien.
+
+## 2026-05-16 — Dashboard mince par extraction progressive
+
+Le dashboard peut rester une surface humaine/admin riche, mais sa logique métier
+ne doit pas devenir une vérité concurrente du runtime.
+
+Conséquences :
+- les règles durables du Task Board, des projets, des racines autorisées et des
+  routines doivent migrer progressivement vers des services backend testables ;
+- le dashboard doit se limiter à valider/normaliser les entrées HTTP, appeler ces
+  services, puis rendre leur résultat ;
+- les comportements déjà extraits (`task_execution_message`, guard allow-roots,
+  task store/scheduler) servent de modèle pour les extractions suivantes ;
+- on évite une réécriture large : chaque déplacement se fait au moment où une
+  règle métier est touchée ou testée.
+
+## 2026-05-16 — Workflows dev pilotés par le Task Board
+
+Les commandes de développement `/plan`, `/dev`, `/resume`, `/check` et `/pr`
+doivent utiliser le Task Board comme source de vérité du suivi.
+
+Conséquences :
+- `/plan` crée des cards Kanban via `task_create`, avec dépendances,
+  parallélisme, critères d'acceptation et `project_path` dans le prompt de la
+  task ;
+- `/dev` pilote ou exécute les cards via `task_list` et `task_update`, sans
+  dépendre d'un fichier `PLAN.md` ;
+- les cards marquées parallélisables ne sont pas parallélisées par le simple
+  statut `queued` : `/dev` doit les déléguer à `spawn_agent`, un worker par
+  task indépendante, puis clôturer chaque card selon le rapport reçu ;
+- le scheduler Kanban reste un consommateur séquentiel de tasks `queued` pour un
+  agent donné ; il ne porte pas la logique métier de parallélisation ;
+- `PLAN.md` reste seulement une entrée legacy ou explicitement demandée par
+  l'utilisateur, jamais le protocole natif ;
+- les branches restent liées aux tasks et le merge final appartient à
+  l'utilisateur, sauf demande explicite contraire.
+
 ## 2026-05-15 — Exécution des routines via canal dédié
 
 Le bouton de test du dashboard et le cron des routines doivent utiliser le même
@@ -272,6 +365,11 @@ Conséquences :
   racine du run avant d'envoyer le prompt au gateway, sous contrôle du guardian
   policy ; cela permet de créer un nouveau projet demandé sans ask non interactif
   bloquant.
+- les statuts canoniques des tasks sont `backlog`, `queued`, `running`, `done`,
+  `failed` et `paused` ; `archived` n'est plus un statut de task et les anciennes
+  valeurs sont relues comme `done`.
+- `paused` reste visible dans le Kanban, dans la colonne `BACKLOG`, avec un badge
+  explicite.
 - en mode `limited`, la création/activation d'un nouveau dossier projet frère
   d'une racine déjà autorisée est permise pour `make_dir` et `project_set_active`,
   mais pas pour des écritures arbitraires avant que ce projet devienne une racine
@@ -544,25 +642,13 @@ Implémentation :
 - Rollback : `self_update_rollback` inverse uniquement un patch déjà enregistré dans un rapport d'application.
 - Principe : aucun agent ne valide seul une update ; le gardien de permissions et la confirmation humaine restent la frontière.
 
-## 2026-05-10 — Veille persistante explicite
-- Décision : exposer la veille via `watch_add`, `watch_list`, `watch_remove` et `watch_run`.
-- Portée initiale : topics JSON standalone sous `~/.marius/watch/topics.json`, rapports sous `~/.marius/watch/reports/`, exécution manuelle via web search.
-- Principe : `watch_run` persiste des observations ; le modèle reformule et décide quoi faire. Les routines qui en ont besoin peuvent lire les rapports existants, sans déclencher de recherche web cachée.
-- Impact : cadence automatique, notifications et déduplication de résultats restent une tranche scheduler séparée.
-
-## 2026-05-10 — Veille automatisée par scheduler
-- Décision : les topics de veille avec cadence non manuelle deviennent des jobs `watch:<topic_id>` dans le scheduler du gateway.
-- Cadences acceptées : `hourly`, `1d`, `weekly`, ou des durées simples `Nm`, `Nh`, `Nd`.
-- Principe : le scheduler déclenche le même pipeline que `watch_run`; les rapports restent persistés dans `~/.marius/watch/reports/`.
-- Notifications : Telegram est opt-in par topic via tag `notify` ou `telegram`.
-- Déduplication : les URLs déjà vues pour un topic sont filtrées avant sauvegarde du rapport.
-
-## 2026-05-11 — Veille avancée comme observation enrichie
-- Décision : `watch_run` enrichit les rapports avec `novelty_score`, `is_new`, raisons de score et métadonnées agrégées.
-- Résumé : un résumé LLM par topic peut être injecté via un summarizer optionnel ; il est stocké dans le rapport comme observation, sans court-circuiter la réponse finale du modèle.
-- Notifications : les topics acceptent des settings génériques (`notify`, `notify_min_score`, `summary_enabled`) en plus des tags historiques.
-- Backfill : `watch_run` garde la déduplication par défaut et expose `dedupe: false` seulement pour les runs de backfill/audit explicites.
-- Modularité : le store JSON reste autonome ; l'accès provider est injecté depuis les surfaces qui disposent déjà d'un provider courant.
+## 2026-05-16 — Retrait du module watch persistant
+- Décision : Marius ne garde plus de module `watch_*` ni de skill `watch` dédié.
+- Principe : une veille ponctuelle reste une conversation normale avec `web_search`
+  quand l'utilisateur la demande ; les routines peuvent appeler les outils
+  existants, mais il n'y a plus de topics persistants `~/.marius/watch/`.
+- Impact : les anciens choix de veille persistante/automatisée ne sont plus une
+  capacité produit active.
 
 ## 2026-05-11 — Commandes slash gateway alignées
 - Décision : les commandes slash de base (`/help`, `/remember`, `/memories`, `/forget`, `/doctor`, `/dream`, `/context`, `/compact`) sont gérées par le gateway, pas seulement par le REPL local.
@@ -601,26 +687,20 @@ Implémentation :
 - Impact : une compaction reste effective après redémarrage sans casser la lisibilité de la conversation canonique.
 
 ## 2026-05-11 — Artefacts observationnels non imprimés par défaut
-- Décision : les outils de collecte de contexte (`rag_search`, `watch_run`) peuvent retourner des rapports structurés masqués au rendu final.
+- Décision : les outils de collecte de contexte comme `rag_search` peuvent retourner des rapports structurés masqués au rendu final.
 - Principe : le modèle reçoit les données d'outil et doit produire une synthèse lisible ; le chat ne doit pas recevoir un dump brut après la réponse.
 - Règle : les artefacts d'action utiles comme les diffs restent visibles ; les rapports de sources servent d'observations sauf demande explicite.
-- Impact : les réponses RAG/veille gagnent en lisibilité sans perdre les données nécessaires au LLM.
+- Impact : les réponses RAG gagnent en lisibilité sans perdre les données nécessaires au LLM.
 
 ## 2026-05-11 — Briefings récurrents par routines
 - Décision : les briefings récurrents sont de simples routines avec un `prompt` explicite, pas un mécanisme dédié.
-- Principe : les sources RAG, calendrier, veille et dreaming servent à croiser, déduire et prioriser quand la routine le demande ; elles ne doivent pas être imprimées telles quelles.
-- Décision veille : `watch_add` applique une limite douce à 8 sujets planifiés actifs ; au-delà, l'agent demande confirmation puis peut réessayer explicitement.
+- Principe : les sources RAG, calendrier et dreaming servent à croiser, déduire et prioriser quand la routine le demande ; elles ne doivent pas être imprimées telles quelles.
 - Impact : l'utilisateur garde la main sur le coût et le bruit des routines de briefing, sans bloquer les ajouts volontaires.
 
 ## 2026-05-11 — Briefings sans moteur dédié
 - Décision : il n'y a pas de commande ni d'outil dédié au briefing quotidien ; une routine ordinaire porte le prompt, la cadence et l'agent.
 - Principe : optimiser un briefing revient à optimiser la routine correspondante, pas à ajouter un second chemin runtime.
 - Impact : les tâches récurrentes restent optimisables en coût/latence sans casser l'expérience du chat principal.
-
-## 2026-05-11 — Veille bornée en temps pour briefings
-- Décision : les recherches de veille déclenchées par une routine de briefing doivent utiliser des timeouts courts et peu de retries.
-- Principe : un briefing doit rester fluide ; les résumés LLM intermédiaires de chaque topic sont évités quand l'agent synthétise déjà en réponse finale.
-- Impact : plusieurs sujets de veille peuvent enrichir un briefing sans bloquer le tour pendant de longues minutes.
 
 ## 2026-05-11 — Migration des skills utilisateur Maurice
 - Décision : porter `caldav_calendar` et `sentinelle` comme skills Marius Markdown-first, avec outils Marius natifs lorsque l'ancien skill avait du code.

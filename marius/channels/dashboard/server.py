@@ -815,8 +815,8 @@ def _delete_routine(routine_id: str) -> tuple[bool, str]:
     task = next((t for t in ts.load() if t.id == routine_id), None)
     if task is None:
         return False, f"routine '{routine_id}' not found"
-    ts.update(routine_id, {"status": "archived"})
-    return True, "deleted"
+    deleted = ts.delete(routine_id)
+    return deleted, "deleted" if deleted else f"routine '{routine_id}' not found"
 
 
 def _api_sessions(limit: int = 10) -> dict:
@@ -1560,8 +1560,13 @@ def _api_allow_roots_add(data: dict) -> tuple[bool, str]:
         return False, "path manquant"
     reason = str(data.get("reason", "dashboard")).strip() or "dashboard"
     try:
-        AllowRootStore().add(Path(path_str), reason=reason)
-        return True, f"Dossier autorisé : {path_str}"
+        root = Path(path_str).expanduser().resolve(strict=False)
+        allow_store = AllowRootStore()
+        allowed, message = _review_dashboard_allow_root(root, allow_store)
+        if not allowed:
+            return False, message
+        added = allow_store.add(root, reason=reason)
+        return True, f"Dossier autorisé : {added.path}"
     except Exception as exc:
         return False, str(exc)
 
@@ -1575,6 +1580,31 @@ def _api_allow_roots_remove(data: dict) -> tuple[bool, str]:
     if not removed:
         return False, f"Racine non trouvée : {path_str}"
     return True, f"Racine retirée : {path_str}"
+
+
+def _review_dashboard_allow_root(root: Path, allow_store: Any) -> tuple[bool, str]:
+    from marius.kernel.guardian_policy import (
+        AllowExpansionReason,
+        AllowExpansionRequest,
+        AllowExpansionStatus,
+        DefaultGuardianPolicy,
+    )
+    from marius.kernel.project_context import PermissionMode
+
+    roots = tuple(path.expanduser().resolve(strict=False) for path in allow_store.paths())
+    decision = DefaultGuardianPolicy().review_allow_expansion(
+        AllowExpansionRequest(
+            permission_mode=PermissionMode.LIMITED,
+            workspace_root=_WORKSPACE_ROOT,
+            current_allowed_roots=(_WORKSPACE_ROOT, *roots),
+            requested_root=root,
+            reason=AllowExpansionReason.ACTIVATE_PROJECT,
+            explicit_user_request=True,
+        )
+    )
+    if decision.status in {AllowExpansionStatus.ALLOW, AllowExpansionStatus.NOT_REQUIRED}:
+        return True, ""
+    return False, f"Racine refusée par le gardien : {decision.code.value}"
 
 
 def _send_to_agent(agent_name: str, message: str) -> dict:
@@ -1763,6 +1793,7 @@ def _launch_task(task_store: Any, task_id: str) -> tuple[int, dict]:
     if error:
         return 400, {"ok": False, "error": error}
     task = prepared
+    new_project_path = str(getattr(task, "_new_project_path", "") or "")
 
     if scheduled and scheduled > now:
         task = task_store.update(task.id, {
@@ -1791,10 +1822,14 @@ def _launch_task(task_store: Any, task_id: str) -> tuple[int, dict]:
             "locked_by": "",
             "attempts": 0,
         }) or task
+        if new_project_path:
+            setattr(task, "_new_project_path", new_project_path)
     task = task_store.update(task.id, {
         "locked_at": now.isoformat(),
         "locked_by": "dashboard",
     }) or task
+    if new_project_path:
+        setattr(task, "_new_project_path", new_project_path)
 
     msg = _task_execution_message(task)
     result = _send_to_agent(task.agent, msg)
@@ -1833,25 +1868,12 @@ def _prepare_new_project_task(task_store: Any, task: Any) -> tuple[Any, str | No
     if error:
         return task, error
 
-    try:
-        project_path.mkdir(parents=True, exist_ok=True)
-        from marius.storage.project_store import ProjectStore
-        from marius.storage.allow_root_store import AllowRootStore
-
-        ProjectStore().record_open(project_path)
-        AllowRootStore().add(project_path, reason="dashboard_new_project_task")
-    except OSError as exc:
-        return task, str(exc)
-
-    updated = task_store.update(task.id, {
-        "project_path": str(project_path),
-        "last_error": "",
-    }) or task
-    task_store.add_event(updated.id, {
-        "kind": "new_project_prepared",
+    setattr(task, "_new_project_path", str(project_path))
+    task_store.add_event(task.id, {
+        "kind": "new_project_planned",
         "path": str(project_path),
     })
-    return updated, None
+    return task, None
 
 
 def _is_new_project_marker(value: str) -> bool:

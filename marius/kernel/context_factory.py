@@ -208,11 +208,16 @@ def _project_context_hint(home: Path) -> str:
     return (
         "## Contexte projet explicite\n"
         f"{active_line}\n"
+        "- En conversation normale, gère le projet actif de façon souple : conserve-le "
+        "quand l'intention est claire, et demande confirmation quand le travail semble "
+        "viser un autre projet sans bascule explicite.\n"
         "- Si l'utilisateur demande de travailler sur un projet connu différent du projet actif, "
         "utilise `project_list` pour lever l'ambiguïté puis `project_set_active` quand l'intention "
         "de basculer le travail est claire.\n"
         "- Si un autre projet est seulement cité comme comparaison, dépendance ou référence, "
-        "ne change pas le projet actif sans confirmation."
+        "ne change pas le projet actif sans confirmation.\n"
+        "- Pour une demande de création de nouveau projet, crée normalement une task Kanban "
+        "avec project_path='nouveau' plutôt que de créer le dossier directement dans le chat."
     )
 
 

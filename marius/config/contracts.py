@@ -110,12 +110,6 @@ TOOL_GROUPS: list[dict[str, object]] = [
         "prefixes": ["self_update_"],
     },
     {
-        "id": "watch",
-        "label": "Watch",
-        "description": "Veille automatisée sur des sujets web",
-        "prefixes": ["watch_"],
-    },
-    {
         "id": "rag",
         "label": "RAG",
         "description": "Sources Markdown indexées, recherche sémantique, checklists",

@@ -41,7 +41,7 @@ class TaskScheduler:
         fired: list[str] = []
 
         for task in ts.load():
-            if task.status in ("paused", "archived", "running", "failed"):
+            if task.status in ("paused", "running", "failed", "done"):
                 continue
             if not task.recurring:
                 if task.status != "queued":

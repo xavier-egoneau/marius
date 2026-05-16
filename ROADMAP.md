@@ -12,13 +12,13 @@ interface web · canal Telegram · service systemd user · dreaming (LLM direct,
 /dream) · skill dev (plan/dev/commit/review/test/resume/pr) · subagents dev ·
 outil `open_marius_web` · host diagnostics/action tools (`host_status`, `host_doctor`,
 `host_logs`, `host_agent_*`, `host_telegram_configure`, `host_gateway_restart`) · self-update proposal tools
-· persistent watch topics avec limite douce · projet actif explicite (`project_list`, `project_set_active`)
+· projet actif explicite (`project_list`, `project_set_active`)
 · commandes dev projet (`/projects`, `/project`, `/tasks`, `/decision`, `/check`)
 · approvals/secrets administrables · provider config tools · dreaming ToolEntry
 · artefacts cross-canaux via rendu de sortie de tour commun · skills utilisateur migrés
 `caldav_calendar`, `sentinelle` · RAG Markdown v1 (`rag_source_*`,
 `rag_search`, `rag_get`, `rag_promote_to_memory`) · historique web des conversations
-visibles canoniques · skill `watch` pour sujets de veille · routines pour briefings récurrents
+visibles canoniques · routines pour briefings récurrents
 
 ---
 
@@ -66,22 +66,6 @@ perd pas de capacités importantes tout en conservant sa logique v2.
 - [x] **Self-update apply/rollback explicites** — ajouter une suite séparée qui applique
       uniquement après accord explicite, garde un rapport, lance les tests et documente
       rollback.
-- [x] **Veille persistante initiale** — porter les watch topics façon Marius :
-      `watch_add`, `watch_list`, `watch_remove`, `watch_run`, store JSON standalone,
-      rapports persistés, contribution aux routines de briefing sans recherche web cachée.
-- [x] **Veille automatisée initiale** — brancher les topics non manuels au scheduler
-      assistant avec cadences (`hourly`, `1d`, `weekly`, `Nm`, `Nh`, `Nd`),
-      déduplication par URL et notifications Telegram opt-in via tag `notify`/`telegram`.
-- [x] **Veille avancée** — améliorer la qualité des rapports : scoring de nouveauté,
-      résumé LLM par topic, configuration fine des notifications et backfill contrôlé.
-- [x] **Skill veille** — guider l'agent pour transformer “ajoute X à mes sujets
-      de veille” en `watch_add`, puis utiliser les rapports comme sources de synthèse
-      sans imprimer le rapport brut.
-- [x] **Veille bornée UX** — prévenir avant d'ajouter un 9e sujet planifié actif,
-      demander confirmation, puis autoriser l'ajout explicite sans bloquer durablement.
-- [x] **Veille bornée en temps pour briefings** — pour un briefing, limiter `watch_run`
-      à peu de résultats, sans résumé LLM intermédiaire, avec timeout court et
-      un seul retry par sujet.
 - [x] **Explore tools** — ajouter des outils standalone `tree`, `grep` et `summary`
       (`explore_tree`, `explore_grep`, `explore_summary`) sans dépendre du shell.
 - [x] **Commandes projet Maurice** — compléter le skill dev ou un skill projet avec
@@ -185,7 +169,9 @@ Le subagent tourne en isolation, rend son résultat au parent, puis s'arrête.
 - [x] **Lifecycle worker** — éphémère, sans mémoire propre, auto-deny permissions interactives,
       cancel_event pour timeout, limite d'itérations d'outils.
 - [x] **Skill `dev`** — `/plan` `/dev` `/commit` `/review` `/test` `/resume` `/pr`
-      + tâches `[parallélisable]` / `[dépend de: X]` dans PLAN.md.
+      pilotés par le Task Board ; dépendances et parallélisme vivent dans les
+      prompts des tasks Kanban ; `/dev` délègue les tasks parallélisables à
+      `spawn_agent`, `PLAN.md` reste legacy/explicite.
 - [ ] **Exécution asynchrone** — notification gateway quand un worker long se termine
       (adapté aux builds, test suites, refactors lourds).
 
@@ -224,6 +210,9 @@ Le subagent tourne en isolation, rend son résultat au parent, puis s'arrête.
 - [ ] **Fichiers sensibles** — détecter `.env`, `.netrc`, clés SSH → alerte avant lecture/écriture
 - [ ] **Récupération d'erreurs** — provider down, autres backends down → messages clairs + retry
 - [ ] **Compaction streaming** — déclencher la compaction dans le chemin streaming
+- [ ] **Dashboard mince** — extraire progressivement la logique métier restante
+      du dashboard vers des services backend testables, en gardant le host HTTP
+      comme surface de validation/rendu.
 - [x] **Tests web tools** — tests unitaires pour `web_fetch` et `web_search`
 - [x] **Tests memory tool** — tests pour `make_memory_tool` + intégration
 - [ ] **Tests config** — tests pour `ConfigStore`, `run_setup`

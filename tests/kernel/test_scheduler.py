@@ -221,6 +221,20 @@ def test_scheduler_ignores_backlog_one_shot_task(monkeypatch, tmp_path: Path) ->
     assert TaskStore().load()[0].status == "backlog"
 
 
+def test_scheduler_ignores_paused_and_done_tasks(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    paused = TaskStore().create({"title": "Paused", "status": "paused", "agent": "main"})
+    done = TaskStore().create({"title": "Done", "status": "done", "agent": "main"})
+    fired: list[str] = []
+    scheduler = TaskScheduler({
+        paused.id: lambda: fired.append(paused.id),
+        done.id: lambda: fired.append(done.id),
+    })
+
+    assert scheduler.tick() == []
+    assert fired == []
+
+
 def test_scheduler_retries_failed_one_shot_send(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
     due = datetime.now(timezone.utc) - timedelta(minutes=1)

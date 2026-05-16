@@ -87,21 +87,59 @@ def download_file(token: str, file_path: str, *, max_bytes: int = 20 * 1024 * 10
     return data
 
 
-def send_message(token: str, chat_id: int, text: str) -> bool:
+def send_message(
+    token: str,
+    chat_id: int,
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+) -> bool:
     """Envoie un message HTML. Retourne True si envoyé."""
     # Split si le texte dépasse la limite Telegram (4096 chars)
     chunks = _split_message(text)
     ok = True
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
         html, mode = _md_to_html(chunk)
-        resp = _post(token, "sendMessage", {
+        payload: dict[str, Any] = {
             "chat_id":    chat_id,
             "text":       html,
             "parse_mode": mode,
-        })
+        }
+        if reply_markup is not None and index == 0:
+            payload["reply_markup"] = reply_markup
+        resp = _post(token, "sendMessage", payload)
         if not resp:
             ok = False
     return ok
+
+
+def answer_callback_query(token: str, callback_query_id: str, text: str = "") -> bool:
+    """Répond à un clic de bouton inline Telegram."""
+    payload: dict[str, Any] = {"callback_query_id": callback_query_id}
+    if text:
+        payload["text"] = text
+    return bool(_post(token, "answerCallbackQuery", payload))
+
+
+def edit_message_text(
+    token: str,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+) -> bool:
+    """Modifie un message Telegram existant."""
+    html, mode = _md_to_html(text)
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": html,
+        "parse_mode": mode,
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    return bool(_post(token, "editMessageText", payload))
 
 
 def send_chat_action(token: str, chat_id: int, action: str = "typing") -> None:

@@ -291,10 +291,6 @@ Les outils configurables incluent notamment :
 - `self_update_show` : relire une proposition ou un bug par identifiant ;
 - `self_update_apply` : appliquer une proposition patchée après confirmation ;
 - `self_update_rollback` : inverser une application self-update enregistrée ;
-- `watch_add` : créer ou modifier un topic de veille persistant ;
-- `watch_list` : lister les topics de veille ;
-- `watch_remove` : supprimer un topic avec confirmation explicite ;
-- `watch_run` : exécuter une veille via recherche web et persister un rapport ;
 - `open_marius_web` : lancer l'interface web locale ;
 - `rag_*` : gérer et interroger des sources Markdown locales ;
 - `caldav_*` : diagnostiquer et lire un calendrier local `vdirsyncer`/`khal` ;
@@ -381,7 +377,6 @@ Chemins utiles :
 ~/.marius/approvals.json              audit et décisions de permissions
 ~/.marius/secret_refs.json            références de secrets nommées
 ~/.marius/self_updates/               propositions et bugs self-update
-~/.marius/watch/                      topics et rapports de veille
 ~/.marius/workspace/<agent>/memory.db mémoire SQLite
 ~/.marius/workspace/<agent>/sessions/ corpus de sessions
 ~/.marius/logs/marius.jsonl           logs de diagnostic
@@ -457,32 +452,6 @@ valide, un dépôt git contrôlé et un état de travail propre sauf exception
 documentée (`allow_dirty`). Il applique le patch, lance des commandes de test
 bornées (`pytest`, `python -m pytest`, `git diff --check`) et écrit un rapport.
 `self_update_rollback` inverse le patch enregistré par `self_update_apply`.
-
-## Veille
-
-La veille persistante repose sur des topics explicites stockés dans
-`~/.marius/watch/`. `watch_run` lance une recherche web pour un topic ou tous les
-topics actifs, puis enregistre un rapport. Le dreaming et les routines de
-briefing lisent les rapports existants ; ils ne lancent pas de recherche web cachée.
-
-Les cadences non manuelles (`hourly`, `1d`, `weekly`, `15m`, `2h`, `3d`, etc.)
-sont reprises par le scheduler du gateway. Chaque résultat reçoit un score de
-nouveauté (`novelty_score`) et des raisons simples (`new_url`, `new_domain`,
-`query_match`, etc.). Les résultats déjà vus par URL sont dédupliqués par défaut.
-Pour un backfill ou un audit contrôlé, `watch_run` accepte `dedupe: false`.
-
-Quand un provider LLM est disponible, `watch_run` peut attacher un résumé par
-topic au rapport. Ce résumé reste une observation d'outil : le modèle principal
-garde la responsabilité de répondre à l'utilisateur dans le fil de conversation.
-
-Les notifications sont configurables par topic via `watch_add` :
-
-- `notify: "off"` ne pousse rien ;
-- `notify: "tagged"` conserve le comportement historique avec les tags `notify`
-  ou `telegram` ;
-- `notify: "new"` pousse seulement si le run contient de nouveaux résultats ;
-- `notify: "always"` pousse à chaque run réussi ;
-- `notify_min_score` fixe un seuil minimal sur le score de nouveauté maximal.
 
 ## Développement
 

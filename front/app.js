@@ -1573,7 +1573,9 @@ function renderKanban(tasks, filter, selectedProject, projects) {
   document.getElementById("btn-edit-projects")?.addEventListener("click", () => openProjectsModal(Views.tasks));
 
   COLS.forEach(col => {
-    const colTasks = filtered.filter(t => t.status === col.id);
+    const colTasks = filtered.filter(t => col.id === "backlog"
+      ? ["backlog", "paused"].includes(t.status)
+      : t.status === col.id);
     const colEl = document.createElement("div");
     colEl.className = "kanban-col";
     colEl.dataset.status = col.id;
@@ -1627,6 +1629,7 @@ function buildTaskCard(t) {
   card.className = "task-card";
   if (t.permission_pending) card.classList.add("needs-permission");
   if (t.status === "running") card.classList.add("is-running");
+  if (t.status === "paused") card.classList.add("is-paused");
   card.dataset.priority = t.priority;
   card.draggable = true;
 
@@ -1636,8 +1639,8 @@ function buildTaskCard(t) {
   const tags = (t.tags || []).map(tg => `<span class="tag">${esc(tg)}</span>`).join(" ");
 
   // action buttons: backlog is cadrage/queue; queued is already owned by the scheduler.
-  const canPlan = t.agent && ["backlog","failed"].includes(t.status);
-  const canQueue = t.agent && t.status === "backlog";
+  const canPlan = t.agent && ["backlog","paused","failed"].includes(t.status);
+  const canQueue = t.agent && ["backlog","paused"].includes(t.status);
   const canRetry = t.agent && t.status === "failed";
   const retryHtml = t.next_attempt_at
     ? `<div class="task-desc">Retry ${esc(_missionAge(t.next_attempt_at))}</div>`
@@ -1647,6 +1650,9 @@ function buildTaskCard(t) {
     : "";
   const permissionHtml = t.permission_pending
     ? `<span class="task-alert" title="${esc(t.permission_reason || "Autorisation requise")}">ASK</span>`
+    : "";
+  const pausedHtml = t.status === "paused"
+    ? `<span class="task-alert" title="Task mise en pause">PAUSED</span>`
     : "";
   const agentTitle = t.running_agent
     ? `${t.agent} actif`
@@ -1668,6 +1674,7 @@ function buildTaskCard(t) {
     <div class="task-top">
       <span class="task-id">${esc(t.id.toUpperCase())}</span>
       ${permissionHtml}
+      ${pausedHtml}
       ${t.status === "running" ? `<span class="task-gear">⚙</span>` : elapsed ? `<span class="task-time">${elapsed}</span>` : ""}
     </div>
     <div class="task-title">${esc(t.title)}</div>
@@ -2413,7 +2420,7 @@ async function openTaskModal(task, tasksView, isRoutine = false) {
 }
 
 function taskFormHtml(t, agents, projects, defaultProject) {
-  const statuses   = ["backlog","queued","running","failed","done"];
+  const statuses   = ["backlog","paused","queued","running","failed","done"];
   const priorities = ["high","med","low"];
   const curProject = t.project_path || t.project || defaultProject || "";
   const curAgent   = t.agent || "";

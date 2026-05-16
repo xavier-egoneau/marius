@@ -193,13 +193,17 @@ def test_launch_task_prepares_new_project_marker(monkeypatch, tmp_path) -> None:
     project_path = projects_root / "test2"
     assert status == 200
     assert payload["ok"] is True
-    assert project_path.is_dir()
-    assert ProjectStore().get(project_path) is not None
-    assert [root.path for root in AllowRootStore().list()] == [str(project_path.resolve())]
+    assert not project_path.exists()
+    assert ProjectStore().get(project_path) is None
+    assert AllowRootStore().list() == []
     updated = TaskStore().load()[0]
-    assert updated.project_path == str(project_path.resolve())
-    assert any(event["kind"] == "new_project_prepared" for event in updated.events)
-    assert f"Projet cible: {project_path.resolve()}" in sent[0][1]
+    assert updated.project_path == "nouveau"
+    assert any(event["kind"] == "new_project_planned" for event in updated.events)
+    assert "[Nouveau projet]" in sent[0][1]
+    assert f"Chemin cible proposé: {project_path.resolve()}" in sent[0][1]
+    assert "ne change pas le projet actif global" in sent[0][1]
+    assert "remplacer project_path='nouveau'" in sent[0][1]
+    assert "Si la task demande ensuite de travailler" in sent[0][1]
     assert 'status="done"' in sent[0][1]
 
 
@@ -224,3 +228,19 @@ def test_launch_task_new_project_marker_requires_name(monkeypatch, tmp_path) -> 
     assert payload["ok"] is False
     assert "no project name" in payload["error"]
 
+
+def test_delete_routine_removes_it_instead_of_archiving(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    task = TaskStore().create({
+        "title": "Routine",
+        "status": "paused",
+        "agent": "main",
+        "recurring": True,
+        "cadence": "1d",
+    })
+
+    ok, message = dashboard_server._delete_routine(task.id)
+
+    assert ok is True
+    assert message == "deleted"
+    assert TaskStore().load() == []

@@ -82,6 +82,21 @@ def test_task_create_defaults_to_current_agent(monkeypatch, tmp_path) -> None:
     assert task.agent == "main"
 
 
+def test_task_create_new_project_defaults_to_queued_and_current_agent(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+
+    result = make_task_tools(default_agent="main")["task_create"].handler({
+        "title": "Créer projet toto",
+        "project_path": "nouveau",
+    })
+
+    assert result.ok is True
+    task = TaskStore().load()[0]
+    assert task.status == "queued"
+    assert task.agent == "main"
+    assert task.project_path == "nouveau"
+
+
 def test_task_create_explicit_agent_overrides_default(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
 
@@ -169,6 +184,15 @@ def test_task_list_can_filter_routines(monkeypatch, tmp_path) -> None:
 def test_task_store_maps_legacy_review_to_done(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
     TaskStore().create({"title": "Legacy review", "status": "review"})
+
+    task = TaskStore().load()[0]
+
+    assert task.status == "done"
+
+
+def test_task_store_maps_legacy_archived_to_done(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    TaskStore().create({"title": "Legacy archive", "status": "archived"})
 
     task = TaskStore().load()[0]
 

@@ -193,8 +193,8 @@ Un briefing est une tâche récurrente ordinaire :
 - la cadence de la task déclenche l'envoi au gateway ;
 - l'agent compose la réponse avec les outils disponibles, comme dans une conversation normale.
 
-Les données utiles vivent dans la mémoire, les sources RAG, les rapports de veille
-ou les outils métier. La routine ne crée pas de second système de contexte.
+Les données utiles vivent dans la mémoire, les sources RAG ou les outils métier.
+La routine ne crée pas de second système de contexte.
 
 ---
 

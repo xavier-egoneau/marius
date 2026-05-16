@@ -199,6 +199,7 @@ class GatewayServer:
         self._connections: set[socket.socket] = set()
         self._connections_lock = threading.Lock()
         self._pending_perms: dict[str, tuple[threading.Event, list[bool]]] = {}
+        self._pending_perm_requests: dict[str, PermissionRequestEvent] = {}
         self._turn_context = threading.local()
         self.telegram_chat_id: int | None = self._load_telegram_chat_id()
         allowed_roots_provider = lambda: _trusted_roots_for_active_project(
@@ -410,6 +411,10 @@ class GatewayServer:
         )
         from marius.kernel.runtime import TurnInput
         with self._turn_lock:
+            if not hasattr(self, "_turn_context"):
+                self._turn_context = threading.local()
+            self._turn_context.conn = None
+            self._turn_context.channel = "telegram"
             try:
                 self._publish_visible("user", text, channel="telegram")
                 command_response = self._handle_builtin_command(text)
@@ -462,6 +467,10 @@ class GatewayServer:
             except Exception as exc:
                 log_event("turn_error", {"session_id": self.agent_name, "channel": "telegram", "error": str(exc)})
                 return f"Erreur : {exc}"
+            finally:
+                if getattr(self._turn_context, "channel", None) == "telegram":
+                    self._turn_context.conn = None
+                    self._turn_context.channel = ""
 
     def new_conversation(
         self,
@@ -665,8 +674,6 @@ class GatewayServer:
             self._turn_context = threading.local()
         conn = getattr(self._turn_context, "conn", None) or self._conn
         channel = str(getattr(self._turn_context, "channel", "") or "")
-        if conn is None:
-            return False
         import uuid
         req_id = uuid.uuid4().hex[:8]
         ev: threading.Event = threading.Event()
@@ -677,15 +684,114 @@ class GatewayServer:
             reason=reason,
             request_id=req_id,
         )
+        if not hasattr(self, "_pending_perm_requests"):
+            self._pending_perm_requests = {}
+        self._pending_perm_requests[req_id] = request
         try:
-            if channel == "task":
+            if channel in {"task", "telegram"} or conn is None:
                 self._broadcast(request)
             else:
                 self._send(conn, request)
+            if channel == "telegram":
+                self._notify_telegram_permission_request(request)
             ev.wait(timeout=_PERMISSION_TIMEOUT_SECONDS)
         finally:
             self._pending_perms.pop(req_id, None)
-        return result[0]
+            self._pending_perm_requests.pop(req_id, None)
+        approved = result[0]
+        if approved:
+            self._promote_allowed_root_for_permission(tool_name, arguments, reason)
+        return approved
+
+    def respond_permission_request(self, request_id: str, approved: bool) -> bool:
+        req_id = str(request_id or "")
+        if req_id not in self._pending_perms:
+            return False
+        ev, result = self._pending_perms[req_id]
+        result[0] = bool(approved)
+        ev.set()
+        return True
+
+    def _notify_telegram_permission_request(self, request: PermissionRequestEvent) -> None:
+        chat_id = self.telegram_chat_id
+        if chat_id is None:
+            return
+        try:
+            from marius.channels.telegram.config import load as load_tg_cfg
+            from marius.channels.telegram.api import send_message
+
+            cfg = load_tg_cfg()
+            if cfg and cfg.enabled:
+                keyboard = {
+                    "inline_keyboard": [[
+                        {
+                            "text": "Autoriser",
+                            "callback_data": f"perm:{request.request_id}:allow",
+                        },
+                        {
+                            "text": "Refuser",
+                            "callback_data": f"perm:{request.request_id}:deny",
+                        },
+                    ]]
+                }
+                send_message(
+                    cfg.token,
+                    chat_id,
+                    "Permission requise.\n"
+                    f"Outil : {request.tool_name}\n"
+                    f"Raison : {request.reason}\n\n"
+                    "Valide ou refuse cette action.",
+                    reply_markup=keyboard,
+                )
+        except Exception:
+            pass
+
+    def _promote_allowed_root_for_permission(
+        self,
+        tool_name: str,
+        arguments: dict,
+        reason: str,
+    ) -> None:
+        candidate = _allow_root_candidate_for_permission(tool_name, arguments)
+        if candidate is None:
+            return
+        try:
+            candidate = candidate.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            return
+        from marius.kernel.guardian_policy import (
+            AllowExpansionReason,
+            AllowExpansionRequest,
+            AllowExpansionStatus,
+            DefaultGuardianPolicy,
+        )
+        from marius.kernel.project_context import PermissionMode
+
+        try:
+            mode = PermissionMode(str(self.permission_mode or "limited"))
+        except ValueError:
+            mode = PermissionMode.LIMITED
+        roots = tuple(root.expanduser().resolve(strict=False) for root in self.allow_root_store.paths())
+        decision = DefaultGuardianPolicy().review_allow_expansion(
+            AllowExpansionRequest(
+                permission_mode=mode,
+                workspace_root=self.workspace,
+                current_allowed_roots=(self.workspace, *roots),
+                requested_root=candidate,
+                reason=AllowExpansionReason.ACTIVATE_PROJECT,
+                explicit_user_request=True,
+            )
+        )
+        if decision.status is AllowExpansionStatus.ALLOW:
+            for root in decision.roots_to_add:
+                self.allow_root_store.add(root, reason=f"permission:{tool_name}")
+                log_event("permission_allowed_root_promoted", {
+                    "agent": self.agent_name,
+                    "tool": tool_name,
+                    "root": str(root),
+                    "reason": preview(reason, limit=300),
+                    "code": decision.code.value,
+                })
 
     def _record_approval(self, event: dict[str, Any]) -> None:
         self.approval_store.record(
@@ -898,6 +1004,8 @@ class GatewayServer:
             provider=self.entry.name,
             loaded_context=self.loaded_context,
         ))
+        for request in list(getattr(self, "_pending_perm_requests", {}).values()):
+            self._send(conn, request)
 
         reader = _LineReader(conn)
         turn_thread: threading.Thread | None = None
@@ -919,10 +1027,7 @@ class GatewayServer:
             elif etype == "permission_response":
                 req_id = event.get("request_id", "")
                 approved = bool(event.get("approved", False))
-                if req_id in self._pending_perms:
-                    ev, result = self._pending_perms[req_id]
-                    result[0] = approved
-                    ev.set()
+                self.respond_permission_request(req_id, approved)
 
             elif etype == "command":
                 cmd = event.get("cmd", "")
@@ -1399,6 +1504,48 @@ def _mutate_visible_history(path: Path, mutate: Any) -> None:
             path.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _allow_root_candidate_for_permission(tool_name: str, arguments: dict[str, Any]) -> Path | None:
+    if tool_name == "make_dir":
+        return _path_arg(arguments, "path")
+    if tool_name in {"write_file", "browser_screenshot", "rag_checklist_add"}:
+        return _parent_root(_path_arg(arguments, "path"))
+    if tool_name == "move_path":
+        return _parent_root(_path_arg(arguments, "destination") or _path_arg(arguments, "dest"))
+    if tool_name == "project_set_active":
+        return _path_arg(arguments, "path")
+    if tool_name == "rag_source_add":
+        path = _path_arg(arguments, "path") or _path_arg(arguments, "uri")
+        if path is None:
+            return None
+        try:
+            resolved = path.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            return None
+        if resolved.exists() and resolved.is_dir():
+            return resolved
+        if resolved.suffix:
+            return resolved.parent
+        return resolved
+    return None
+
+
+def _path_arg(arguments: dict[str, Any], key: str) -> Path | None:
+    value = arguments.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return Path(value.strip())
+
+
+def _parent_root(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    try:
+        resolved = path.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return None
+    return resolved.parent
 
 
 def _without_content(message: Message) -> Message:

@@ -806,6 +806,9 @@ body {
   border-color: rgba(224,112,32,.45);
   box-shadow: 0 0 0 1px rgba(224,112,32,.08);
 }
+.task-card.is-paused {
+  opacity: .72;
+}
 
 .task-gear {
   margin-left: auto;

@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 from marius.channels.dashboard import server as dashboard_server
+from marius.storage import allow_root_store as allow_root_store_module
+from marius.storage.allow_root_store import AllowRootStore
 from marius.storage.task_store import Task
 
 
@@ -112,3 +114,33 @@ def test_task_payloads_mark_pending_permission(monkeypatch) -> None:
     assert rows[0]["permission_pending"] is True
     assert rows[0]["permission_reason"] == "Écriture hors du projet"
     assert rows[1]["permission_pending"] is False
+
+
+def test_api_allow_roots_add_passes_through_guardian(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / ".marius"
+    workspace = tmp_path / "workspace"
+    root = tmp_path / "secondBrain" / "todos"
+    monkeypatch.setattr(allow_root_store_module, "_MARIUS_HOME", home)
+    monkeypatch.setattr(dashboard_server, "_WORKSPACE_ROOT", workspace)
+
+    ok, message = dashboard_server._api_allow_roots_add({
+        "path": str(root),
+        "reason": "test",
+    })
+
+    assert ok is True
+    assert message == f"Dossier autorisé : {root.resolve(strict=False)}"
+    assert AllowRootStore().paths() == (root.resolve(strict=False),)
+
+
+def test_api_allow_roots_add_rejects_broad_root(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / ".marius"
+    workspace = tmp_path / "workspace"
+    monkeypatch.setattr(allow_root_store_module, "_MARIUS_HOME", home)
+    monkeypatch.setattr(dashboard_server, "_WORKSPACE_ROOT", workspace)
+
+    ok, message = dashboard_server._api_allow_roots_add({"path": "/"})
+
+    assert ok is False
+    assert "Racine refusée par le gardien" in message
+    assert AllowRootStore().paths() == ()

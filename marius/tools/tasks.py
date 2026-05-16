@@ -11,6 +11,13 @@ if TYPE_CHECKING:
     from marius.kernel.tool_router import ToolEntry, ToolResult
 
 
+_NEW_PROJECT_MARKERS = {"nouveau", "new", "__new__", "__new_project__"}
+
+
+def _is_new_project_marker(value: str) -> bool:
+    return str(value or "").strip().lower() in _NEW_PROJECT_MARKERS
+
+
 def make_task_tools(*, default_agent: str = "") -> "dict[str, ToolEntry]":
     from marius.kernel.tool_router import ToolEntry, ToolDefinition, ToolResult
     from marius.storage.task_store import TaskStore
@@ -54,14 +61,19 @@ def make_task_tools(*, default_agent: str = "") -> "dict[str, ToolEntry]":
         prompt = str(arguments.get("prompt", ""))
         recurring = bool(arguments.get("recurring", False))
         scheduled_for = str(arguments.get("scheduled_for", ""))
-        default_status = "queued" if recurring or scheduled_for.strip() else "backlog"
+        project_path = str(arguments.get("project_path", ""))
+        default_status = (
+            "queued"
+            if recurring or scheduled_for.strip() or _is_new_project_marker(project_path)
+            else "backlog"
+        )
         data = {
             "title":        str(arguments.get("title", "")).strip(),
             "prompt":       prompt,
             "status":       str(arguments.get("status", default_status)),
             "priority":     str(arguments.get("priority", "med")),
             "agent":        str(arguments.get("agent") or default_agent),
-            "project_path": str(arguments.get("project_path", "")),
+            "project_path": project_path,
             "recurring":    recurring,
             "cadence":      str(arguments.get("cadence", "")),
             "scheduled_for": scheduled_for,
@@ -148,7 +160,12 @@ def make_task_tools(*, default_agent: str = "") -> "dict[str, ToolEntry]":
                 description=(
                     "Crée une nouvelle entrée suivie dans le Task Board ou une routine. "
                     "Utilise ce tool seulement si l'utilisateur demande explicitement de créer, noter, "
-                    "suivre, planifier, mettre au backlog, programmer une tâche, ou créer une routine. "
+                    "suivre, planifier, mettre au backlog, programmer une tâche, créer une routine, "
+                    "ou créer un nouveau projet. "
+                    "Si l'utilisateur demande naturellement de créer un nouveau projet, crée une task "
+                    "Kanban assignée à l'agent courant, avec project_path='nouveau' et status='queued' "
+                    "sauf demande contraire. Si le nom, l'emplacement ou l'idée du projet manquent et "
+                    "ne peuvent pas être déduits prudemment, pose les questions avant de créer la task. "
                     "Si l'utilisateur demande une routine, une tâche récurrente, un cron, ou une exécution "
                     "répétée (tous les jours, chaque semaine, toutes les X heures/minutes), crée une routine "
                     "avec recurring=true et une cadence explicite ; elle apparaîtra dans l'onglet Routines, "
@@ -174,7 +191,7 @@ def make_task_tools(*, default_agent: str = "") -> "dict[str, ToolEntry]":
                         "status":       {"type": "string", "enum": ["backlog", "queued", "running", "failed", "done", "paused"], "description": "Statut initial. Défaut : backlog pour une task simple, queued pour une routine ou une task planifiée. Utilise paused pour créer une routine inactive."},
                         "priority":     {"type": "string", "enum": ["high", "med", "low"], "description": "Priorité. Défaut : med."},
                         "agent":        {"type": "string", "description": "Nom de l'agent assigné. Optionnel : par défaut, l'agent courant qui crée la task."},
-                        "project_path": {"type": "string", "description": "Chemin absolu du projet concerné."},
+                        "project_path": {"type": "string", "description": "Chemin absolu du projet concerné. Utilise 'nouveau' pour une task de création de nouveau projet ; la task créera le dossier puis mettra à jour ce champ avec le chemin réel."},
                         "recurring":    {"type": "boolean", "description": "True si c'est une routine récurrente ou un cron demandé par l'utilisateur ; false pour une task unique."},
                         "cadence":      {"type": "string", "description": "Déclencheur obligatoire si recurring=true. Formats acceptés : 'HH:MM' heure locale quotidienne fixe, 'Nm', 'Nh', 'Nd', 'hourly', 'weekly'. Pas de cron brut, pas de 'daily'."},
                         "scheduled_for":{"type": "string", "description": "Datetime ISO 8601 pour lancement unique futur avec recurring=false. Recommandé avec timezone, ex: 2026-05-15T10:00:00+02:00 ou UTC Z."},
@@ -194,7 +211,7 @@ def make_task_tools(*, default_agent: str = "") -> "dict[str, ToolEntry]":
                 parameters={
                     "type": "object",
                     "properties": {
-                        "status":       {"type": "string", "enum": ["backlog", "queued", "running", "failed", "done"], "description": "Filtrer par statut."},
+                        "status":       {"type": "string", "enum": ["backlog", "queued", "running", "failed", "done", "paused"], "description": "Filtrer par statut."},
                         "agent":        {"type": "string", "description": "Filtrer par agent assigné."},
                         "project_path": {"type": "string", "description": "Filtrer par projet."},
                         "recurring":    {"type": "boolean", "description": "Si true, retourne uniquement les routines."},
@@ -219,7 +236,7 @@ def make_task_tools(*, default_agent: str = "") -> "dict[str, ToolEntry]":
                         "id":           {"type": "string", "description": "ID de la tâche (ex: t_a1b2c3d4)."},
                         "title":        {"type": "string"},
                         "prompt":       {"type": "string", "description": "Source unique de cadrage et d'exécution de la task."},
-                        "status":       {"type": "string", "enum": ["backlog", "queued", "running", "failed", "done", "paused", "archived"]},
+                        "status":       {"type": "string", "enum": ["backlog", "queued", "running", "failed", "done", "paused"]},
                         "priority":     {"type": "string", "enum": ["high", "med", "low"]},
                         "agent":        {"type": "string"},
                         "project_path": {"type": "string"},

@@ -7,8 +7,7 @@ Une tâche est une unité de travail standalone :
   - running   : en cours d'exécution par un agent
   - failed    : lancement impossible après retry
   - done      : terminé
-  - paused    : suspendu (principalement pour les routines)
-  - archived  : archivé (masqué par défaut)
+  - paused    : suspendu / mis en attente
 
 Tâches récurrentes (recurring=True) :
   - elles apparaissent dans l'onglet Routines, pas le Task Board
@@ -37,7 +36,7 @@ class Task:
     id: str
     title: str
     prompt: str       = ""           # source unique de cadrage/exécution (vide = title)
-    status: str       = "backlog"    # backlog|queued|running|failed|done|paused|archived
+    status: str       = "backlog"    # backlog|queued|running|failed|done|paused
     priority: str     = "med"        # high|med|low
     agent: str        = ""           # nom de l'agent assigné
     project_path: str = ""           # chemin absolu du dossier projet
@@ -107,7 +106,9 @@ def _next_run_matches_cadence(next_run_at: str, cadence: str) -> bool:
 
 def _normalize_status(value: Any) -> str:
     status = str(value or "backlog")
-    return "done" if status == "review" else status
+    if status in {"review", "archived"}:
+        return "done"
+    return status
 
 
 class TaskStore:
@@ -250,7 +251,7 @@ class TaskStore:
                 if old_status == "running" and task.status != "running":
                     task.locked_at = ""
                     task.locked_by = ""
-                    if task.status in {"backlog", "queued", "paused", "archived"}:
+                    if task.status in {"backlog", "queued", "paused"}:
                         task.events.append({
                             "kind": "cancel_requested",
                             "at": now,
@@ -290,8 +291,6 @@ class TaskStore:
         non_recurring_only: bool = False,
     ) -> list[Task]:
         tasks = self.load()
-        if not include_archived:
-            tasks = [t for t in tasks if t.status != "archived"]
         if recurring_only:
             tasks = [t for t in tasks if t.recurring]
         if non_recurring_only:
@@ -300,7 +299,7 @@ class TaskStore:
             tasks = [t for t in tasks if t.project_path == project]
         if agent:
             tasks = [t for t in tasks if t.agent == agent]
-        order = {"running": 0, "queued": 1, "backlog": 2, "failed": 3, "done": 4, "archived": 5}
+        order = {"running": 0, "queued": 1, "backlog": 2, "paused": 3, "failed": 4, "done": 5}
         tasks.sort(key=lambda t: order.get(t.status, 9))
         return tasks
 

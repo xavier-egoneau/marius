@@ -3,18 +3,21 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from marius.config.doctor import Section
 from marius.gateway import server as gateway_server_module
 from marius.gateway.server import GatewayServer, _append_visible_history, _attached_image_artifacts
+from marius.gateway.protocol import PermissionRequestEvent
 from marius.kernel.contracts import Artifact, ArtifactType, Message, Role, ToolCall, ToolResult
 from marius.kernel.provider import InMemoryProviderAdapter, ProviderConfig
 from marius.kernel.runtime import RuntimeOrchestrator, TurnOutput
 from marius.kernel.session import SessionRuntime
 from marius.kernel.skills import SkillCommand
 from marius.kernel.tool_router import ToolRouter
+from marius.storage.allow_root_store import AllowRootStore
 from marius.storage.memory_store import MemoryStore
 
 
@@ -75,6 +78,8 @@ def _server(tmp_path, output: TurnOutput, *, stream_text: str = "") -> GatewaySe
     server.agent_name = "test"
     server.entry = SimpleNamespace(name="fake", provider="fake", model="fake")
     server.workspace = tmp_path
+    server.permission_mode = "limited"
+    server.allow_root_store = AllowRootStore(tmp_path / "allowed_roots.json")
     server.active_skills = []
     server.memory_block = None
     server.session = SessionRuntime(session_id="test")
@@ -82,6 +87,13 @@ def _server(tmp_path, output: TurnOutput, *, stream_text: str = "") -> GatewaySe
     server.orchestrator = _SilentOrchestrator(output, stream_text=stream_text)
     server._turn_lock = threading.Lock()
     server._send_lock = threading.Lock()
+    server._conn = None
+    server._pending_perms = {}
+    server._pending_perm_requests = {}
+    server._connections_lock = threading.Lock()
+    server._connections = set()
+    server.telegram_chat_id = None
+    server.loaded_context = []
     server._system_prompt_for_session = lambda: ""
     server._mirror_visible_to_telegram = lambda **_kwargs: None
     return server
@@ -163,6 +175,153 @@ def test_task_permission_request_is_broadcast_to_open_clients(monkeypatch, tmp_p
         web_right.close()
 
     assert result == [True]
+
+
+def test_telegram_permission_request_broadcasts_and_promotes_allowed_root(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(gateway_server_module, "_PERMISSION_TIMEOUT_SECONDS", 1.0)
+    server = _server(tmp_path, _output(""))
+    server.workspace = tmp_path / "workspace"
+    web_left, web_right = socket.socketpair()
+    target = tmp_path / "secondBrain" / "todos" / "courses.md"
+    server._connections = {web_left}
+    server._turn_context = threading.local()
+    result: list[bool] = []
+
+    def ask() -> None:
+        server._turn_context.conn = None
+        server._turn_context.channel = "telegram"
+        result.append(server._on_ask(
+            "write_file",
+            {"path": str(target), "content": "# Courses\n"},
+            "Écriture hors du projet",
+        ))
+
+    thread = threading.Thread(target=ask)
+    try:
+        web_right.settimeout(1)
+        thread.start()
+
+        event = json.loads(web_right.recv(4096).decode().splitlines()[0])
+        assert event["type"] == "permission_request"
+        ev, approved = server._pending_perms[event["request_id"]]
+        approved[0] = True
+        ev.set()
+        thread.join(timeout=1)
+    finally:
+        web_left.close()
+        web_right.close()
+
+    assert result == [True]
+    assert (tmp_path / "secondBrain" / "todos").resolve(strict=False) in server.allow_root_store.paths()
+
+
+def test_telegram_permission_notice_uses_inline_buttons(monkeypatch, tmp_path) -> None:
+    sent: list[tuple[str, int, str, dict]] = []
+    server = _server(tmp_path, _output(""))
+    server.telegram_chat_id = 100
+    monkeypatch.setattr(
+        "marius.channels.telegram.config.load",
+        lambda: SimpleNamespace(enabled=True, token="token"),
+    )
+    monkeypatch.setattr(
+        "marius.channels.telegram.api.send_message",
+        lambda token, chat_id, text, **kwargs: sent.append((token, chat_id, text, kwargs)) or True,
+    )
+
+    server._notify_telegram_permission_request(PermissionRequestEvent(
+        tool_name="make_dir",
+        reason="Écriture hors du projet",
+        request_id="req123",
+    ))
+
+    assert len(sent) == 1
+    token, chat_id, text, kwargs = sent[0]
+    assert token == "token"
+    assert chat_id == 100
+    assert "Permission requise" in text
+    assert kwargs["reply_markup"] == {
+        "inline_keyboard": [[
+            {"text": "Autoriser", "callback_data": "perm:req123:allow"},
+            {"text": "Refuser", "callback_data": "perm:req123:deny"},
+        ]]
+    }
+
+
+def test_permission_denial_does_not_promote_allowed_root(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(gateway_server_module, "_PERMISSION_TIMEOUT_SECONDS", 1.0)
+    server = _server(tmp_path, _output(""))
+    server.workspace = tmp_path / "workspace"
+    web_left, web_right = socket.socketpair()
+    target = tmp_path / "secondBrain" / "todos" / "courses.md"
+    server._connections = {web_left}
+    server._turn_context = threading.local()
+    result: list[bool] = []
+
+    def ask() -> None:
+        server._turn_context.conn = None
+        server._turn_context.channel = "telegram"
+        result.append(server._on_ask(
+            "write_file",
+            {"path": str(target), "content": "# Courses\n"},
+            "Écriture hors du projet",
+        ))
+
+    thread = threading.Thread(target=ask)
+    try:
+        web_right.settimeout(1)
+        thread.start()
+
+        event = json.loads(web_right.recv(4096).decode().splitlines()[0])
+        ev, approved = server._pending_perms[event["request_id"]]
+        approved[0] = False
+        ev.set()
+        thread.join(timeout=1)
+    finally:
+        web_left.close()
+        web_right.close()
+
+    assert result == [False]
+    assert server.allow_root_store.paths() == ()
+
+
+def test_new_gateway_connection_replays_pending_permission_request(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(gateway_server_module, "_PERMISSION_TIMEOUT_SECONDS", 1.0)
+    server = _server(tmp_path, _output(""))
+    server.workspace = tmp_path / "workspace"
+    server._turn_context = threading.local()
+    result: list[bool] = []
+
+    def ask() -> None:
+        server._turn_context.conn = None
+        server._turn_context.channel = "telegram"
+        result.append(server._on_ask("make_dir", {"path": str(tmp_path / "rag")}, "Écriture hors du projet"))
+
+    thread = threading.Thread(target=ask)
+    left, right = socket.socketpair()
+    conn_thread = threading.Thread(target=server._handle_connection, args=(left,))
+    try:
+        thread.start()
+        deadline = time.time() + 1
+        while not server._pending_perms and time.time() < deadline:
+            time.sleep(0.01)
+        conn_thread.start()
+
+        right.settimeout(1)
+        lines = right.recv(4096).decode().splitlines()
+        permission_event = next(json.loads(line) for line in lines if '"permission_request"' in line)
+        assert permission_event["type"] == "permission_request"
+
+        ev, approved = server._pending_perms[permission_event["request_id"]]
+        approved[0] = True
+        ev.set()
+        thread.join(timeout=1)
+    finally:
+        right.close()
+        conn_thread.join(timeout=1)
+        left.close()
+
+    assert result == [True]
+    assert (tmp_path / "rag").resolve(strict=False) in server.allow_root_store.paths()
 
 
 def test_telegram_uses_final_assistant_when_no_delta_was_streamed(tmp_path) -> None:

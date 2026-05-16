@@ -14,7 +14,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .api import download_file, get_file, get_updates, send_chat_action, send_message, set_my_commands
+from .api import (
+    answer_callback_query,
+    download_file,
+    edit_message_text,
+    get_file,
+    get_updates,
+    send_chat_action,
+    send_message,
+    set_my_commands,
+)
 from .config import TelegramChannelConfig
 
 _POLL_INTERVAL = 1.0   # secondes entre deux polls
@@ -72,6 +81,8 @@ class TelegramPoller:
         self._offset_path = offset_path
         self._stop   = threading.Event()
         self._thread: threading.Thread | None = None
+        self._turn_threads: set[threading.Thread] = set()
+        self._turn_threads_lock = threading.Lock()
 
     # ── cycle de vie ──────────────────────────────────────────────────────────
 
@@ -87,6 +98,10 @@ class TelegramPoller:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=15)
+        with self._turn_threads_lock:
+            turns = list(self._turn_threads)
+        for thread in turns:
+            thread.join(timeout=2)
 
     # ── boucle de polling ─────────────────────────────────────────────────────
 
@@ -113,6 +128,11 @@ class TelegramPoller:
     # ── dispatch ──────────────────────────────────────────────────────────────
 
     def _handle_update(self, update: dict) -> None:
+        callback_query = update.get("callback_query")
+        if isinstance(callback_query, dict):
+            self._handle_callback_query(callback_query)
+            return
+
         msg = update.get("message") or update.get("edited_message")
         if not msg:
             return
@@ -131,6 +151,43 @@ class TelegramPoller:
             self._handle_command(chat_id, text)
         else:
             self._handle_message(chat_id, text)
+
+    def _handle_callback_query(self, query: dict) -> None:
+        query_id = str(query.get("id") or "")
+        user_id = int(query.get("from", {}).get("id", 0))
+        message = query.get("message") if isinstance(query.get("message"), dict) else {}
+        chat_id = int(message.get("chat", {}).get("id", 0) or 0)
+        message_id = int(message.get("message_id", 0) or 0)
+
+        if not self._is_allowed(user_id, chat_id):
+            if query_id:
+                answer_callback_query(self._cfg.token, query_id, "Non autorisé.")
+            return
+
+        data = str(query.get("data") or "")
+        parsed = _parse_permission_callback(data)
+        if parsed is None:
+            if query_id:
+                answer_callback_query(self._cfg.token, query_id)
+            return
+
+        request_id, approved = parsed
+        responder = getattr(self._gw, "respond_permission_request", None)
+        ok = bool(responder(request_id, approved)) if callable(responder) else False
+        if ok:
+            status = "Permission autorisée." if approved else "Permission refusée."
+        else:
+            status = "Demande expirée ou déjà traitée."
+        if query_id:
+            answer_callback_query(self._cfg.token, query_id, status)
+        if chat_id and message_id:
+            edit_message_text(
+                self._cfg.token,
+                chat_id,
+                message_id,
+                f"{status}\n\nDemande : `{request_id}`",
+                reply_markup={"inline_keyboard": []},
+            )
 
     def _text_from_message(self, msg: dict) -> str:
         text = (msg.get("text") or "").strip()
@@ -261,6 +318,21 @@ class TelegramPoller:
         # Mémorise le chat_id pour les notifications non sollicitées
         self._remember_chat(chat_id)
 
+        if hasattr(self._gw, "_turn_lock"):
+            thread = threading.Thread(
+                target=self._run_message_turn,
+                args=(chat_id, text),
+                daemon=True,
+                name="telegram-turn",
+            )
+            with self._turn_threads_lock:
+                self._turn_threads.add(thread)
+            thread.start()
+            return
+
+        self._run_message_turn(chat_id, text)
+
+    def _run_message_turn(self, chat_id: int, text: str) -> None:
         # Typing indicator
         stop_typing = _start_typing(self._cfg.token, chat_id)
         response = ""
@@ -268,6 +340,9 @@ class TelegramPoller:
             response = self._gw.run_turn_for_telegram(text)
         finally:
             stop_typing()
+            current = threading.current_thread()
+            with self._turn_threads_lock:
+                self._turn_threads.discard(current)
 
         if response:
             send_message(self._cfg.token, chat_id, response)
@@ -320,6 +395,21 @@ def _extract_image_media(msg: dict) -> dict[str, Any] | None:
     document = msg.get("document")
     if isinstance(document, dict) and str(document.get("mime_type") or "").startswith("image/"):
         return document
+    return None
+
+
+def _parse_permission_callback(data: str) -> tuple[str, bool] | None:
+    parts = data.split(":")
+    if len(parts) != 3 or parts[0] != "perm":
+        return None
+    request_id = parts[1].strip()
+    action = parts[2].strip().lower()
+    if not request_id:
+        return None
+    if action == "allow":
+        return request_id, True
+    if action == "deny":
+        return request_id, False
     return None
 
 

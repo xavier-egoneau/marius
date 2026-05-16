@@ -73,6 +73,34 @@ def test_safe_allows_memory(cwd: Path) -> None:
     assert g.check("memory", {"action": "add", "target": "agent", "content": "test"}) is True
 
 
+def test_unknown_tool_is_denied_by_default(cwd: Path) -> None:
+    asked = []
+    g = PermissionGuard(mode="limited", cwd=cwd, on_ask=lambda t, a, r: asked.append((t, r)) or True)
+
+    assert g.check("unclassified_tool", {}) is False
+    assert asked == []
+
+
+def test_power_mode_also_denies_unknown_tools(cwd: Path) -> None:
+    g = _guard("power", cwd)
+
+    assert g.check("unclassified_tool", {}) is False
+
+
+def test_runtime_orchestration_tools_are_explicitly_classified(cwd: Path) -> None:
+    g = _guard("limited", cwd)
+
+    for name in ("task_create", "task_list", "task_update", "reminders", "open_marius_web", "spawn_agent", "call_agent"):
+        assert g.check(name, {}) is True
+
+
+def test_all_registered_tools_are_known_by_guard() -> None:
+    from marius.kernel.permission_guard import _KNOWN_TOOLS
+    from marius.tools.factory import registered_tool_names
+
+    assert [name for name in registered_tool_names() if name not in _KNOWN_TOOLS] == []
+
+
 def test_safe_allows_readonly_host_diagnostics(cwd: Path) -> None:
     g = _guard("safe", cwd)
     assert g.check("host_status", {}) is True
