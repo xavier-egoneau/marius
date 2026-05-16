@@ -6,7 +6,7 @@ de filtrage et d'injection des tools dynamiques (memory, extras).
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -61,6 +61,9 @@ STATIC_TOOL_NAMES: list[str] = [
     "caldav_doctor",
     "caldav_agenda",
     "caldav_maintenance",
+    "allow_root_list",
+    "allow_root_add",
+    "allow_root_remove",
 ]
 
 FACTORY_TOOL_NAMES: list[str] = [
@@ -114,6 +117,7 @@ STATIC_ENTRIES: Mapping[str, "ToolEntry"] = _LazyStaticEntries()
 
 
 def _static_entries() -> dict[str, "ToolEntry"]:
+    from marius.tools.allow_roots import ALLOW_ROOT_ADD, ALLOW_ROOT_LIST, ALLOW_ROOT_REMOVE
     from marius.tools.caldav_calendar import CALDAV_AGENDA, CALDAV_DOCTOR, CALDAV_MAINTENANCE
     from marius.tools.explore import EXPLORE_GREP, EXPLORE_SUMMARY, EXPLORE_TREE
     from marius.tools.filesystem import LIST_DIR, MAKE_DIR, MOVE_PATH, READ_FILE, WRITE_FILE
@@ -198,6 +202,9 @@ def _static_entries() -> dict[str, "ToolEntry"]:
         "caldav_doctor": CALDAV_DOCTOR,
         "caldav_agenda": CALDAV_AGENDA,
         "caldav_maintenance": CALDAV_MAINTENANCE,
+        "allow_root_list": ALLOW_ROOT_LIST,
+        "allow_root_add": ALLOW_ROOT_ADD,
+        "allow_root_remove": ALLOW_ROOT_REMOVE,
     }
 
 
@@ -212,6 +219,8 @@ def build_tool_entries(
     reminders_store: object | None = None,
     get_reminder_chat_id: object | None = None,
     permission_mode: str = "limited",
+    allowed_roots: tuple[Path, ...] = (),
+    allowed_roots_provider: Callable[[], tuple[Path, ...]] | None = None,
     extras: "dict[str, ToolEntry] | None" = None,
 ) -> "list[ToolEntry]":
     """Construit la liste des ToolEntry actifs pour un agent.
@@ -225,6 +234,7 @@ def build_tool_entries(
     """
     from marius.tools.browser import make_browser_tools
     from marius.tools.call_agent import make_call_agent_tool
+    from marius.tools.allow_roots import make_allow_root_tools
     from marius.tools.memory import make_memory_tool
     from marius.tools.projects import make_project_tools
     from marius.tools.rag import make_rag_tools
@@ -242,7 +252,8 @@ def build_tool_entries(
         cwd=cwd,
         allow_store_path=Path.home() / ".marius" / "allowed_roots.json",
     )
-    task_tools = make_task_tools()
+    allow_root_tools = make_allow_root_tools(store_path=Path.home() / ".marius" / "allowed_roots.json")
+    task_tools = make_task_tools(default_agent=agent_name or "main")
     browser_tools = make_browser_tools(cwd)
     dreaming_tools: dict[str, ToolEntry] = {}
     if entry is not None:
@@ -269,6 +280,7 @@ def build_tool_entries(
         **reminder_tools,
         "sentinelle_scan": sentinelle_tool,
         **project_tools,
+        **allow_root_tools,
         **dreaming_tools,
         "memory": memory_tool,
     }
@@ -287,6 +299,8 @@ def build_tool_entries(
             entries,
             permission_mode=permission_mode,
             cwd=cwd,
+            allowed_roots=allowed_roots,
+            allowed_roots_provider=allowed_roots_provider,
         )
         entries.append(spawn_tool)
 

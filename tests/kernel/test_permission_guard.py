@@ -124,7 +124,6 @@ def test_project_set_active_is_guarded_as_runtime_write(cwd: Path, tmp_path: Pat
     assert g.check("project_set_active", {"path": str(tmp_path / "other")}) is True
 
     assert [call[0] for call in asked] == ["project_set_active"]
-    assert "Écriture hors du projet" in asked[0][1]
     assert "Lecture hors du projet" in asked[0][1]
 
 
@@ -140,6 +139,65 @@ def test_project_set_active_create_checks_requested_path_as_write(cwd: Path, tmp
     assert "Écriture hors du projet" in asked[0][1]
     assert str(target) in asked[0][1]
     assert "Lecture hors du projet" not in asked[0][1]
+
+
+def test_project_set_active_allows_runtime_metadata_when_path_is_allowed(cwd: Path, tmp_path: Path) -> None:
+    trusted = tmp_path / "trusted"
+    asked = []
+    g = PermissionGuard(
+        mode="limited",
+        cwd=cwd,
+        allowed_roots=(trusted,),
+        on_ask=lambda t, a, r: asked.append((t, r)) or False,
+    )
+
+    assert g.check("project_set_active", {"path": str(trusted), "create": True}) is True
+    assert asked == []
+
+
+def test_allow_root_tools_are_guarded_as_trust_boundary(cwd: Path, tmp_path: Path) -> None:
+    asked = []
+    g = PermissionGuard(mode="limited", cwd=cwd, on_ask=lambda t, a, r: asked.append((t, r)) or True)
+    target = tmp_path / "external-project"
+
+    assert g.check("allow_root_list", {}) is True
+    assert g.check("allow_root_add", {"path": str(target), "reason": "test"}) is True
+    assert g.check("allow_root_remove", {"path": str(target)}) is True
+
+    assert [call[0] for call in asked] == ["allow_root_add"]
+    assert "Ajouter une racine autorisée" in asked[0][1]
+
+
+def test_allow_root_add_denies_forbidden_roots(cwd: Path) -> None:
+    g = _guard("power", cwd)
+
+    assert g.check("allow_root_add", {"path": "/"}) is False
+    assert g.check("allow_root_add", {"path": str(Path.home())}) is False
+    assert g.check("allow_root_add", {"path": "/etc"}) is False
+
+
+def test_allow_root_add_asks_for_broad_home_folder(cwd: Path) -> None:
+    asked = []
+    g = PermissionGuard(mode="limited", cwd=cwd, on_ask=lambda t, a, r: asked.append((t, r)) or False)
+
+    assert g.check("allow_root_add", {"path": str(Path.home() / "Documents")}) is False
+
+    assert [call[0] for call in asked] == ["allow_root_add"]
+    assert "Autorisation large demandée" in asked[0][1]
+
+
+def test_allow_root_add_allows_already_trusted_child(cwd: Path, tmp_path: Path) -> None:
+    trusted = tmp_path / "trusted"
+    asked = []
+    g = PermissionGuard(
+        mode="limited",
+        cwd=cwd,
+        allowed_roots=(trusted,),
+        on_ask=lambda t, a, r: asked.append((t, r)) or False,
+    )
+
+    assert g.check("allow_root_add", {"path": str(trusted / "subproject")}) is True
+    assert asked == []
 
 
 def test_security_admin_writes_are_guarded(cwd: Path, tmp_path: Path) -> None:
@@ -301,6 +359,38 @@ def test_limited_allows_read_and_write_inside_allowed_roots(cwd: Path, tmp_path:
     assert g.check("write_file", {"path": str(trusted / "out.txt")}) is True
     assert g.check("make_dir", {"path": str(trusted / "nested")}) is True
     assert asked == []
+
+
+def test_limited_allows_new_project_sibling_creation(cwd: Path, tmp_path: Path) -> None:
+    trusted = tmp_path / "projects" / "existing"
+    sibling = tmp_path / "projects" / "trade_plugin"
+    asked = []
+    g = PermissionGuard(
+        mode="limited",
+        cwd=cwd,
+        allowed_roots=(trusted,),
+        on_ask=lambda t, a, r: asked.append((t, r)) or False,
+    )
+
+    assert g.check("make_dir", {"path": str(sibling)}) is True
+    assert g.check("project_set_active", {"path": str(sibling), "create": True}) is True
+    assert g.check("project_set_active", {"path": str(sibling)}) is True
+    assert asked == []
+
+
+def test_limited_does_not_allow_arbitrary_file_write_in_project_sibling(cwd: Path, tmp_path: Path) -> None:
+    trusted = tmp_path / "projects" / "existing"
+    sibling_file = tmp_path / "projects" / "trade_plugin" / "README.md"
+    asked = []
+    g = PermissionGuard(
+        mode="limited",
+        cwd=cwd,
+        allowed_roots=(trusted,),
+        on_ask=lambda t, a, r: asked.append((t, r)) or False,
+    )
+
+    assert g.check("write_file", {"path": str(sibling_file), "content": ""}) is False
+    assert [call[0] for call in asked] == ["write_file"]
 
 
 def test_limited_refreshes_dynamic_allowed_roots(cwd: Path, tmp_path: Path) -> None:

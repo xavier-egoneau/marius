@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,7 @@ class WorkerResult:
     status: str          # completed | blocked | needs_arbitration | failed | timeout
     summary: str
     changed_files: list[str] = field(default_factory=list)
+    permission_requests: list[dict[str, Any]] = field(default_factory=list)
     blocker: str = ""
     verification: str = ""
     error: str = ""
@@ -71,6 +73,8 @@ def run_worker(
     cwd: Path,
     max_seconds: int = DEFAULT_MAX_SECONDS,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
+    allowed_roots: tuple[Path, ...] = (),
+    allowed_roots_provider: Callable[[], tuple[Path, ...]] | None = None,
 ) -> WorkerResult:
     """Exécute un worker isolé. Bloquant — à lancer dans un thread."""
     max_seconds = min(max_seconds, MAX_SECONDS)
@@ -78,14 +82,31 @@ def run_worker(
 
     # Contexte fichiers
     file_context = _load_relevant_files(worker_task.relevant_files, cwd)
-    system_prompt = _build_system_prompt(worker_task, file_context)
+    system_prompt = _build_system_prompt(
+        worker_task,
+        file_context,
+        cwd=cwd,
+        allowed_roots=allowed_roots,
+    )
 
     # Garde de permissions — auto-deny (pas d'interactivité pour un worker)
     from .permission_guard import PermissionGuard
+    permission_requests: list[dict[str, Any]] = []
+
+    def _record_permission_request(tool_name: str, arguments: dict, reason: str) -> bool:
+        permission_requests.append({
+            "tool": tool_name,
+            "arguments": _permission_arguments_for_parent(arguments),
+            "reason": reason,
+        })
+        return False
+
     guard = PermissionGuard(
         mode=permission_mode,
         cwd=cwd,
-        on_ask=lambda *_: False,
+        allowed_roots=allowed_roots,
+        allowed_roots_provider=allowed_roots_provider,
+        on_ask=_record_permission_request,
     )
     tool_router = ToolRouter(tool_entries, guard=guard)
 
@@ -161,6 +182,7 @@ def run_worker(
             task=worker_task.task,
             status="timeout",
             summary=f"Worker interrompu après {elapsed:.0f}s (limite : {max_seconds}s).",
+            permission_requests=permission_requests,
             elapsed_seconds=elapsed,
         )
 
@@ -169,6 +191,7 @@ def run_worker(
             task=worker_task.task,
             status="failed",
             summary="Erreur provider.",
+            permission_requests=permission_requests,
             error=error_msg,
             elapsed_seconds=elapsed,
         )
@@ -184,13 +207,22 @@ def run_worker(
         if changed_raw.strip().lower() in ("none", "")
         else [f.strip() for f in changed_raw.split(",")]
     )
+    blocker = report.get("blocker", "")
+    if permission_requests and status in ("blocked", "needs_arbitration"):
+        permission_blocker = _format_permission_blocker(permission_requests)
+        blocker = (
+            permission_blocker
+            if not blocker or blocker.strip().lower() == "none"
+            else f"{blocker}\n{permission_blocker}"
+        )
 
     return WorkerResult(
         task=worker_task.task,
         status=status,
         summary=report.get("summary", response_text.strip()[:500]),
         changed_files=changed_files,
-        blocker=report.get("blocker", ""),
+        permission_requests=permission_requests,
+        blocker=blocker,
         verification=report.get("verification", ""),
         elapsed_seconds=elapsed,
     )
@@ -199,7 +231,13 @@ def run_worker(
 # ── system prompt ─────────────────────────────────────────────────────────────
 
 
-def _build_system_prompt(task: WorkerTask, file_context: str) -> str:
+def _build_system_prompt(
+    task: WorkerTask,
+    file_context: str,
+    *,
+    cwd: Path | None = None,
+    allowed_roots: tuple[Path, ...] = (),
+) -> str:
     parts: list[str] = []
 
     parts.append(
@@ -214,10 +252,21 @@ def _build_system_prompt(task: WorkerTask, file_context: str) -> str:
         "- Si tu as besoin que l'orchestrateur spawne d'autres workers : "
         "arrête avec status=needs_arbitration et décris le besoin dans blocker.\n"
         "- Écris uniquement dans les chemins autorisés.\n"
+        "- Si un outil est refusé par permission, n'invente pas de résultat : "
+        "termine avec status=blocked et décris la permission à demander au parent.\n"
         "- Ton rapport final est obligatoire et doit respecter le format ci-dessous."
     )
 
     parts.append(f"## Mission\n{task.task}")
+
+    environment_lines: list[str] = []
+    if cwd is not None:
+        environment_lines.append(f"- Workspace courant : {cwd}")
+    if allowed_roots:
+        roots = "\n".join(f"- {root}" for root in allowed_roots)
+        environment_lines.append(f"- Racines de projet autorisées :\n{roots}")
+    if environment_lines:
+        parts.append("## Environnement\n" + "\n".join(environment_lines))
 
     if task.context_summary:
         parts.append(f"## Contexte\n{task.context_summary}")
@@ -273,6 +322,30 @@ def _load_relevant_files(paths: list[str], cwd: Path) -> str:
             parts.append("[Limite de contexte atteinte — fichiers suivants ignorés]")
             break
     return "\n\n".join(parts)
+
+
+def _permission_arguments_for_parent(arguments: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if key in {"content", "text"} and isinstance(value, str):
+            preview = value[:240]
+            suffix = "..." if len(value) > len(preview) else ""
+            safe[key] = f"{preview}{suffix}"
+        else:
+            safe[key] = value
+    return safe
+
+
+def _format_permission_blocker(permission_requests: list[dict[str, Any]]) -> str:
+    if not permission_requests:
+        return ""
+    lines = ["Permission à arbitrer par le parent :"]
+    for request in permission_requests[-3:]:
+        tool = request.get("tool", "")
+        reason = request.get("reason", "")
+        arguments = request.get("arguments", {})
+        lines.append(f"- {tool} {arguments} — {reason}")
+    return "\n".join(lines)
 
 
 _REPORT_FIELDS = ("status", "summary", "changed_files", "verification", "blocker")

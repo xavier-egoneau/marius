@@ -60,6 +60,17 @@ class AllowRootStore:
             self._save_raw(raw)
             return entry
 
+    def remove(self, root: Path) -> bool:
+        resolved = root.expanduser().resolve(strict=False)
+        key = str(resolved)
+        with self._lock:
+            raw = self._load_raw()
+            kept = [entry for entry in raw if entry.get("path") != key]
+            if len(kept) == len(raw):
+                return False
+            self._save_raw(kept)
+            return True
+
     def _load_raw(self) -> list[dict]:
         if not self._path.exists():
             return []

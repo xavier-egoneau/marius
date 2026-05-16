@@ -31,6 +31,9 @@ def test_all_tools_when_none(memory_store: MemoryStore, tmp_path: Path) -> None:
     assert "host_status" in names
     assert "host_gateway_restart" in names
     assert "project_list" in names
+    assert "allow_root_list" in names
+    assert "allow_root_add" in names
+    assert "allow_root_remove" in names
     assert "approval_list" in names
     assert "secret_ref_list" in names
     assert "secret_ref_prepare_file" in names
@@ -89,6 +92,22 @@ def test_runtime_bound_tools_are_built_by_factory(
     names = {e.definition.name for e in entries}
 
     assert {"read_file", "reminders", "browser_open", "spawn_agent", "call_agent"} <= names
+
+
+def test_task_create_from_factory_defaults_to_current_agent(
+    memory_store: MemoryStore, tmp_path: Path, monkeypatch
+) -> None:
+    from marius.storage import task_store as task_store_module
+    from marius.storage.task_store import TaskStore
+
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path / "home")
+    entries = build_tool_entries(["task_create"], memory_store, tmp_path, agent_name="main")
+    task_create = next(entry for entry in entries if entry.definition.name == "task_create")
+
+    result = task_create.handler({"title": "Create project"})
+
+    assert result.ok is True
+    assert TaskStore().load()[0].agent == "main"
 
 
 def test_memory_always_present_when_none(memory_store: MemoryStore, tmp_path: Path) -> None:

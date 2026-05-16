@@ -37,6 +37,26 @@ def test_task_update_ignores_blank_board_metadata_and_description(monkeypatch, t
     assert updated.prompt == "new"
 
 
+def test_task_update_ignores_blank_prompt(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    task = TaskStore().create({
+        "title": "Initial title",
+        "status": "backlog",
+        "prompt": "keep this plan",
+    })
+
+    result = make_task_tools()["task_update"].handler({
+        "id": task.id,
+        "status": "queued",
+        "prompt": "",
+    })
+
+    assert result.ok is True
+    updated = TaskStore().load()[0]
+    assert updated.status == "queued"
+    assert updated.prompt == "keep this plan"
+
+
 def test_task_create_ignores_description_field(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
 
@@ -48,6 +68,31 @@ def test_task_create_ignores_description_field(monkeypatch, tmp_path) -> None:
     assert result.ok is True
     task = TaskStore().load()[0]
     assert task.prompt == ""
+
+
+def test_task_create_defaults_to_current_agent(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+
+    result = make_task_tools(default_agent="main")["task_create"].handler({
+        "title": "Create project folder",
+    })
+
+    assert result.ok is True
+    task = TaskStore().load()[0]
+    assert task.agent == "main"
+
+
+def test_task_create_explicit_agent_overrides_default(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+
+    result = make_task_tools(default_agent="main")["task_create"].handler({
+        "title": "Worker task",
+        "agent": "codeur",
+    })
+
+    assert result.ok is True
+    task = TaskStore().load()[0]
+    assert task.agent == "codeur"
 
 
 def test_task_create_routine_requires_supported_cadence(monkeypatch, tmp_path) -> None:
@@ -144,6 +189,28 @@ def test_task_update_allows_failure_reason(monkeypatch, tmp_path) -> None:
     updated = TaskStore().load()[0]
     assert updated.status == "failed"
     assert updated.last_error == "permission refused"
+
+
+def test_task_update_running_to_backlog_requests_cancel_and_clears_lock(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    task = TaskStore().create({
+        "title": "Running task",
+        "status": "running",
+        "locked_at": "2026-05-15T23:18:48+00:00",
+        "locked_by": "scheduler",
+    })
+
+    result = make_task_tools()["task_update"].handler({
+        "id": task.id,
+        "status": "backlog",
+    })
+
+    assert result.ok is True
+    updated = TaskStore().load()[0]
+    assert updated.status == "backlog"
+    assert updated.locked_at == ""
+    assert updated.locked_by == ""
+    assert any(event["kind"] == "cancel_requested" for event in updated.events)
 
 
 def test_recover_interrupted_running_tasks_for_agent(monkeypatch, tmp_path) -> None:

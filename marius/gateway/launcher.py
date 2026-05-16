@@ -27,6 +27,9 @@ def start(agent_name: str) -> bool:
     if is_running(agent_name):
         return True
 
+    if _start_managed_service(agent_name):
+        return True
+
     # Nettoie un socket fantôme
     sp = socket_path(agent_name)
     if sp.exists():
@@ -50,6 +53,37 @@ def start(agent_name: str) -> bool:
         proc.kill()
     except ProcessLookupError:
         pass
+    return False
+
+
+def _start_managed_service(agent_name: str) -> bool:
+    """Start the systemd-managed gateway when this agent is managed there."""
+    try:
+        from marius.gateway.service import (
+            agent_active_state,
+            agent_enabled_state,
+            is_service_installed,
+            is_systemd_available,
+            start_agent,
+        )
+    except Exception:
+        return False
+
+    try:
+        if not is_systemd_available() or not is_service_installed():
+            return False
+        if agent_active_state(agent_name) != "active" and agent_enabled_state(agent_name) != "enabled":
+            return False
+        ok, _err = start_agent(agent_name)
+        if not ok:
+            return False
+        deadline = time.monotonic() + _STARTUP_TIMEOUT
+        while time.monotonic() < deadline:
+            if is_running(agent_name):
+                return True
+            time.sleep(0.1)
+    except Exception:
+        return False
     return False
 
 

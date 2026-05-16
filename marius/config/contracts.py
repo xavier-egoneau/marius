@@ -68,6 +68,12 @@ TOOL_GROUPS: list[dict[str, object]] = [
         "prefixes": ["project_"],
     },
     {
+        "id": "allow_roots",
+        "label": "Allowed roots",
+        "description": "Gestion explicite des dossiers autorisés par Marius",
+        "prefixes": ["allow_root_"],
+    },
+    {
         "id": "security",
         "label": "Security",
         "description": "Permissions pour gérer les approbations d'actions et les références de secrets (pas les secrets eux-mêmes)",
@@ -192,6 +198,8 @@ ADMIN_ONLY_TOOLS: set[str] = {
     "secret_ref_save",
     "secret_ref_delete",
     "secret_ref_prepare_file",
+    "allow_root_add",
+    "allow_root_remove",
     "provider_save",
     "provider_delete",
     "self_update_apply",

@@ -99,6 +99,12 @@ def restart_agent(agent_name: str) -> tuple[bool, str]:
     return r.returncode == 0, r.stderr.strip()
 
 
+def start_agent(agent_name: str) -> tuple[bool, str]:
+    """Démarre le service systemd d'un agent sans modifier son enablement."""
+    r = _systemctl("start", f"marius-gateway@{agent_name}.service")
+    return r.returncode == 0, r.stderr.strip()
+
+
 def agent_active_state(agent_name: str) -> str:
     """Retourne l'état systemd de l'agent : active, inactive, failed, unknown."""
     if not is_systemd_available():

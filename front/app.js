@@ -2754,12 +2754,14 @@ function _providersListHtml(providers) {
 }
 
 document.getElementById("btn-settings").onclick = async () => {
-  const [cfgData, provData] = await Promise.all([
+  const [cfgData, provData, rootsData] = await Promise.all([
     api.get("/api/config").catch(() => ({})),
     api.get("/api/providers").catch(() => ({ providers: [] })),
+    api.get("/api/allow-roots").catch(() => ({ roots: [] })),
   ]);
   const cfg       = cfgData;
   const providers = provData.providers || [];
+  let   roots     = rootsData.roots || [];
 
   Modal.open({
     title: "SETTINGS",
@@ -2832,6 +2834,20 @@ document.getElementById("btn-settings").onclick = async () => {
           </div>
 
           <button class="nav-btn primary" id="pf-submit">CRÉER</button>
+        </div>
+      </div>
+
+      <div class="form-row" style="margin-top:4px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+          <label class="form-label" style="margin:0">DOSSIERS AUTORISÉS</label>
+        </div>
+        <div id="roots-list"></div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <input class="form-input" id="roots-input" placeholder="/home/user/projets" style="flex:1">
+          <button class="nav-btn" id="roots-add-btn" style="font-size:11px;padding:3px 10px;flex-shrink:0">+ Ajouter</button>
+        </div>
+        <div style="margin-top:5px;font-size:11px;color:var(--dim)">
+          Racines de confiance — un dossier parent couvre tous ses sous-projets
         </div>
       </div>
 
@@ -3070,6 +3086,56 @@ document.getElementById("btn-settings").onclick = async () => {
         });
       };
       _wireProviderBtns();
+
+      // ── allowed roots ──────────────────────────────────────────────────
+      const _renderRoots = () => {
+        const el = document.getElementById("roots-list");
+        if (!el) return;
+        if (!roots.length) {
+          el.innerHTML = `<div style="font-size:12px;color:var(--dim);padding:4px 0">Aucune racine configurée.</div>`;
+          return;
+        }
+        el.innerHTML = roots.map(r => `
+          <div class="proj-row" data-path="${esc(r.path)}" style="align-items:flex-start">
+            <div style="flex:1;min-width:0">
+              <div class="proj-row-path">${esc(r.path)}</div>
+              ${r.reason && r.reason !== "dashboard" ? `<div style="font-size:11px;color:var(--dim);margin-top:2px">${esc(r.reason)}</div>` : ""}
+            </div>
+            <button class="icon-btn roots-del-btn" data-path="${esc(r.path)}" title="Retirer" style="flex-shrink:0;margin-left:8px">✕</button>
+          </div>`).join("");
+        el.querySelectorAll(".roots-del-btn").forEach(btn => {
+          btn.onclick = async () => {
+            const path = btn.dataset.path;
+            try {
+              const res = await api.del("/api/allow-roots", { path });
+              if (res.ok) {
+                roots = roots.filter(r => r.path !== path);
+                _renderRoots();
+                toast("Racine retirée", "ok");
+              } else toast(res.message || "Erreur", "err");
+            } catch (e) { toast("Erreur : " + e.message, "err"); }
+          };
+        });
+      };
+      _renderRoots();
+
+      document.getElementById("roots-add-btn").onclick = async () => {
+        const input = document.getElementById("roots-input");
+        const path = input.value.trim();
+        if (!path) return;
+        try {
+          const res = await api.post("/api/allow-roots", { path, reason: "dashboard" });
+          if (res.ok) {
+            roots.push({ path, reason: "dashboard", added_at: "" });
+            input.value = "";
+            _renderRoots();
+            toast("Dossier autorisé", "ok");
+          } else toast(res.message || "Erreur", "err");
+        } catch (e) { toast("Erreur : " + e.message, "err"); }
+      };
+      document.getElementById("roots-input").addEventListener("keydown", e => {
+        if (e.key === "Enter") document.getElementById("roots-add-btn").click();
+      });
 
       // ── save settings ──────────────────────────────────────────────────
       document.getElementById("btn-save-settings").onclick = () => {

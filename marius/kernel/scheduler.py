@@ -12,6 +12,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 
+class TaskRunCancelled(Exception):
+    """Raised when a running task was manually moved out of execution."""
+
+
 class TaskScheduler:
     """Exécute les tâches récurrentes en lisant task_store à chaque tick."""
 
@@ -74,6 +78,16 @@ class TaskScheduler:
                     if updated is not None and updated.status == "running":
                         ts.update(task.id, {"status": "done"})
                     fired.append(task.id)
+                except TaskRunCancelled as exc:
+                    ts.update(task.id, {
+                        "locked_at": "",
+                        "locked_by": "",
+                    })
+                    ts.add_event(task.id, {
+                        "kind": "interrupted",
+                        "runner": "scheduler",
+                        "reason": str(exc or "task cancelled")[:300],
+                    })
                 except Exception as exc:
                     _mark_queue_failure(ts, task, str(exc), now=now)
                 continue

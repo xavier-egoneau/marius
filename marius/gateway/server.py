@@ -25,7 +25,7 @@ import fcntl
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from marius.adapters.http_provider import make_adapter
 from marius.config.contracts import effective_tools_for_agent
@@ -199,22 +199,20 @@ class GatewayServer:
         self._connections: set[socket.socket] = set()
         self._connections_lock = threading.Lock()
         self._pending_perms: dict[str, tuple[threading.Event, list[bool]]] = {}
+        self._turn_context = threading.local()
         self.telegram_chat_id: int | None = self._load_telegram_chat_id()
-        self.allowed_roots = _trusted_roots_for_active_project(
+        allowed_roots_provider = lambda: _trusted_roots_for_active_project(
             permission_mode=permission_mode,
             workspace=ws,
             allow_store=self.allow_root_store,
         )
+        self.allowed_roots = allowed_roots_provider()
 
         guard = PermissionGuard(
             mode=permission_mode,
             cwd=ws,
             allowed_roots=self.allowed_roots,
-            allowed_roots_provider=lambda: _trusted_roots_for_active_project(
-                permission_mode=permission_mode,
-                workspace=ws,
-                allow_store=self.allow_root_store,
-            ),
+            allowed_roots_provider=allowed_roots_provider,
             on_ask=self._on_ask,
             approval_lookup=self.approval_store.lookup,
             approval_recorder=self._record_approval,
@@ -225,7 +223,14 @@ class GatewayServer:
             self.active_skills,
         )
         self._ensure_search_backend(enabled_tools)
-        self.tool_router = self._build_tool_router(enabled_tools, guard, ws, entry, permission_mode)
+        self.tool_router = self._build_tool_router(
+            enabled_tools,
+            guard,
+            ws,
+            entry,
+            permission_mode,
+            allowed_roots_provider=allowed_roots_provider,
+        )
 
         self.session = SessionRuntime(
             session_id=agent_name,
@@ -266,6 +271,7 @@ class GatewayServer:
             agent_config=agent_config,
             reminders_store=self.reminders_store,
             get_telegram_chat_id=lambda: self.telegram_chat_id,
+            permission_mode=permission_mode,
         )
 
     def _recover_interrupted_tasks(self) -> None:
@@ -655,7 +661,10 @@ class GatewayServer:
     # ── permission interactive ────────────────────────────────────────────────
 
     def _on_ask(self, tool_name: str, arguments: dict, reason: str) -> bool:
-        conn = self._conn
+        if not hasattr(self, "_turn_context"):
+            self._turn_context = threading.local()
+        conn = getattr(self._turn_context, "conn", None) or self._conn
+        channel = str(getattr(self._turn_context, "channel", "") or "")
         if conn is None:
             return False
         import uuid
@@ -663,12 +672,16 @@ class GatewayServer:
         ev: threading.Event = threading.Event()
         result: list[bool] = [False]
         self._pending_perms[req_id] = (ev, result)
+        request = PermissionRequestEvent(
+            tool_name=tool_name,
+            reason=reason,
+            request_id=req_id,
+        )
         try:
-            self._send(conn, PermissionRequestEvent(
-                tool_name=tool_name,
-                reason=reason,
-                request_id=req_id,
-            ))
+            if channel == "task":
+                self._broadcast(request)
+            else:
+                self._send(conn, request)
             ev.wait(timeout=_PERMISSION_TIMEOUT_SECONDS)
         finally:
             self._pending_perms.pop(req_id, None)
@@ -750,6 +763,7 @@ class GatewayServer:
         cwd: Path,
         entry: ProviderEntry | None = None,
         permission_mode: str = "limited",
+        allowed_roots_provider: Callable[[], tuple[Path, ...]] | None = None,
     ) -> ToolRouter:
         entries = build_tool_entries(
             enabled_tools,
@@ -761,6 +775,8 @@ class GatewayServer:
             reminders_store=self.reminders_store,
             get_reminder_chat_id=lambda: self.telegram_chat_id,
             permission_mode=permission_mode,
+            allowed_roots=self.allowed_roots,
+            allowed_roots_provider=allowed_roots_provider,
         )
 
         return ToolRouter(entries, guard=guard)
@@ -1043,6 +1059,10 @@ class GatewayServer:
 
         try:
             with self._turn_lock:
+                if not hasattr(self, "_turn_context"):
+                    self._turn_context = threading.local()
+                self._turn_context.conn = conn
+                self._turn_context.channel = channel
                 publish_user_visible = channel not in {"routine", "task"}
                 if publish_user_visible:
                     self._publish_visible("user", text, channel=channel)
@@ -1124,6 +1144,9 @@ class GatewayServer:
             })
             self._send(conn, ErrorEvent(message=str(exc)))
         finally:
+            if getattr(self._turn_context, "conn", None) is conn:
+                self._turn_context.conn = None
+                self._turn_context.channel = ""
             self._send(conn, DoneEvent())
 
     def _system_prompt_for_session(self) -> str:

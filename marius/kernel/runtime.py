@@ -26,7 +26,7 @@ from .tool_result_context import format_tool_result_for_context
 from .tool_router import ToolRouter
 
 _MAX_TOOL_ITERATIONS = 20
-_MAX_PROVIDER_RETRIES = 2          # retries for transient ProviderErrors (non-streaming)
+_MAX_PROVIDER_RETRIES = 2          # retries for transient ProviderErrors
 
 _FINAL_RESPONSE_INSTRUCTION = (
     "La limite d'appels outils de ce tour est atteinte. "
@@ -365,18 +365,34 @@ class RuntimeOrchestrator:
         on_text_delta: Callable[[str], None] | None,
         is_cancelled: Callable[[], bool] | None = None,
     ) -> ProviderResponse:
-        """Appel provider avec retry exponentiel sur erreurs transientes.
-
-        Le retry ne s'applique qu'aux appels non-streaming : en streaming les
-        deltas ont potentiellement déjà été envoyés au client, un retry
-        produirait des doublons.
-        """
+        """Appel provider avec retry exponentiel sur erreurs transientes."""
         if use_streaming:
-            return self._run_streaming(
-                request,
-                on_text_delta=on_text_delta,
-                is_cancelled=is_cancelled,
-            )
+            last_error: ProviderError | None = None
+            for attempt in range(_MAX_PROVIDER_RETRIES + 1):
+                stream_started = False
+
+                def _track_delta(delta: str) -> None:
+                    nonlocal stream_started
+                    if delta:
+                        stream_started = True
+                    if on_text_delta:
+                        on_text_delta(delta)
+
+                try:
+                    if is_cancelled is not None and is_cancelled():
+                        raise KeyboardInterrupt
+                    return self._run_streaming(
+                        request,
+                        on_text_delta=_track_delta,
+                        is_cancelled=is_cancelled,
+                    )
+                except ProviderError as exc:
+                    if stream_started or not exc.retryable or attempt == _MAX_PROVIDER_RETRIES:
+                        raise
+                    last_error = exc
+                    time.sleep(2 ** attempt)  # 1s, 2s
+
+            raise last_error  # type: ignore[misc]  # ne peut pas être None ici
 
         last_error: ProviderError | None = None
         for attempt in range(_MAX_PROVIDER_RETRIES + 1):
@@ -421,8 +437,9 @@ class RuntimeOrchestrator:
             },
         )
         if on_text_delta is not None:
-            return self._run_streaming(
+            return self._call_provider(
                 request,
+                use_streaming=True,
                 on_text_delta=on_text_delta,
                 is_cancelled=is_cancelled,
             )

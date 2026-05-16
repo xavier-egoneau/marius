@@ -314,6 +314,8 @@ class DashboardServer:
                     self._json({"tasks": _task_payloads(tasks)})
                 elif path == "/api/projects":
                     self._json(_api_projects())
+                elif path == "/api/allow-roots":
+                    self._json(_api_allow_roots_list())
                 else:
                     m = re.match(r"^/api/providers/([^/]+)/models$", path)
                     if m:
@@ -395,6 +397,9 @@ class DashboardServer:
                     self._json(_probe_provider_models(body))
                 elif parsed.path == "/api/projects":
                     ok, msg = _api_projects_add(body)
+                    self._json({"ok": ok, "message": msg}, 201 if ok else 400)
+                elif parsed.path == "/api/allow-roots":
+                    ok, msg = _api_allow_roots_add(body)
                     self._json({"ok": ok, "message": msg}, 201 if ok else 400)
                 else:
                     m = re.match(r"^/api/tasks/([^/]+)/launch$", parsed.path)
@@ -499,6 +504,12 @@ class DashboardServer:
                     body = self._read_json()
                     if body is None: return
                     ok, msg = _api_projects_remove(body)
+                    self._json({"ok": ok, "message": msg}, 200 if ok else 400)
+                    return
+                if parsed.path == "/api/allow-roots":
+                    body = self._read_json()
+                    if body is None: return
+                    ok, msg = _api_allow_roots_remove(body)
                     self._json({"ok": ok, "message": msg}, 200 if ok else 400)
                     return
                 m = re.match(r"^/api/skills/([^/]+)$", parsed.path)
@@ -1507,6 +1518,41 @@ def _api_projects_patch(data: dict) -> tuple[bool, str]:
             "set_at": datetime.now(timezone.utc).isoformat(),
         }, indent=2, ensure_ascii=False), encoding="utf-8")
     return True, "updated"
+
+
+def _api_allow_roots_list() -> dict:
+    from marius.storage.allow_root_store import AllowRootStore
+    roots = AllowRootStore().list()
+    return {
+        "roots": [
+            {"path": r.path, "reason": r.reason, "added_at": r.added_at}
+            for r in roots
+        ]
+    }
+
+
+def _api_allow_roots_add(data: dict) -> tuple[bool, str]:
+    from marius.storage.allow_root_store import AllowRootStore
+    path_str = str(data.get("path", "")).strip()
+    if not path_str:
+        return False, "path manquant"
+    reason = str(data.get("reason", "dashboard")).strip() or "dashboard"
+    try:
+        AllowRootStore().add(Path(path_str), reason=reason)
+        return True, f"Dossier autorisé : {path_str}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _api_allow_roots_remove(data: dict) -> tuple[bool, str]:
+    from marius.storage.allow_root_store import AllowRootStore
+    path_str = str(data.get("path", "")).strip()
+    if not path_str:
+        return False, "path manquant"
+    removed = AllowRootStore().remove(Path(path_str))
+    if not removed:
+        return False, f"Racine non trouvée : {path_str}"
+    return True, f"Racine retirée : {path_str}"
 
 
 def _send_to_agent(agent_name: str, message: str) -> dict:

@@ -247,6 +247,16 @@ class TaskStore:
             if task.status != old_status:
                 task.events.append({"kind": "status_changed", "at": now,
                                     "from": old_status, "to": task.status})
+                if old_status == "running" and task.status != "running":
+                    task.locked_at = ""
+                    task.locked_by = ""
+                    if task.status in {"backlog", "queued", "paused", "archived"}:
+                        task.events.append({
+                            "kind": "cancel_requested",
+                            "at": now,
+                            "from": old_status,
+                            "to": task.status,
+                        })
             self.save(tasks)
             return task
 

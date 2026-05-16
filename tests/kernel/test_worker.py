@@ -13,7 +13,11 @@ from marius.kernel.worker import (
     _build_system_prompt,
     _load_relevant_files,
     _parse_report,
+    run_worker,
 )
+from marius.kernel.contracts import ToolCall, ToolResult
+from marius.kernel.provider import ProviderChunk, ProviderRequest
+from marius.kernel.tool_router import ToolDefinition, ToolEntry
 
 
 # ── _build_system_prompt ──────────────────────────────────────────────────────
@@ -57,6 +61,14 @@ def test_prompt_includes_file_context() -> None:
     p = _build_system_prompt(_task(), "### foo.py\n```\ndef foo(): pass\n```")
     assert "foo.py" in p
     assert "def foo()" in p
+
+
+def test_prompt_includes_worker_environment(tmp_path: Path) -> None:
+    project = tmp_path / "active-project"
+    p = _build_system_prompt(_task(), "", cwd=tmp_path / "workspace", allowed_roots=(project,))
+
+    assert "Workspace courant" in p
+    assert str(project) in p
 
 
 def test_prompt_no_spawn_agent_reference_in_report() -> None:
@@ -195,3 +207,146 @@ def test_worker_result_fields() -> None:
     assert r.status == "completed"
     assert r.elapsed_seconds == pytest.approx(12.3)
     assert "tests/test_foo.py" in r.changed_files
+
+
+def test_worker_guard_allows_read_inside_forwarded_allowed_roots(monkeypatch, tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    active_project = tmp_path / "active-project"
+    target = active_project / "config.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("config", encoding="utf-8")
+    called_paths: list[str] = []
+
+    class ToolReadingAdapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, request: ProviderRequest):
+            raise AssertionError("stream should be used")
+
+        def stream(self, request: ProviderRequest):
+            self.calls += 1
+            if self.calls == 1:
+                yield ProviderChunk(
+                    type="tool_calls",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-1",
+                            name="read_file",
+                            arguments={"path": str(target)},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                )
+                yield ProviderChunk(type="done", finish_reason="tool_calls")
+                return
+            yield ProviderChunk(
+                type="text_delta",
+                delta=(
+                    "status: completed\n"
+                    "summary: lecture ok\n"
+                    "changed_files: none\n"
+                    "verification: ok\n"
+                    "blocker: none\n"
+                ),
+            )
+            yield ProviderChunk(type="done", finish_reason="stop")
+
+    def read_handler(arguments: dict) -> ToolResult:
+        called_paths.append(str(arguments.get("path") or ""))
+        return ToolResult(tool_call_id="", ok=True, summary="contenu lu")
+
+    monkeypatch.setattr(
+        "marius.adapters.http_provider.make_adapter",
+        lambda _entry: ToolReadingAdapter(),
+    )
+
+    result = run_worker(
+        WorkerTask(task="Lis le fichier actif."),
+        entry=object(),
+        tool_entries=[
+            ToolEntry(
+                ToolDefinition(name="read_file", description="read", parameters={}),
+                read_handler,
+            )
+        ],
+        permission_mode="limited",
+        cwd=workspace,
+        allowed_roots=(active_project,),
+        max_seconds=5,
+    )
+
+    assert result.status == "completed"
+    assert called_paths == [str(target)]
+
+
+def test_worker_reports_permission_request_to_parent(monkeypatch, tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    target = outside / "secret.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("secret", encoding="utf-8")
+
+    class PermissionBlockedAdapter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate(self, request: ProviderRequest):
+            raise AssertionError("stream should be used")
+
+        def stream(self, request: ProviderRequest):
+            self.calls += 1
+            if self.calls == 1:
+                yield ProviderChunk(
+                    type="tool_calls",
+                    tool_calls=[
+                        ToolCall(
+                            id="call-1",
+                            name="read_file",
+                            arguments={"path": str(target)},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                )
+                yield ProviderChunk(type="done", finish_reason="tool_calls")
+                return
+            yield ProviderChunk(
+                type="text_delta",
+                delta=(
+                    "status: blocked\n"
+                    "summary: permission requise\n"
+                    "changed_files: none\n"
+                    "verification: not_run: permission refusée\n"
+                    "blocker: none\n"
+                ),
+            )
+            yield ProviderChunk(type="done", finish_reason="stop")
+
+    monkeypatch.setattr(
+        "marius.adapters.http_provider.make_adapter",
+        lambda _entry: PermissionBlockedAdapter(),
+    )
+
+    result = run_worker(
+        WorkerTask(task="Lis le fichier hors zone."),
+        entry=object(),
+        tool_entries=[
+            ToolEntry(
+                ToolDefinition(name="read_file", description="read", parameters={}),
+                lambda _args: ToolResult(tool_call_id="", ok=True, summary="should not run"),
+            )
+        ],
+        permission_mode="limited",
+        cwd=workspace,
+        max_seconds=5,
+    )
+
+    assert result.status == "blocked"
+    assert result.permission_requests == [
+        {
+            "tool": "read_file",
+            "arguments": {"path": str(target)},
+            "reason": f"Lecture hors du projet ({target})",
+        }
+    ]
+    assert "Permission à arbitrer par le parent" in result.blocker

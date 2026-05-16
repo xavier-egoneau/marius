@@ -174,6 +174,53 @@ Conséquences :
 - le prompt reste conservé dans la définition de la routine et dans le contexte
   runtime du tour, mais n'encombre pas le chat quotidien.
 
+## 2026-05-16 — Retry streaming avant première sortie visible
+
+Les erreurs provider marquées `retryable` doivent être retentées aussi en mode
+streaming tant qu'aucun delta texte n'a été envoyé au client.
+
+Conséquences :
+- un 429/5xx ou une coupure réseau à l'ouverture du stream ne fait pas échouer
+  le tour immédiatement ;
+- après le premier delta texte visible, le runtime ne relance pas la requête
+  pour éviter de dupliquer une réponse déjà streamée ;
+- la même règle s'applique aux réponses finales forcées par le runtime.
+
+## 2026-05-16 — Permissions héritées par les subagents
+
+Un worker `spawn_agent` hérite des racines de lecture/écriture autorisées du
+parent, notamment le projet actif explicitement validé.
+
+Conséquences :
+- un subagent en mode `limited` peut lire le projet actif même si le gateway
+  tourne depuis le workspace global `~/.marius/workspace/<agent>` ;
+- les workers restent non interactifs : une permission hors zone continue
+  d'être refusée automatiquement ;
+- un worker bloqué par une permission remonte une `permission_requests`
+  structurée au parent ; le parent est responsable de l'ask utilisateur et de
+  la reprise éventuelle ;
+- le timeout demandé par le modèle pour un worker est borné à un minimum stable
+  afin d'éviter des expirations immédiates sur les tâches planifiées ;
+- le prompt worker expose le workspace courant et les racines autorisées pour
+  éviter les conclusions spéculatives sur le contexte projet.
+
+## 2026-05-16 — Outils explicites de gestion des racines autorisées
+
+La liste blanche fichier reste une brique système persistée dans
+`~/.marius/allowed_roots.json`, mais elle est maintenant pilotable par outils :
+`allow_root_list`, `allow_root_add` et `allow_root_remove`.
+
+Conséquences :
+- le LLM peut répondre à une demande naturelle du type "autorise ce dossier"
+  sans détour par un changement de projet ;
+- ajouter une racine est traité comme une extension de confiance et passe par le
+  gardien de permissions ;
+- les racines système, `/`, le home entier et les racines trop larges sont
+  refusées, tandis que les grands dossiers utilisateur comme `~/Documents`
+  déclenchent une confirmation explicite ;
+- retirer une racine est une action de réduction de confiance et reste
+  autorisée directement par le guard.
+
 ## 2026-05-15 — Exécution des routines via canal dédié
 
 Le bouton de test du dashboard et le cron des routines doivent utiliser le même
@@ -218,12 +265,29 @@ Conséquences :
   utilisateur visibles dans la conversation canonique ;
 - une demande de chat immédiate ne crée pas de task sauf si l'utilisateur demande
   explicitement un suivi, un backlog, une planification ou une routine.
+- une task créée depuis un agent hérite de cet agent par défaut si le champ
+  `agent` est omis ; le modèle peut seulement surcharger explicitement quand
+  l'utilisateur demande un autre agent.
+- une task unique qui porte un `project_path` explicite autorise ce chemin comme
+  racine du run avant d'envoyer le prompt au gateway, sous contrôle du guardian
+  policy ; cela permet de créer un nouveau projet demandé sans ask non interactif
+  bloquant.
+- en mode `limited`, la création/activation d'un nouveau dossier projet frère
+  d'une racine déjà autorisée est permise pour `make_dir` et `project_set_active`,
+  mais pas pour des écritures arbitraires avant que ce projet devienne une racine
+  autorisée.
+- les demandes de permission émises par une task ne sont pas auto-refusées par
+  le scheduler : elles sont relayées aux clients ouverts pour permettre un ask
+  utilisateur normal, puis la task reprend avec la réponse.
 - une task unique `backlog` est inerte ; une task unique `queued` est consommée
   par le scheduler, immédiatement si elle n'a pas de `scheduled_for`, à l'heure
   prévue sinon. Le dashboard ne doit donc pas exposer de bouton "launch" pour les
   tasks uniques : il permet seulement de cadrer, mettre en queue ou retry.
 - après un run scheduler terminé, une task unique passe `done` automatiquement
   si l'agent n'a pas explicitement posé un autre statut via `task_update` ;
+- déplacer manuellement une task unique `running` vers `backlog` annule le run
+  en cours : le lock est nettoyé, le runner ferme sa connexion au gateway, et
+  la fin tardive du scheduler ne doit pas remettre la task en `done` ou `failed` ;
 - au redémarrage d'un gateway, une task unique restée `running` passe `failed`
   au lieu d'être rejouée automatiquement. Le retry d'une task unique interrompue
   doit être explicite.

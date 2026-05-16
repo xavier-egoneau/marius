@@ -5,7 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 
 from marius.kernel.contracts import ContextUsage, ToolCall
-from marius.kernel.provider import InMemoryProviderAdapter, ProviderChunk, ProviderConfig, ProviderRequest
+from marius.kernel.provider import (
+    InMemoryProviderAdapter,
+    ProviderChunk,
+    ProviderConfig,
+    ProviderError,
+    ProviderRequest,
+)
 from marius.kernel.runtime import RuntimeOrchestrator, TurnInput
 from marius.kernel.session import SessionRuntime
 from marius.kernel.contracts import Message, Role
@@ -29,6 +35,34 @@ class _ToolCallsThenDoneAdapter:
             return
         yield ProviderChunk(type="text_delta", delta="Après outil.")
         yield ProviderChunk(type="done", finish_reason="stop")
+
+
+class _FailsBeforeDeltaAdapter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, request: ProviderRequest):
+        raise AssertionError("stream should be used")
+
+    def stream(self, request: ProviderRequest):
+        self.calls += 1
+        if self.calls == 1:
+            raise ProviderError("HTTP 503", provider_name="test", retryable=True)
+        yield ProviderChunk(type="text_delta", delta="Retenté.")
+        yield ProviderChunk(type="done", finish_reason="stop")
+
+
+class _FailsAfterDeltaAdapter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate(self, request: ProviderRequest):
+        raise AssertionError("stream should be used")
+
+    def stream(self, request: ProviderRequest):
+        self.calls += 1
+        yield ProviderChunk(type="text_delta", delta="Déjà envoyé.")
+        raise ProviderError("HTTP 503", provider_name="test", retryable=True)
 
 
 def _user(text: str = "Go") -> Message:
@@ -92,6 +126,41 @@ def test_runtime_uses_streaming_when_on_text_delta_provided():
     assert "".join(received) == "Token par token"
     assert output.assistant_message is not None
     assert output.assistant_message.content == "Token par token"
+
+
+def test_runtime_streaming_retries_retryable_error_before_delta(monkeypatch):
+    adapter = _FailsBeforeDeltaAdapter()
+    orchestrator = RuntimeOrchestrator(provider=adapter)
+    monkeypatch.setattr("marius.kernel.runtime.time.sleep", lambda _seconds: None)
+
+    received: list[str] = []
+    output = orchestrator.run_turn(
+        TurnInput(session=_session(), user_message=_user()),
+        on_text_delta=received.append,
+    )
+
+    assert adapter.calls == 2
+    assert received == ["Retenté."]
+    assert output.assistant_message.content == "Retenté."
+
+
+def test_runtime_streaming_does_not_retry_after_delta(monkeypatch):
+    adapter = _FailsAfterDeltaAdapter()
+    orchestrator = RuntimeOrchestrator(provider=adapter)
+    monkeypatch.setattr("marius.kernel.runtime.time.sleep", lambda _seconds: None)
+
+    received: list[str] = []
+    try:
+        orchestrator.run_turn(
+            TurnInput(session=_session(), user_message=_user()),
+            on_text_delta=received.append,
+        )
+        raise AssertionError("ProviderError should have been raised")
+    except ProviderError:
+        pass
+
+    assert adapter.calls == 1
+    assert received == ["Déjà envoyé."]
 
 
 def test_runtime_falls_back_to_generate_without_on_text_delta():

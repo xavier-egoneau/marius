@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from marius.kernel.tool_router import ToolEntry, ToolResult
 
 
-def make_task_tools() -> "dict[str, ToolEntry]":
+def make_task_tools(*, default_agent: str = "") -> "dict[str, ToolEntry]":
     from marius.kernel.tool_router import ToolEntry, ToolDefinition, ToolResult
     from marius.storage.task_store import TaskStore
 
@@ -60,7 +60,7 @@ def make_task_tools() -> "dict[str, ToolEntry]":
             "prompt":       prompt,
             "status":       str(arguments.get("status", default_status)),
             "priority":     str(arguments.get("priority", "med")),
-            "agent":        str(arguments.get("agent", "")),
+            "agent":        str(arguments.get("agent") or default_agent),
             "project_path": str(arguments.get("project_path", "")),
             "recurring":    recurring,
             "cadence":      str(arguments.get("cadence", "")),
@@ -120,7 +120,7 @@ def make_task_tools() -> "dict[str, ToolEntry]":
         allowed = {"title", "prompt", "status", "priority", "agent", "last_error",
                    "project_path", "recurring", "cadence", "scheduled_for"}
         data = {k: v for k, v in arguments.items() if k in allowed}
-        for field in ("title", "status", "priority", "agent", "project_path"):
+        for field in ("title", "prompt", "status", "priority", "agent", "project_path"):
             if field in data and isinstance(data[field], str) and not data[field].strip():
                 del data[field]
         next_recurring = bool(data.get("recurring", existing.recurring))
@@ -173,7 +173,7 @@ def make_task_tools() -> "dict[str, ToolEntry]":
                         "prompt":       {"type": "string", "description": "Source unique de cadrage et d'exécution envoyée au gateway. Mets ici le plan complet, les critères, le contexte et le hors scope."},
                         "status":       {"type": "string", "enum": ["backlog", "queued", "running", "failed", "done", "paused"], "description": "Statut initial. Défaut : backlog pour une task simple, queued pour une routine ou une task planifiée. Utilise paused pour créer une routine inactive."},
                         "priority":     {"type": "string", "enum": ["high", "med", "low"], "description": "Priorité. Défaut : med."},
-                        "agent":        {"type": "string", "description": "Nom de l'agent assigné."},
+                        "agent":        {"type": "string", "description": "Nom de l'agent assigné. Optionnel : par défaut, l'agent courant qui crée la task."},
                         "project_path": {"type": "string", "description": "Chemin absolu du projet concerné."},
                         "recurring":    {"type": "boolean", "description": "True si c'est une routine récurrente ou un cron demandé par l'utilisateur ; false pour une task unique."},
                         "cadence":      {"type": "string", "description": "Déclencheur obligatoire si recurring=true. Formats acceptés : 'HH:MM' heure locale quotidienne fixe, 'Nm', 'Nh', 'Nd', 'hourly', 'weekly'. Pas de cron brut, pas de 'daily'."},
@@ -210,8 +210,8 @@ def make_task_tools() -> "dict[str, ToolEntry]":
                     "Met à jour une tâche existante (statut, priorité, prompt/plan, assignation…). "
                     "Utilise task_list d'abord pour trouver l'id si tu ne l'as pas. "
                     "Le cadrage d'une task doit être écrit dans `prompt`, source unique envoyée au gateway. "
-                    "Omettre les champs que tu ne modifies pas ; les valeurs vides pour title/status/"
-                    "priority/agent/project_path sont ignorées pour éviter d'effacer le board par accident."
+                    "Omettre les champs que tu ne modifies pas ; les valeurs vides pour title/prompt/"
+                    "status/priority/agent/project_path sont ignorées pour éviter d'effacer le board par accident."
                 ),
                 parameters={
                     "type": "object",

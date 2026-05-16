@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from marius.kernel.scheduler import (
+    TaskRunCancelled,
     TaskScheduler,
     cadence_to_seconds, next_run_for_time, validate_hhmm,
 )
@@ -179,6 +180,31 @@ def test_scheduler_runs_queued_one_shot_without_schedule(monkeypatch, tmp_path: 
     updated = TaskStore().load()[0]
     assert fired == [task.id]
     assert updated.status == "done"
+
+
+def test_scheduler_keeps_manual_backlog_cancel(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(task_store_module, "_MARIUS_HOME", tmp_path)
+    task = TaskStore().create({
+        "title": "Cancel me",
+        "status": "queued",
+        "agent": "main",
+    })
+
+    def handler() -> None:
+        TaskStore().update(task.id, {"status": "backlog"})
+        raise TaskRunCancelled("task moved to backlog")
+
+    scheduler = TaskScheduler({task.id: handler})
+
+    assert scheduler.tick() == []
+    updated = TaskStore().load()[0]
+    assert updated.status == "backlog"
+    assert updated.locked_at == ""
+    assert updated.locked_by == ""
+    assert updated.attempts == 0
+    assert updated.last_error == ""
+    assert any(event["kind"] == "cancel_requested" for event in updated.events)
+    assert any(event["kind"] == "interrupted" for event in updated.events)
 
 
 def test_scheduler_ignores_backlog_one_shot_task(monkeypatch, tmp_path: Path) -> None:

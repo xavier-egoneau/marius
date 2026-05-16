@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from marius.config.doctor import Section
+from marius.gateway import server as gateway_server_module
 from marius.gateway.server import GatewayServer, _append_visible_history, _attached_image_artifacts
 from marius.kernel.contracts import Artifact, ArtifactType, Message, Role, ToolCall, ToolResult
 from marius.kernel.provider import InMemoryProviderAdapter, ProviderConfig
@@ -122,6 +123,46 @@ def test_gateway_sends_final_assistant_when_no_delta_was_streamed(tmp_path) -> N
         {"text": "réponse finale", "type": "delta"},
         {"type": "done"},
     ]
+
+
+def test_task_permission_request_is_broadcast_to_open_clients(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(gateway_server_module, "_PERMISSION_TIMEOUT_SECONDS", 1.0)
+    server = _server(tmp_path, _output(""))
+    scheduler_left, scheduler_right = socket.socketpair()
+    web_left, web_right = socket.socketpair()
+    server._connections_lock = threading.Lock()
+    server._connections = {scheduler_left, web_left}
+    server._pending_perms = {}
+    server._turn_context = threading.local()
+    result: list[bool] = []
+
+    def ask() -> None:
+        server._turn_context.conn = scheduler_left
+        server._turn_context.channel = "task"
+        result.append(server._on_ask("make_dir", {"path": "/tmp/demo"}, "Écriture hors du projet"))
+
+    thread = threading.Thread(target=ask)
+    try:
+        scheduler_right.settimeout(1)
+        web_right.settimeout(1)
+        thread.start()
+
+        scheduler_event = json.loads(scheduler_right.recv(4096).decode().splitlines()[0])
+        web_event = json.loads(web_right.recv(4096).decode().splitlines()[0])
+        assert scheduler_event["type"] == web_event["type"] == "permission_request"
+        assert scheduler_event["request_id"] == web_event["request_id"]
+
+        ev, approved = server._pending_perms[scheduler_event["request_id"]]
+        approved[0] = True
+        ev.set()
+        thread.join(timeout=1)
+    finally:
+        scheduler_left.close()
+        scheduler_right.close()
+        web_left.close()
+        web_right.close()
+
+    assert result == [True]
 
 
 def test_telegram_uses_final_assistant_when_no_delta_was_streamed(tmp_path) -> None:

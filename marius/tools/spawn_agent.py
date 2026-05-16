@@ -12,6 +12,7 @@ Contraintes :
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
@@ -27,6 +28,8 @@ from marius.kernel.worker import (
     run_worker,
 )
 
+_MIN_WORKER_SECONDS = 60
+
 
 def make_spawn_agent_tool(
     entry: Any,                     # ProviderEntry
@@ -34,6 +37,8 @@ def make_spawn_agent_tool(
     *,
     permission_mode: str = "limited",
     cwd: Path,
+    allowed_roots: tuple[Path, ...] = (),
+    allowed_roots_provider: Callable[[], tuple[Path, ...]] | None = None,
 ) -> ToolEntry:
     """Fabrique l'outil spawn_agent en fermant sur le contexte du parent.
 
@@ -59,10 +64,7 @@ def make_spawn_agent_tool(
         capped = raw_workers[:MAX_WORKERS_PER_CALL]
         skipped = len(raw_workers) - len(capped)
 
-        max_seconds = min(
-            int(arguments.get("max_seconds", DEFAULT_MAX_SECONDS)),
-            900,
-        )
+        max_seconds = _coerce_max_seconds(arguments.get("max_seconds", DEFAULT_MAX_SECONDS))
 
         tasks = [_parse_task(w) for w in capped]
         results: dict[int, Any] = {}
@@ -76,6 +78,8 @@ def make_spawn_agent_tool(
                     tool_entries=worker_tool_entries,
                     permission_mode=permission_mode,
                     cwd=cwd,
+                    allowed_roots=allowed_roots,
+                    allowed_roots_provider=allowed_roots_provider,
                     max_seconds=max_seconds,
                     max_iterations=DEFAULT_MAX_ITERATIONS,
                 ): idx
@@ -98,12 +102,21 @@ def make_spawn_agent_tool(
         completed = sum(1 for r in ordered if r["status"] == "completed")
         blocked    = sum(1 for r in ordered if r["status"] == "blocked")
         arb        = sum(1 for r in ordered if r["status"] == "needs_arbitration")
+        failed     = sum(1 for r in ordered if r["status"] == "failed")
+        timed_out  = sum(1 for r in ordered if r["status"] == "timeout")
+        permission_blocks = sum(1 for r in ordered if r.get("permission_requests"))
 
         lines = [f"{completed}/{len(tasks)} worker(s) terminé(s)."]
         if blocked:
             lines.append(f"{blocked} bloqué(s).")
+        if permission_blocks:
+            lines.append(f"{permission_blocks} demande(s) de permission à arbitrer par le parent.")
         if arb:
             lines.append(f"{arb} demande(s) d'arbitrage.")
+        if failed:
+            lines.append(f"{failed} en échec.")
+        if timed_out:
+            lines.append(f"{timed_out} expiré(s) après {max_seconds}s.")
         if skipped:
             lines.append(f"{skipped} worker(s) ignoré(s) (limite {MAX_WORKERS_PER_CALL}).")
 
@@ -114,6 +127,7 @@ def make_spawn_agent_tool(
             data={
                 "workers": ordered,
                 "skipped": skipped,
+                "max_seconds": max_seconds,
             },
         )
 
@@ -125,6 +139,9 @@ def make_spawn_agent_tool(
                 "Chaque worker reçoit un contexte minimal (task + fichiers pertinents) et retourne "
                 "un rapport structuré. Utilise quand le plan contient des tâches [parallélisable]. "
                 "Max 5 workers par appel. Les workers ne peuvent pas spawner d'autres workers. "
+                "Si un worker retourne `permission_requests`, l'agent parent doit arbitrer : demander "
+                "à l'utilisateur via son propre guard, exécuter l'action lui-même si elle est approuvée, "
+                "ou relancer un worker avec un contexte autorisé. "
                 "Si un worker retourne status=needs_arbitration, spawne de nouveaux workers "
                 "pour les sous-tâches identifiées dans son rapport."
             ),
@@ -165,7 +182,10 @@ def make_spawn_agent_tool(
                     },
                     "max_seconds": {
                         "type": "integer",
-                        "description": f"Timeout par worker en secondes (défaut {DEFAULT_MAX_SECONDS}, max 900).",
+                        "description": (
+                            f"Timeout par worker en secondes "
+                            f"(défaut {DEFAULT_MAX_SECONDS}, min {_MIN_WORKER_SECONDS}, max 900)."
+                        ),
                     },
                 },
                 "required": ["workers"],
@@ -183,3 +203,13 @@ def _parse_task(raw: dict[str, Any]) -> WorkerTask:
         write_paths=[str(p) for p in raw.get("write_paths", [])],
         expected_output=str(raw.get("expected_output", "")),
     )
+
+
+def _coerce_max_seconds(raw: Any) -> int:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = DEFAULT_MAX_SECONDS
+    if value <= 0:
+        value = DEFAULT_MAX_SECONDS
+    return min(max(value, _MIN_WORKER_SECONDS), 900)

@@ -153,6 +153,13 @@ class PermissionGuard:
             return
 
     def _evaluate(self, tool_name: str, arguments: dict) -> PermissionDecision:
+        if tool_name == "allow_root_list":
+            return _ALLOW
+        if tool_name == "allow_root_add":
+            return self._check_allow_root_add(arguments)
+        if tool_name == "allow_root_remove":
+            return self._check_allow_root_remove(arguments)
+
         if self.mode == "power":
             return self._check_invariants(tool_name, arguments)
 
@@ -178,7 +185,9 @@ class PermissionGuard:
         if tool_name in ("read_file", "list_dir", "vision", "explore_tree", "explore_grep", "explore_summary"):
             return self._check_read(arguments)
 
-        if tool_name in ("write_file", "make_dir"):
+        if tool_name == "make_dir":
+            return self._check_make_dir(arguments)
+        if tool_name == "write_file":
             return self._check_write(arguments)
         if tool_name == "move_path":
             return self._check_move(arguments)
@@ -229,15 +238,20 @@ class PermissionGuard:
             return PermissionDecision("ask", "Maintenance CalDAV demandée (discover/sync/verify).")
         if tool_name == "project_set_active":
             decisions = [
-                self._check_write({"path": str(_PROJECTS_PATH)}),
-                self._check_write({"path": str(_ACTIVE_PROJECT_PATH)}),
             ]
             requested = arguments.get("path")
             if isinstance(requested, str) and requested.strip():
+                if self.mode == "safe" and not _is_under(requested, self.cwd):
+                    return _DENY_WRITE
+                if self.mode == "limited" and self._is_new_project_sibling(requested):
+                    decisions.append(_ALLOW)
+                    return _combine_decisions(decisions)
                 if bool(arguments.get("create", False)):
                     decisions.append(self._check_write({"path": requested}))
                 else:
                     decisions.append(self._check_read({"path": requested}))
+            if not decisions:
+                decisions.append(_ALLOW)
             return _combine_decisions(decisions)
         if tool_name in ("approval_decide", "approval_forget"):
             return self._check_write({"path": str(_APPROVALS_PATH)})
@@ -310,6 +324,17 @@ class PermissionGuard:
             return PermissionDecision("ask", f"Écriture hors du projet ({path})")
         return _ALLOW
 
+    def _check_make_dir(self, arguments: dict) -> PermissionDecision:
+        path = _extract_path(arguments)
+        if (
+            path
+            and self.mode == "limited"
+            and not self._is_allowed_path(path)
+            and self._is_new_project_sibling(path)
+        ):
+            return _ALLOW
+        return self._check_write(arguments)
+
     def _check_move(self, arguments: dict) -> PermissionDecision:
         source = arguments.get("source")
         destination = arguments.get("destination")
@@ -328,10 +353,64 @@ class PermissionGuard:
             return PermissionDecision("ask", f"Commande potentiellement destructrice :\n  {cmd}")
         return _ALLOW
 
+    def _check_allow_root_add(self, arguments: dict) -> PermissionDecision:
+        path = _extract_path(arguments)
+        if not path:
+            return _ALLOW
+        try:
+            candidate = Path(path).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            return PermissionDecision("ask", f"Autoriser une racine fichier : {path}")
+        if _is_system_path(str(candidate)) or _is_forbidden_allow_root(candidate):
+            return PermissionDecision("deny", "Racine trop large ou système — autorisation refusée.")
+        if _is_sensitive(str(candidate)):
+            return PermissionDecision("ask", f"Autoriser une racine contenant potentiellement des données sensibles : {candidate}")
+        if self._is_allowed_path(str(candidate)):
+            return _ALLOW
+        if _is_broad_home_folder(candidate):
+            return PermissionDecision(
+                "ask",
+                f"Autorisation large demandée : {candidate}. Cette racine donnera accès à tout ce dossier.",
+            )
+        for root in self._current_allowed_roots():
+            try:
+                resolved_root = root.expanduser().resolve(strict=False)
+            except (OSError, RuntimeError):
+                continue
+            if _is_under(str(resolved_root), candidate):
+                return PermissionDecision(
+                    "ask",
+                    f"Autorisation plus large que la racine existante {resolved_root} : {candidate}",
+                )
+        return PermissionDecision("ask", f"Ajouter une racine autorisée : {candidate}")
+
+    def _check_allow_root_remove(self, arguments: dict) -> PermissionDecision:
+        path = _extract_path(arguments)
+        if path and _is_system_path(path):
+            return _DENY_SYSTEM
+        return _ALLOW
+
     def _is_allowed_path(self, path: str) -> bool:
         if _is_under(path, self.cwd):
             return True
         return any(_is_under(path, root) for root in self._current_allowed_roots())
+
+    def _is_new_project_sibling(self, path: str) -> bool:
+        try:
+            candidate = Path(path).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            return False
+        if _is_system_path(str(candidate)) or _is_sensitive(str(candidate)):
+            return False
+        parent = candidate.parent
+        for root in self._current_allowed_roots():
+            try:
+                resolved_root = root.expanduser().resolve(strict=False)
+            except (OSError, RuntimeError):
+                continue
+            if parent == resolved_root.parent:
+                return True
+        return False
 
     def _current_allowed_roots(self) -> tuple[Path, ...]:
         roots = tuple(self.allowed_roots)
@@ -371,6 +450,36 @@ def _is_system_path(path: str) -> bool:
     except (OSError, RuntimeError):
         return False
     return any(resolved.startswith(prefix) for prefix in _SYSTEM_PREFIXES)
+
+
+def _is_forbidden_allow_root(path: Path) -> bool:
+    try:
+        resolved = path.expanduser().resolve(strict=False)
+        home = Path.home().resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    if resolved == Path(resolved.anchor):
+        return True
+    if resolved == home or resolved == home.parent:
+        return True
+    return len(resolved.parts) <= 2
+
+
+def _is_broad_home_folder(path: Path) -> bool:
+    try:
+        resolved = path.expanduser().resolve(strict=False)
+        home = Path.home().resolve(strict=False)
+        relative = resolved.relative_to(home)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return len(relative.parts) == 1 and relative.parts[0] in {
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Pictures",
+        "Music",
+        "Videos",
+    }
 
 
 def _is_sensitive(path: str) -> bool:
