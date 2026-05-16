@@ -2753,6 +2753,82 @@ function _providersListHtml(providers) {
   }).join("");
 }
 
+const FolderPicker = (() => {
+  const overlay  = document.getElementById("fp-overlay");
+  const content  = document.getElementById("fp-content");
+  let _selected  = "";
+  let _onSelect  = null;
+
+  document.getElementById("fp-close").onclick  = close;
+  document.getElementById("fp-cancel").onclick = close;
+  document.getElementById("fp-confirm").onclick = () => {
+    close();
+    if (_onSelect) _onSelect(_selected);
+  };
+
+  function close() { overlay.classList.add("hidden"); }
+
+  async function render(path) {
+    let d;
+    try { d = await api.get(`/api/browse?path=${encodeURIComponent(path)}`); } catch {}
+    if (!d || typeof d !== "object") d = { ok: false, error: "Réponse invalide" };
+
+    _selected = d.path || path;
+
+    const parts = (d.path || "").split("/").filter(Boolean);
+    const crumbs = [{ label: "/", path: "/" }].concat(
+      parts.map((p, i) => ({ label: p, path: "/" + parts.slice(0, i + 1).join("/") }))
+    );
+
+    content.innerHTML = `
+      <div class="fp-crumbs">
+        ${crumbs.map((b, i) => `
+          <button class="nav-btn fp-crumb" data-path="${esc(b.path)}" style="font-size:11px;padding:2px 7px">${esc(b.label)}</button>
+          ${i < crumbs.length - 1 ? '<span style="color:var(--dim)">/</span>' : ""}
+        `).join("")}
+      </div>
+      ${d.ok === false ? `<div style="color:var(--err);font-size:12px;margin-bottom:8px">${esc(d.error || "Erreur")}</div>` : ""}
+      <div id="fp-list">
+        ${d.parent != null ? `<button class="fp-dir-btn" data-path="${esc(d.parent)}" data-enter="1" style="color:var(--dim)">↑ dossier parent</button>` : ""}
+        ${(d.dirs || []).map(name => {
+          const full = (d.path || "").replace(/\/$/, "") + "/" + name;
+          return `<button class="fp-dir-btn" data-path="${esc(full)}">📁 ${esc(name)}</button>`;
+        }).join("")}
+        ${!(d.dirs || []).length && d.ok !== false ? `<div style="padding:12px 14px;color:var(--dim);font-size:12px">Dossier vide</div>` : ""}
+      </div>
+      <div style="margin-top:12px;font-size:11px;color:var(--dim)">Sélectionné :</div>
+      <div id="fp-selected" style="font-size:12px;color:var(--accent);margin-top:4px;word-break:break-all">${esc(_selected)}</div>
+    `;
+
+    content.querySelectorAll(".fp-crumb").forEach(btn => {
+      btn.onclick = () => render(btn.dataset.path);
+    });
+    content.querySelectorAll(".fp-dir-btn").forEach(btn => {
+      if (btn.dataset.enter) { btn.onclick = () => render(btn.dataset.path); return; }
+      btn.onclick = () => {
+        _selected = btn.dataset.path;
+        document.getElementById("fp-selected").textContent = _selected;
+        content.querySelectorAll(".fp-dir-btn").forEach(b => b.classList.remove("selected"));
+        btn.classList.add("selected");
+      };
+      btn.ondblclick = () => render(btn.dataset.path);
+    });
+  }
+
+  async function open(onSelect) {
+    _onSelect = onSelect;
+    _selected = "";
+    overlay.classList.remove("hidden");
+    let startPath = "";
+    try { const h = await api.get("/api/browse?path=~"); startPath = h?.path || ""; } catch {}
+    render(startPath);
+  }
+
+  return { open };
+})();
+
+function openFolderPicker(onSelect) { FolderPicker.open(onSelect); }
+
 document.getElementById("btn-settings").onclick = async () => {
   const [cfgData, provData, rootsData] = await Promise.all([
     api.get("/api/config").catch(() => ({})),
@@ -2844,6 +2920,7 @@ document.getElementById("btn-settings").onclick = async () => {
         <div id="roots-list"></div>
         <div style="display:flex;gap:8px;margin-top:10px">
           <input class="form-input" id="roots-input" placeholder="/home/user/projets" style="flex:1">
+          <button class="nav-btn" id="roots-browse-btn" title="Parcourir" style="font-size:14px;padding:3px 9px;flex-shrink:0">📁</button>
           <button class="nav-btn" id="roots-add-btn" style="font-size:11px;padding:3px 10px;flex-shrink:0">+ Ajouter</button>
         </div>
         <div style="margin-top:5px;font-size:11px;color:var(--dim)">
@@ -3136,6 +3213,11 @@ document.getElementById("btn-settings").onclick = async () => {
       document.getElementById("roots-input").addEventListener("keydown", e => {
         if (e.key === "Enter") document.getElementById("roots-add-btn").click();
       });
+      document.getElementById("roots-browse-btn").onclick = () => {
+        openFolderPicker(path => {
+          document.getElementById("roots-input").value = path;
+        });
+      };
 
       // ── save settings ──────────────────────────────────────────────────
       document.getElementById("btn-save-settings").onclick = () => {

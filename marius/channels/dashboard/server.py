@@ -316,6 +316,10 @@ class DashboardServer:
                     self._json(_api_projects())
                 elif path == "/api/allow-roots":
                     self._json(_api_allow_roots_list())
+                elif path == "/api/browse":
+                    qs = parse_qs(parsed.query)
+                    browse_path = qs.get("path", [""])[0] or str(Path.home())
+                    self._json(_api_browse(browse_path))
                 else:
                     m = re.match(r"^/api/providers/([^/]+)/models$", path)
                     if m:
@@ -1518,6 +1522,24 @@ def _api_projects_patch(data: dict) -> tuple[bool, str]:
             "set_at": datetime.now(timezone.utc).isoformat(),
         }, indent=2, ensure_ascii=False), encoding="utf-8")
     return True, "updated"
+
+
+def _api_browse(path_str: str) -> dict:
+    """Liste les sous-dossiers d'un chemin pour le folder picker."""
+    try:
+        p = Path(path_str).expanduser().resolve()
+        if not p.is_dir():
+            p = p.parent
+        dirs = sorted(
+            [d.name for d in p.iterdir() if d.is_dir() and not d.name.startswith(".")],
+            key=str.lower,
+        )
+        parent = str(p.parent) if p != p.parent else None
+        return {"ok": True, "path": str(p), "parent": parent, "dirs": dirs}
+    except PermissionError:
+        return {"ok": False, "path": path_str, "error": "permission refusée"}
+    except Exception as exc:
+        return {"ok": False, "path": path_str, "error": str(exc)}
 
 
 def _api_allow_roots_list() -> dict:
